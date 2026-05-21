@@ -1,0 +1,26 @@
+{
+  "name": "rmssd-h10n",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Polar H10 real-time RMSSD (HRV) from RR-intervals (default) or PMD raw ECG, with live graph + CSV logging + status JSON/HTTP for external observation",
+  "main": "index.js",
+  "bin": {
+    "rmssd-h10n": "index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "simulate": "node index.js --simulate",
+    "ecg": "node index.js --ecg",
+    "vitals": "node tools/vitals.js",
+    "measure": "node tools/measure.js",
+    "scan": "node tools/scan.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@abandonware/noble": "^1.9.2-26",
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}

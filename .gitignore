@@ -1,0 +1,8 @@
+node_modules/
+
+# Runtime output (CSV logs, status JSON, captured logs) — keep the dir, ignore contents.
+data/*
+!data/.gitkeep
+
+*.log
+.DS_Store

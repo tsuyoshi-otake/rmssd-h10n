@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RMSSD · Polar H10</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      background: #0d1117; color: #e6edf3;
+    }
+    header { padding: 16px 24px; border-bottom: 1px solid #21262d; display: flex; align-items: baseline; gap: 16px; }
+    header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+    #conn { font-size: 13px; color: #8b949e; }
+    #conn.on { color: #3fb950; }
+    .cards { display: flex; gap: 16px; padding: 24px; flex-wrap: wrap; }
+    .card {
+      background: #161b22; border: 1px solid #21262d; border-radius: 12px;
+      padding: 16px 20px; min-width: 150px;
+    }
+    .card .label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: .05em; }
+    .card .value { font-size: 40px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .card .unit { font-size: 14px; color: #8b949e; font-weight: 400; margin-left: 4px; }
+    .chart-wrap { padding: 0 24px 24px; }
+    canvas { background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RMSSD · Polar H10</h1>
+    <span id="conn">接続待機中…</span>
+  </header>
+
+  <div class="cards">
+    <div class="card"><div class="label">RMSSD</div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div></div>
+    <div class="card"><div class="label">心拍数</div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div></div>
+    <div class="card"><div class="label">SDNN</div><div class="value"><span id="sdnn">–</span><span class="unit">ms</span></div></div>
+    <div class="card"><div class="label">RR (窓内)</div><div class="value"><span id="count">–</span></div></div>
+  </div>
+
+  <div class="chart-wrap"><canvas id="chart" height="110"></canvas></div>
+
+  <script>
+    const MAX_POINTS = 600; // ~ last several minutes of 1 Hz updates
+    const ctx = document.getElementById('chart');
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          { label: 'RMSSD (ms)', data: [], yAxisID: 'y', borderColor: '#58a6ff', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 2 },
+          { label: 'HR (bpm)', data: [], yAxisID: 'y1', borderColor: '#f85149', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 1.5 },
+        ],
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        interaction: { intersect: false, mode: 'index' },
+        scales: {
+          x: { ticks: { color: '#8b949e', maxTicksLimit: 8 }, grid: { color: '#21262d' } },
+          y: { position: 'left', title: { display: true, text: 'RMSSD (ms)', color: '#58a6ff' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+          y1: { position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
+        },
+        plugins: { legend: { labels: { color: '#e6edf3' } } },
+      },
+    });
+
+    const fmt = (v, d = 1) => (v == null ? '–' : Number(v).toFixed(d));
+
+    function applyStatus(s) {
+      const conn = document.getElementById('conn');
+      conn.textContent = s.connected ? '接続中 ●' : '未接続';
+      conn.className = s.connected ? 'on' : '';
+      document.getElementById('rmssd').textContent = fmt(s.rmssd);
+      document.getElementById('hr').textContent = fmt(s.hr, 0);
+      document.getElementById('sdnn').textContent = fmt(s.sdnn);
+      document.getElementById('count').textContent = s.rrCount ?? '–';
+    }
+
+    function pushPoint(p) {
+      const t = new Date(p.t).toLocaleTimeString();
+      chart.data.labels.push(t);
+      chart.data.datasets[0].data.push(p.rmssd);
+      chart.data.datasets[1].data.push(p.hr);
+      if (chart.data.labels.length > MAX_POINTS) {
+        chart.data.labels.shift();
+        chart.data.datasets.forEach((d) => d.data.shift());
+      }
+      chart.update('none');
+    }
+
+    function connect() {
+      const ws = new WebSocket(`ws://${location.host}`);
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'status') applyStatus(msg.data);
+        else if (msg.type === 'point') pushPoint(msg.data);
+      };
+      ws.onclose = () => setTimeout(connect, 1500);
+    }
+    connect();
+  </script>
+</body>
+</html>
