@@ -17,10 +17,12 @@ const { localIso } = require('./time');
 function createServer({ port = 3000, log = () => {} } = {}) {
   const app = express();
   const events = new EventEmitter();
+  app.use(express.json());
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   let latest = {
     connected: false,
+    user: 1,
     hr: null,
     rmssd: null,
     sdnn: null,
@@ -41,6 +43,17 @@ function createServer({ port = 3000, log = () => {} } = {}) {
   app.post('/api/baseline/reset', (_req, res) => {
     events.emit('baseline-reset');
     res.json({ ok: true });
+  });
+
+  // Switch the active user profile (1-5). The monitor loads that user's saved
+  // resting baseline (if recent), separates their CSV log, and recalibrates.
+  app.post('/api/user', (req, res) => {
+    const n = Number(req.body && req.body.user);
+    if (!Number.isInteger(n) || n < 1 || n > 5) {
+      return res.status(400).json({ ok: false, error: 'user must be an integer 1-5' });
+    }
+    events.emit('user-switch', n);
+    res.json({ ok: true, user: n });
   });
 
   const server = http.createServer(app);

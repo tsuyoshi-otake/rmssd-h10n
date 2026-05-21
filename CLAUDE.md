@@ -85,4 +85,4 @@ pwsh -NoProfile -Command "Get-NetTCPConnection -State Listen | Where-Object {$_.
 
 ## トレンド分析
 
-`data/rmssd-*.csv`（列: `wallClock,tMs,rr_ms,rmssd_ms,sdnn_ms,hr_bpm,rrCount,resp_brpm,resp_conf,corrected,state`）を解析。`corrected`はアーティファクト除去拍の累積。HR/RMSSDの min/avg/max と直近窓 vs 過去の差分で傾向を見る。安静時RMSSDの目安は20–50ms（高HR時は低下＝交感神経優位）。
+`data/rmssd-u<N>-*.csv`（列: `user,wallClock,tMs,rr_ms,rmssd_ms,sdnn_ms,hr_bpm,rrCount,resp_brpm,resp_conf,corrected,state`）を解析。`corrected`はアーティファクト除去拍の累積。HR/RMSSDの min/avg/max と直近窓 vs 過去の差分で傾向を見る。安静時RMSSDの目安は20–50ms（高HR時は低下＝交感神経優位）。

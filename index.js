@@ -26,7 +26,10 @@ function parseArgs(argv) {
     server: true,
     scanTimeout: 30000,
     loadBaseline: false,
-    baselineFile: path.join(__dirname, 'data', 'baseline.json'),
+    autoBaseline: false,
+    autoBaselineInterval: 15, // minutes between adaptive recomputations
+    user: 1, // active profile 1-5; baselines/CSV/dashboard history are per-user
+    csvExplicit: false, // true if --csv pinned a path (then it is not split per user)
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -34,20 +37,23 @@ function parseArgs(argv) {
       case '--port': opts.port = Number(argv[++i]); break;
       case '--window': opts.window = Number(argv[++i]); break;
       case '--name': opts.name = argv[++i]; break;
-      case '--csv': opts.csv = argv[++i]; break;
+      case '--csv': opts.csv = argv[++i]; opts.csvExplicit = true; break;
+      case '--user': opts.user = Number(argv[++i]); break;
       case '--status': opts.status = argv[++i]; break;
       case '--simulate': opts.mode = 'simulate'; break;
       case '--ecg': opts.mode = 'ecg'; break;
       case '--no-server': opts.server = false; break;
       case '--load-baseline': opts.loadBaseline = true; break;
+      case '--auto-baseline': opts.autoBaseline = true; break;
+      case '--auto-baseline-interval': opts.autoBaselineInterval = Number(argv[++i]); break;
       case '--scan-timeout': opts.scanTimeout = Number(argv[++i]); break;
       case '--help': case '-h': printHelp(); process.exit(0); break;
       default: console.error(`Unknown argument: ${a}`); printHelp(); process.exit(1);
     }
   }
-  if (!opts.csv) {
-    const ts = localIso().replace(/[:.+]/g, '-');
-    opts.csv = path.join(__dirname, 'data', `rmssd-${ts}.csv`);
+  if (!(Number.isInteger(opts.user) && opts.user >= 1 && opts.user <= 5)) {
+    console.error(`--user must be an integer 1-5 (got ${opts.user})`);
+    process.exit(1);
   }
   return opts;
 }
@@ -63,10 +69,17 @@ Usage: node index.js [options]
   --port <n>          dashboard/API port (default 3000)
   --window <sec>      RMSSD sliding-window length in seconds (default 30)
   --name <str>        device name fragment to match (default "polar")
-  --csv <path>        CSV output path (default data/rmssd-<timestamp>.csv)
+  --csv <path>        CSV output path (default data/rmssd-u<user>-<timestamp>.csv,
+                      split per user; an explicit path is used as one combined file)
+  --user <1-5>        active user profile at startup (default 1); baselines, CSV
+                      logs and dashboard history are kept separate per user
   --status <path>     live status JSON path (default data/status.json)
   --no-server         disable the web dashboard / status API
-  --load-baseline     reuse a saved resting baseline (data/baseline.json) if < 24 h old
+  --load-baseline     (kept for compatibility) the active user's saved resting
+                      baseline is now auto-reused if < 24 h old
+  --auto-baseline     keep refining the baseline from the resting cluster of the
+                      whole session as data accumulates (EMA-smoothed)
+  --auto-baseline-interval <min>  minutes between adaptive recomputations (default 15)
   --scan-timeout <ms> BLE scan timeout (default 30000)
   -h, --help          show this help`);
 }
@@ -75,8 +88,21 @@ async function main() {
   const opts = parseArgs(process.argv);
   const log = (...a) => console.log(`[${new Date().toLocaleTimeString()}]`, ...a);
 
-  const rmssdWin = new RmssdWindow({ windowMs: opts.window * 1000 });
-  const csv = new CsvLogger(opts.csv, ['wallClock', 'tMs', 'rr_ms', 'rmssd_ms', 'sdnn_ms', 'hr_bpm', 'rrCount', 'resp_brpm', 'resp_conf', 'corrected', 'state']);
+  const dataDir = path.join(__dirname, 'data');
+  const CSV_COLS = ['user', 'wallClock', 'tMs', 'rr_ms', 'rmssd_ms', 'sdnn_ms', 'hr_bpm', 'rrCount', 'resp_brpm', 'resp_conf', 'corrected', 'state'];
+  const baselineFileFor = (n) => path.join(dataDir, `baseline-u${n}.json`);
+  const adaptiveOpts = opts.autoBaseline
+    ? { intervalMs: Math.max(1, opts.autoBaselineInterval) * 60 * 1000 }
+    : null;
+  const makeBaseline = () => new Baseline({ samples: 60, adaptive: adaptiveOpts });
+  const makeCsv = (n) => new CsvLogger(
+    opts.csvExplicit ? opts.csv : path.join(dataDir, `rmssd-u${n}-${localIso().replace(/[:.+]/g, '-')}.csv`),
+    CSV_COLS,
+  );
+
+  let currentUser = opts.user;
+  let rmssdWin = new RmssdWindow({ windowMs: opts.window * 1000 });
+  let csv = makeCsv(currentUser);
   const statusFile = new StatusFile(opts.status);
 
   let connected = false;
@@ -85,23 +111,71 @@ async function main() {
   let beats = 0;
   let deviceHr = null; // HR reported directly by the device (hr-rr mode)
 
-  const baseline = new Baseline({ samples: 60 }); // ~first 60 s of settled readings
-  const classifier = new StateClassifier({ minDwellMs: 45000 }); // hysteresis
+  let baseline = makeBaseline();
+  let classifier = new StateClassifier({ minDwellMs: 45000 }); // hysteresis
   const respBuffer = []; // { tMs, rr } of artifact-cleaned NN for respiration (RSA)
   const RESP_WINDOW_MS = 120000;
   const respHistory = []; // recent { brpm, conf } estimates for temporal smoothing
   let baselineSaved = false;
+  let lastAdaptedAt = null; // tracks adaptive baseline updates for persistence/logging
 
-  // Optionally reuse a recent resting baseline so the session starts calibrated.
-  if (opts.loadBaseline) {
+  // Reuse a user's recent (< 24 h) resting baseline so a session/switch starts
+  // calibrated. Returns the loaded record, or null to recalibrate fresh.
+  function tryLoadBaseline(n) {
     try {
-      const saved = JSON.parse(fs.readFileSync(opts.baselineFile, 'utf8'));
+      const saved = JSON.parse(fs.readFileSync(baselineFileFor(n), 'utf8'));
       if (saved && Date.now() - (saved.savedAt ?? 0) < 24 * 3600 * 1000) {
         baseline.loadFrozen(saved);
-        baselineSaved = true;
-        log(`Loaded saved baseline: RMSSD ${saved.rmssd} ms, HR ${saved.hr} bpm.`);
+        return saved;
       }
     } catch (_) { /* no/invalid file -> calibrate fresh */ }
+    return null;
+  }
+
+  const loaded = tryLoadBaseline(currentUser);
+  if (loaded) {
+    baselineSaved = true;
+    log(`User ${currentUser}: loaded saved baseline RMSSD ${loaded.rmssd} ms, HR ${loaded.hr} bpm.`);
+  }
+
+  if (opts.autoBaseline) {
+    log(`Auto-baseline ON: refining the reference from resting data every ${opts.autoBaselineInterval} min once enough has accumulated.`);
+  }
+
+  // Switch the active user (1-5): persist the current reference, then start a
+  // clean session for the new wearer — fresh windows/classifier/baseline, a
+  // separate CSV, and that user's saved baseline reused if recent.
+  function switchUser(n) {
+    if (!(Number.isInteger(n) && n >= 1 && n <= 5) || n === currentUser) return;
+    const cur = baseline.get();
+    if (cur) {
+      try { fs.writeFileSync(baselineFileFor(currentUser), JSON.stringify(baseline.toJSON())); } catch (_) {}
+    }
+    log(`Switching user ${currentUser} -> ${n}.`);
+    currentUser = n;
+
+    rmssdWin = new RmssdWindow({ windowMs: opts.window * 1000 });
+    baseline = makeBaseline();
+    classifier = new StateClassifier({ minDwellMs: 45000 });
+    respBuffer.length = 0;
+    respHistory.length = 0;
+    beats = 0; lastPeakMs = null; lastRr = null; deviceHr = null;
+    baselineSaved = false; lastAdaptedAt = null;
+
+    if (!opts.csvExplicit) {
+      const old = csv;
+      csv = makeCsv(n);
+      old.close().catch(() => {});
+    }
+
+    const reused = tryLoadBaseline(n);
+    if (reused) {
+      baselineSaved = true;
+      log(`User ${n}: loaded saved baseline RMSSD ${reused.rmssd} ms, HR ${reused.hr} bpm.`);
+    } else {
+      log(`User ${n}: no recent baseline — recalibrating.`);
+    }
+    if (server) server.setStatus({ user: n });
   }
 
   let server = null;
@@ -112,8 +186,12 @@ async function main() {
     server.events.on('baseline-reset', () => {
       baseline.reset();
       respHistory.length = 0;
+      baselineSaved = false;
+      lastAdaptedAt = null;
       log('Baseline reset requested — recalibrating.');
     });
+    server.events.on('user-switch', switchUser);
+    server.setStatus({ user: currentUser });
   }
 
   // Accept one RR interval (ms) observed at session time tMs. Only artifact-
@@ -145,8 +223,15 @@ async function main() {
     if (connected) {
       baseline.add(rmssdSmoothed, hrVal);
       if (baseline.get() && !baselineSaved) {
-        try { fs.writeFileSync(opts.baselineFile, JSON.stringify(baseline.toJSON())); } catch (_) {}
+        try { fs.writeFileSync(baselineFileFor(currentUser), JSON.stringify(baseline.toJSON())); } catch (_) {}
         baselineSaved = true;
+      }
+      // Adaptive re-baselining nudged the reference: persist and report it.
+      if (baseline.adaptedAt && baseline.adaptedAt !== lastAdaptedAt) {
+        lastAdaptedAt = baseline.adaptedAt;
+        const b = baseline.get();
+        try { fs.writeFileSync(baselineFileFor(currentUser), JSON.stringify(baseline.toJSON())); } catch (_) {}
+        log(`User ${currentUser}: baseline auto-adjusted from resting data: RMSSD ${b.rmssd.toFixed(1)} ms, HR ${b.hr.toFixed(1)} bpm (rest cluster n=${b.n}).`);
       }
     }
     const base = baseline.get();
@@ -168,6 +253,7 @@ async function main() {
 
     const status = {
       connected,
+      user: currentUser,
       mode: opts.mode,
       hr: hrVal,
       rmssd: rmssdVal,
@@ -190,6 +276,7 @@ async function main() {
       server.pushPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone });
     }
     csv.write({
+      user: currentUser,
       wallClock: wall,
       tMs: Math.round(lastPeakMs ?? 0),
       rr_ms: lastRr != null ? Math.round(lastRr) : '',

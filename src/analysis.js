@@ -21,6 +21,57 @@ function median(arr) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+/** Linear-interpolated quantile (q in 0..1) over a numeric array. */
+function quantile(arr, q) {
+  if (!arr.length) return null;
+  const s = [...arr].sort((a, b) => a - b);
+  if (s.length === 1) return s[0];
+  const pos = (s.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return s[lo];
+  return s[lo] + (s[hi] - s[lo]) * (pos - lo);
+}
+
+/**
+ * One EMA step toward `target`, capped to a relative move of `maxStep` so a
+ * single update can never yank the baseline by more than e.g. 20 %.
+ */
+function emaStep(current, target, alpha, maxStep) {
+  if (current == null) return target;
+  let next = current + alpha * (target - current);
+  const maxDelta = Math.abs(current) * maxStep;
+  if (next - current > maxDelta) next = current + maxDelta;
+  else if (current - next > maxDelta) next = current - maxDelta;
+  return next;
+}
+
+/**
+ * Estimate a *resting* baseline from a whole session's accumulated samples.
+ *
+ * Averaging everything is wrong: the reference must represent rest, not the mean
+ * of all states, or the classifier loses its ability to flag stress. Rest, for
+ * HRV, is where RMSSD is high and HR is low — so we take the low-HR slice of the
+ * data (HR <= the chosen quantile) and report the median RMSSD/HR of that
+ * cluster. This generalises the per-session rest-gate to the full history.
+ *
+ * @param {{rmssd:number, hr:number}[]} samples accumulated readings
+ * @returns {{rmssd:number, hr:number, n:number}|null} null if no solid cluster
+ */
+function restClusterBaseline(samples, { hrQuantile = 0.25, minCluster = 60 } = {}) {
+  const valid = samples.filter((s) => s && s.rmssd != null && s.hr != null);
+  if (!valid.length) return null;
+  const hrThreshold = quantile(valid.map((s) => s.hr), hrQuantile);
+  if (hrThreshold == null) return null;
+  const cluster = valid.filter((s) => s.hr <= hrThreshold);
+  if (cluster.length < minCluster) return null;
+  return {
+    rmssd: median(cluster.map((s) => s.rmssd)),
+    hr: median(cluster.map((s) => s.hr)),
+    n: cluster.length,
+  };
+}
+
 /**
  * Per-session baseline: collects valid (rmssd, hr) readings after connection and
  * freezes their medians as the reference. Optionally gated so only "settled"
@@ -29,34 +80,98 @@ function median(arr) {
  * Supports JSON (de)serialisation for cross-session persistence.
  */
 class Baseline {
-  constructor({ samples = 60, restGate = true, restHrTol = 6 } = {}) {
+  constructor({ samples = 60, restGate = true, restHrTol = 6, adaptive = null } = {}) {
     this.need = samples;
     this.restGate = restGate;
     this.restHrTol = restHrTol; // bpm: how close to the recent median HR counts as "settled"
     this.rmssd = [];
     this.hr = [];
     this.recentHr = []; // short trailing buffer for the rest gate
-    this.frozen = null; // { rmssd, hr, n, savedAt }
+    this.frozen = null; // { rmssd, hr, n, savedAt, adaptedAt? }
+
+    // Optional adaptive re-baselining: once the initial baseline is frozen, keep
+    // accumulating the whole session and periodically nudge the reference toward
+    // the resting cluster of all the data so far (see restClusterBaseline). The
+    // move is EMA-smoothed and step-capped so state labels do not jump.
+    this.adaptive = adaptive
+      ? {
+          intervalMs: adaptive.intervalMs ?? 15 * 60 * 1000, // recompute cadence
+          minSamples: adaptive.minSamples ?? 30 * 60, // warm-up before first adapt (~30 min @1Hz)
+          alpha: adaptive.alpha ?? 0.3, // EMA weight toward the new estimate
+          maxStep: adaptive.maxStep ?? 0.2, // cap on relative move per update
+          histCap: adaptive.histCap ?? 6 * 60 * 60, // ring-buffer cap (~6 h @1Hz)
+          hrQuantile: adaptive.hrQuantile ?? 0.25,
+          minCluster: adaptive.minCluster ?? 60,
+        }
+      : null;
+    this.history = []; // [{rmssd, hr}] full-session buffer, only when adaptive
+    this.lastAdaptMs = 0;
+    this.adaptedAt = null; // ms timestamp of the last adaptive update, if any
   }
 
   add(rmssd, hr) {
-    if (this.frozen || rmssd == null || hr == null) return;
-    // Rest gate: skip samples taken during an HR transient (just sat down,
-    // moved, talked) so the reference reflects a settled state.
-    this.recentHr.push(hr);
-    if (this.recentHr.length > 10) this.recentHr.shift();
-    if (this.restGate && this.recentHr.length >= 5) {
-      const med = median(this.recentHr);
-      if (med != null && Math.abs(hr - med) > this.restHrTol) return;
+    if (rmssd == null || hr == null) return;
+
+    // Adaptive mode records every valid reading so the resting cluster can be
+    // recomputed from the whole session (the rest gate below only shapes the
+    // *initial* freeze; restClusterBaseline does its own low-HR selection).
+    if (this.adaptive) {
+      this.history.push({ rmssd, hr });
+      if (this.history.length > this.adaptive.histCap) this.history.shift();
     }
-    this.rmssd.push(rmssd);
-    this.hr.push(hr);
-    if (this.rmssd.length >= this.need) {
-      this.frozen = {
-        rmssd: median(this.rmssd), hr: median(this.hr),
-        n: this.rmssd.length, savedAt: Date.now(),
-      };
+
+    if (!this.frozen) {
+      // Rest gate: skip samples taken during an HR transient (just sat down,
+      // moved, talked) so the reference reflects a settled state.
+      this.recentHr.push(hr);
+      if (this.recentHr.length > 10) this.recentHr.shift();
+      let gated = false;
+      if (this.restGate && this.recentHr.length >= 5) {
+        const med = median(this.recentHr);
+        if (med != null && Math.abs(hr - med) > this.restHrTol) gated = true;
+      }
+      if (!gated) {
+        this.rmssd.push(rmssd);
+        this.hr.push(hr);
+        if (this.rmssd.length >= this.need) {
+          this.frozen = {
+            rmssd: median(this.rmssd), hr: median(this.hr),
+            n: this.rmssd.length, savedAt: Date.now(),
+          };
+        }
+      }
     }
+
+    this._maybeAdapt();
+  }
+
+  /**
+   * Periodically refine an already-frozen baseline toward the resting cluster of
+   * the whole session. EMA-smoothed and step-capped so the reference drifts
+   * gently instead of snapping. Returns true if the baseline was updated.
+   */
+  _maybeAdapt() {
+    const a = this.adaptive;
+    if (!a || !this.frozen) return false; // only refine an established baseline
+    if (this.history.length < a.minSamples) return false;
+    const now = Date.now();
+    if (this.lastAdaptMs && now - this.lastAdaptMs < a.intervalMs) return false;
+    this.lastAdaptMs = now;
+
+    const est = restClusterBaseline(this.history, {
+      hrQuantile: a.hrQuantile, minCluster: a.minCluster,
+    });
+    if (!est) return false; // no solid resting cluster yet — leave baseline as is
+
+    this.frozen = {
+      rmssd: emaStep(this.frozen.rmssd, est.rmssd, a.alpha, a.maxStep),
+      hr: emaStep(this.frozen.hr, est.hr, a.alpha, a.maxStep),
+      n: est.n,
+      savedAt: now,
+      adaptedAt: now,
+    };
+    this.adaptedAt = now;
+    return true;
   }
 
   reset() {
@@ -64,6 +179,9 @@ class Baseline {
     this.hr = [];
     this.recentHr = [];
     this.frozen = null;
+    this.history = [];
+    this.lastAdaptMs = 0;
+    this.adaptedAt = null;
   }
 
   get() {
@@ -191,4 +309,4 @@ function classifyState(rmssd, hr, base) {
   return classifyRaw(rmssd, hr, base);
 }
 
-module.exports = { Baseline, StateClassifier, classifyState, classifyRaw, median };
+module.exports = { Baseline, StateClassifier, classifyState, classifyRaw, median, quantile, restClusterBaseline, emaStep };
