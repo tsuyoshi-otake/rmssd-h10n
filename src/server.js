@@ -2,17 +2,21 @@
 
 const http = require('http');
 const path = require('path');
+const { EventEmitter } = require('events');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { localIso } = require('./time');
 
 /**
  * Live dashboard server: static graph page, a /api/status JSON endpoint (so any
- * client — including Claude Code via curl — can read the current vitals), and a
- * WebSocket feed that streams each RMSSD/HR update to connected browsers.
+ * client — including Claude Code via curl — can read the current vitals), a
+ * WebSocket feed that streams each RMSSD/HR update to connected browsers, and a
+ * small control channel (POST /api/baseline/reset) that the monitor subscribes
+ * to via the returned `events` emitter.
  */
 function createServer({ port = 3000, log = () => {} } = {}) {
   const app = express();
+  const events = new EventEmitter();
   app.use(express.static(path.join(__dirname, '..', 'public')));
 
   let latest = {
@@ -21,10 +25,23 @@ function createServer({ port = 3000, log = () => {} } = {}) {
     rmssd: null,
     sdnn: null,
     rrCount: 0,
+    baseline: null,
+    calibration: 0,
+    state: null,
+    respiration: null,
+    respirationConfidence: null,
+    respirationPreview: false,
     updatedAt: null,
   };
 
   app.get('/api/status', (_req, res) => res.json(latest));
+
+  // Control channel: re-take the resting baseline. The monitor listens on the
+  // returned `events` emitter and calls baseline.reset().
+  app.post('/api/baseline/reset', (_req, res) => {
+    events.emit('baseline-reset');
+    res.json({ ok: true });
+  });
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server });
@@ -65,6 +82,7 @@ function createServer({ port = 3000, log = () => {} } = {}) {
       resolve({
         setStatus,
         pushPoint,
+        events,
         getStatus: () => latest,
         close: () =>
           new Promise((r) => {

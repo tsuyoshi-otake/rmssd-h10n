@@ -21,9 +21,12 @@ Polar H10 ──BLE──┤
 - `src/hrm.js` — Heart Rate Measurement(0x2A37) パーサ（HR + RR-interval）
 - `src/pmd.js` — PMD サービス UUID、ECG 開始コマンド、ECG フレームパーサ（`--ecg` 用）
 - `src/qrs.js` — ストリーミング R 波検出（簡略 Pan-Tompkins, `--ecg` 用）
-- `src/rmssd.js` — 時間窓 RMSSD / SDNN / HR、アーティファクト除去
-- `src/ble.js` — noble による H10 スキャン・接続・characteristic 取得
-- `src/server.js` — express 静的配信 + WebSocket + `/api/status`
+- `src/rmssd.js` — 時間窓 RMSSD / SDNN / HR、local-median + dRR アーティファクト除去、RMSSD の EMA 平滑値
+- `src/analysis.js` — baseline（安静ゲート付き・JSON 永続化）+ 自律神経状態（lnRMSSD + ヒステリシス）推定
+- `src/respiration.js` — RSA による呼吸数推定（RR→4Hz補間→2次detrend→Welch PSD→探索帯ピーク、SNRベース信号品質）
+- `src/ble.js` — noble による H10 スキャン・接続・characteristic 取得・タイムアウト付き切断
+- `src/server.js` — express 静的配信 + WebSocket + `/api/status` + `POST /api/baseline/reset`
+- `src/time.js` — JST オフセット付き ISO タイムスタンプ（`localIso()`）
 - `src/csv.js` / `src/statusfile.js` — CSV ロガー / status.json アトミック書き込み
 - `index.js` — 全体統合・CLI・1Hz レポートループ
 - `tools/` — 診断・観測用の補助スクリプト（下記）
@@ -50,6 +53,9 @@ node index.js --ecg
 
 # 主なオプション
 node index.js --window 60 --port 3000 --csv data/run.csv
+
+# 直近(24h以内)の安静baselineを再利用して開始
+node index.js --load-baseline
 ```
 
 - ダッシュボード: <http://localhost:3000>
@@ -81,11 +87,42 @@ cat data/status.json
   "rrCount": 23,
   "beatsTotal": 23,
   "rejected": 0,
+  "rmssdSmoothed": 4.6,
+  "corrected": 2,
+  "baseline": { "rmssd": 41.2, "hr": 62.0 },
+  "calibration": 1,
+  "state": { "label": "集中", "tone": "focus", "arousal": 64, "detail": "軽い覚醒。タスクに没頭しているフロー寄りの状態。" },
+  "respiration": 15.2,
+  "respirationConfidence": 0.71,
+  "respirationPreview": false,
   "updatedAt": "2026-05-21T20:44:48.000+09:00"
 }
 ```
 
 > タイムスタンプ（`updatedAt`・CSVの`wallClock`）は **JST オフセット付き ISO-8601**（`+09:00`）で記録される。
+
+## 解析（baseline・状態推定・呼吸数）
+
+- **baseline（基準値）**: 接続後の最初の約60サンプル（≈1分）の RMSSD(EMA平滑値)/HR の中央値を確定（`src/analysis.js`）。**安静ゲート**により直近HR中央値から大きく外れる読み（装着直後・会話・動作の過渡）は採用せず、安静寄りの基準にする。`calibration` は 0→1 の確定進捗。確定した baseline は `data/baseline.json` に保存され、`--load-baseline` で24h以内のものを再利用できる。ダッシュボードの「**安静で基準を取り直す**」ボタン（`POST /api/baseline/reset`）でいつでも再キャリブレーション可能。
+- **状態（気分）推定**: HR と RMSSD の基準値からの **lnRMSSD 差分 + HR 差分**（デッドバンド付き）で自律神経の状態を分類（`state.label` / `state.tone` / `arousal` 0–100）。区分: リラックス・回復 / 回復傾向 / 平常・安定 / 集中 / ストレス・緊張↑ / 高負荷・興奮。**45秒のヒステリシス**でラベルのバタつきを抑制し、判定にはRMSSDのEMA平滑値を使う。**心拍変動からの推定であり医療・心理診断ではない**。
+- **呼吸数（RSA）**: RR間隔の揺らぎ（呼吸性洞性不整脈）を **Welch PSD**（60秒窓・50%オーバーラップ平均）で解析し、探索帯 0.10–0.50Hz（6–30回/分）のスペクトルピークから推定（`src/respiration.js`）。`respirationConfidence` は `ピーク/ノイズフロア(中央値)` の SNR とピーク鋭さを合成した **信号品質**（確率ではない）。約30–60秒は `respirationPreview=true`（暫定値）、60秒以上で正規値。直近の推定を中央値で時間平滑する。低RMSSD（弱RSA）では信号品質が低く出るのが正しい挙動。
+
+### タイムライン（装着・起動後の目安）
+| 段階 | 目安 |
+|---|---|
+| RMSSD/HR 表示開始（計測待ち解消） | 接続後 約1–2秒 |
+| 呼吸数 暫定表示（preview） | 約30秒 |
+| 呼吸数 正規表示 | 約60秒 |
+| baseline 確定（状態・基準比が出る） | 約60秒 |
+
+## ダッシュボードの機能
+
+- 状態カード（色インジケータ＋ラベル＋覚醒度バー）、RMSSD/HR の基準比 ▲▼、呼吸数（信号品質%・暫定表示）、SDNN、RR窓内、RMSSD/HR/呼吸の二軸＋補助軸リアルタイムグラフ。
+- **長期トレンド（15分平均）グラフ**: RMSSD/HR/呼吸の15分平均を別グラフで表示。詳細グラフ（1秒間隔・約1時間）とは独立に **localStorage に永続化**（`rmssd-h10n.trend.v1`、最大1500区間≒約15日）され、日をまたいで蓄積する。
+- **状態（気分）カラー帯**: 両グラフの背景を状態のトーンで塗り分け（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）。WSの各点に状態トーンを乗せて描画する。機能追加前に記録された過去データは、保存済みの RMSSD/HR を baseline と照合して**状態を遡って再計算**し帯を復元する（現在のbaselineを当てはめた近似で、ヒステリシスは未適用）。
+- **「安静で基準を取り直す」ボタン**で、今を安静としてbaselineを再計測。
+- **履歴は localStorage に保存**（詳細 `rmssd-h10n.history.v1` 最大約3600点／1時間相当 + 長期トレンド）。再読み込みしても復元される。
+- **「履歴をクリア」ボタン**で詳細・長期トレンド両方の保存履歴を消去できる（CSV/サーバ側の記録には影響しない）。
 
 ## CLI ワンショット計測（生成AI / プログラム連携向け）
 
@@ -143,7 +180,9 @@ node tools/shutdown-test.js   # server.close()がWS接続中でも解決する�
 
 ## CSV 列
 
-`wallClock, tMs, rr_ms, rmssd_ms, sdnn_ms, hr_bpm, rrCount`
+`wallClock, tMs, rr_ms, rmssd_ms, sdnn_ms, hr_bpm, rrCount, resp_brpm, resp_conf, corrected, state`
+
+（`resp_conf` = 呼吸数の信号品質、`corrected` = アーティファクト除去拍の累積）
 
 ## 既知の問題・トラブルシュート
 

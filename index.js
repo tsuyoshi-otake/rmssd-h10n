@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const pmd = require('./src/pmd');
 const { parseHrm } = require('./src/hrm');
 const { localIso } = require('./src/time');
+const { Baseline, StateClassifier } = require('./src/analysis');
+const { estimateRespiration } = require('./src/respiration');
+const { median } = require('./src/rmssd');
 const { QRSDetector } = require('./src/qrs');
 const { RmssdWindow } = require('./src/rmssd');
 const { CsvLogger } = require('./src/csv');
@@ -21,6 +25,8 @@ function parseArgs(argv) {
     mode: 'hr-rr', // 'hr-rr' (default, robust) | 'ecg' (PMD raw, experimental) | 'simulate'
     server: true,
     scanTimeout: 30000,
+    loadBaseline: false,
+    baselineFile: path.join(__dirname, 'data', 'baseline.json'),
   };
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
@@ -33,6 +39,7 @@ function parseArgs(argv) {
       case '--simulate': opts.mode = 'simulate'; break;
       case '--ecg': opts.mode = 'ecg'; break;
       case '--no-server': opts.server = false; break;
+      case '--load-baseline': opts.loadBaseline = true; break;
       case '--scan-timeout': opts.scanTimeout = Number(argv[++i]); break;
       case '--help': case '-h': printHelp(); process.exit(0); break;
       default: console.error(`Unknown argument: ${a}`); printHelp(); process.exit(1);
@@ -59,6 +66,7 @@ Usage: node index.js [options]
   --csv <path>        CSV output path (default data/rmssd-<timestamp>.csv)
   --status <path>     live status JSON path (default data/status.json)
   --no-server         disable the web dashboard / status API
+  --load-baseline     reuse a saved resting baseline (data/baseline.json) if < 24 h old
   --scan-timeout <ms> BLE scan timeout (default 30000)
   -h, --help          show this help`);
 }
@@ -68,7 +76,7 @@ async function main() {
   const log = (...a) => console.log(`[${new Date().toLocaleTimeString()}]`, ...a);
 
   const rmssdWin = new RmssdWindow({ windowMs: opts.window * 1000 });
-  const csv = new CsvLogger(opts.csv, ['wallClock', 'tMs', 'rr_ms', 'rmssd_ms', 'sdnn_ms', 'hr_bpm', 'rrCount']);
+  const csv = new CsvLogger(opts.csv, ['wallClock', 'tMs', 'rr_ms', 'rmssd_ms', 'sdnn_ms', 'hr_bpm', 'rrCount', 'resp_brpm', 'resp_conf', 'corrected', 'state']);
   const statusFile = new StatusFile(opts.status);
 
   let connected = false;
@@ -77,36 +85,109 @@ async function main() {
   let beats = 0;
   let deviceHr = null; // HR reported directly by the device (hr-rr mode)
 
+  const baseline = new Baseline({ samples: 60 }); // ~first 60 s of settled readings
+  const classifier = new StateClassifier({ minDwellMs: 45000 }); // hysteresis
+  const respBuffer = []; // { tMs, rr } of artifact-cleaned NN for respiration (RSA)
+  const RESP_WINDOW_MS = 120000;
+  const respHistory = []; // recent { brpm, conf } estimates for temporal smoothing
+  let baselineSaved = false;
+
+  // Optionally reuse a recent resting baseline so the session starts calibrated.
+  if (opts.loadBaseline) {
+    try {
+      const saved = JSON.parse(fs.readFileSync(opts.baselineFile, 'utf8'));
+      if (saved && Date.now() - (saved.savedAt ?? 0) < 24 * 3600 * 1000) {
+        baseline.loadFrozen(saved);
+        baselineSaved = true;
+        log(`Loaded saved baseline: RMSSD ${saved.rmssd} ms, HR ${saved.hr} bpm.`);
+      }
+    } catch (_) { /* no/invalid file -> calibrate fresh */ }
+  }
+
   let server = null;
   if (opts.server) server = await createServer({ port: opts.port, log });
 
-  // Accept one RR interval (ms) observed at session time tMs.
+  // Dashboard "re-take resting baseline" button -> recalibrate from now.
+  if (server) {
+    server.events.on('baseline-reset', () => {
+      baseline.reset();
+      respHistory.length = 0;
+      log('Baseline reset requested — recalibrating.');
+    });
+  }
+
+  // Accept one RR interval (ms) observed at session time tMs. Only artifact-
+  // accepted (NN) beats feed the respiration buffer, so a single ectopic/missed
+  // beat cannot corrupt the RSA spectrum.
   function handleRR(tMs, rr) {
     beats++;
     lastRr = rr;
-    rmssdWin.add(tMs, rr);
+    const accepted = rmssdWin.add(tMs, rr);
+    if (accepted) {
+      respBuffer.push({ tMs, rr });
+      const cutoff = tMs - RESP_WINDOW_MS;
+      while (respBuffer.length && respBuffer[0].tMs < cutoff) respBuffer.shift();
+    }
   }
 
   // 1 Hz reporting loop: compute window stats, publish to file/server/console/CSV.
   const reportTimer = setInterval(() => {
-    const { rmssd, hr, sdnn, count } = rmssdWin.compute(lastPeakMs ?? undefined);
+    const { rmssd, rmssdEma, hr, sdnn, count, corrected } = rmssdWin.compute(lastPeakMs ?? undefined);
     const wall = localIso();
     const effHr = deviceHr != null ? deviceHr : hr;
+
+    const rmssdVal = rmssd != null ? Number(rmssd.toFixed(1)) : null;
+    const rmssdSmoothed = rmssdEma != null ? Number(rmssdEma.toFixed(1)) : null;
+    const hrVal = effHr != null ? Number(effHr.toFixed(1)) : null;
+
+    // Baseline (settled readings) and autonomic-state estimate. The classifier
+    // reads the SMOOTHED RMSSD so the label does not chase per-second noise.
+    if (connected) {
+      baseline.add(rmssdSmoothed, hrVal);
+      if (baseline.get() && !baselineSaved) {
+        try { fs.writeFileSync(opts.baselineFile, JSON.stringify(baseline.toJSON())); } catch (_) {}
+        baselineSaved = true;
+      }
+    }
+    const base = baseline.get();
+    const state = classifier.update(rmssdSmoothed, hrVal, base, Date.now());
+
+    // Respiration rate via RSA, smoothed across recent estimates (median of the
+    // last few valid/preview windows) to suppress 1 Hz jitter.
+    const resp = estimateRespiration(respBuffer);
+    let respOut = null, respConf = null, respPreview = false;
+    if (resp && (resp.valid || resp.preview)) {
+      respHistory.push({ brpm: resp.breathsPerMin, conf: resp.confidence });
+      if (respHistory.length > 5) respHistory.shift();
+      respOut = Number(median(respHistory.map((e) => e.brpm)).toFixed(1));
+      respConf = Number(median(respHistory.map((e) => e.conf)).toFixed(2));
+      respPreview = resp.preview;
+    } else {
+      respHistory.length = 0;
+    }
 
     const status = {
       connected,
       mode: opts.mode,
-      hr: effHr != null ? Number(effHr.toFixed(1)) : null,
-      rmssd: rmssd != null ? Number(rmssd.toFixed(1)) : null,
+      hr: hrVal,
+      rmssd: rmssdVal,
+      rmssdSmoothed,
       sdnn: sdnn != null ? Number(sdnn.toFixed(1)) : null,
       rrCount: count,
       beatsTotal: beats,
       rejected: rmssdWin.rejected,
+      corrected,
+      baseline: base ? { rmssd: Number(base.rmssd.toFixed(1)), hr: Number(base.hr.toFixed(1)) } : null,
+      calibration: Number(baseline.progress().toFixed(2)),
+      state,
+      respiration: respOut,
+      respirationConfidence: respConf,
+      respirationPreview: respPreview,
     };
     statusFile.write(status);
     if (server) {
       server.setStatus(status);
-      server.pushPoint({ t: wall, rmssd: status.rmssd, hr: status.hr });
+      server.pushPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone });
     }
     csv.write({
       wallClock: wall,
@@ -116,11 +197,16 @@ async function main() {
       sdnn_ms: status.sdnn ?? '',
       hr_bpm: status.hr ?? '',
       rrCount: count,
+      resp_brpm: status.respiration ?? '',
+      resp_conf: status.respirationConfidence ?? '',
+      corrected,
+      state: state.label,
     });
 
     const r = status.rmssd != null ? `${status.rmssd} ms` : '–';
     const h = status.hr != null ? `${status.hr} bpm` : '–';
-    log(`RMSSD ${r}  HR ${h}  (RR in window: ${count}, total beats: ${beats})`);
+    const br = status.respiration != null ? `${status.respiration} br/min${respPreview ? '?' : ''}` : '–';
+    log(`RMSSD ${r}  HR ${h}  resp ${br}  [${state.label}]  (RR ${count}, beats ${beats})`);
   }, 1000);
 
   // Cleanup handles populated by the active source.

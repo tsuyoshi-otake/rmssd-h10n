@@ -12,85 +12,448 @@
       margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       background: #0d1117; color: #e6edf3;
     }
-    header { padding: 16px 24px; border-bottom: 1px solid #21262d; display: flex; align-items: baseline; gap: 16px; }
+    header { padding: 16px 24px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
     header h1 { font-size: 18px; margin: 0; font-weight: 600; }
     #conn { font-size: 13px; color: #8b949e; }
     #conn.on { color: #3fb950; }
-    .cards { display: flex; gap: 16px; padding: 24px; flex-wrap: wrap; }
+    #calib { font-size: 13px; color: #d29922; }
+    .spacer { flex: 1; }
+    button {
+      font: inherit; font-size: 13px; color: #e6edf3; background: #21262d;
+      border: 1px solid #30363d; border-radius: 8px; padding: 6px 14px; cursor: pointer;
+    }
+    button:hover { background: #30363d; }
+    .wrap { padding: 24px; }
+
+    .state {
+      display: flex; align-items: center; gap: 18px;
+      background: #161b22; border: 1px solid #21262d; border-left: 5px solid #8b949e;
+      border-radius: 14px; padding: 18px 22px; margin-bottom: 16px;
+    }
+    .state .ind { width: 14px; height: 14px; border-radius: 50%; background: #8b949e; flex: none; }
+    .state .body { flex: 1; }
+    .state .label { font-size: 24px; font-weight: 700; }
+    .state .detail { font-size: 13px; color: #8b949e; margin-top: 4px; }
+    .arousal { margin-top: 10px; }
+    .arousal .track { height: 8px; background: #21262d; border-radius: 5px; overflow: hidden; }
+    .arousal .fill { height: 100%; width: 0; border-radius: 5px; transition: width .4s ease; background: #58a6ff; }
+    .arousal .scale { display: flex; justify-content: space-between; font-size: 11px; color: #6e7681; margin-top: 3px; }
+
+    .state.calm    { border-left-color: #3fb950; } .state.calm .fill    { background: #3fb950; } .state.calm .ind    { background: #3fb950; }
+    .state.recover { border-left-color: #56d364; } .state.recover .fill { background: #56d364; } .state.recover .ind { background: #56d364; }
+    .state.neutral { border-left-color: #58a6ff; } .state.neutral .fill { background: #58a6ff; } .state.neutral .ind { background: #58a6ff; }
+    .state.focus   { border-left-color: #2dd4bf; } .state.focus .fill   { background: #2dd4bf; } .state.focus .ind   { background: #2dd4bf; }
+    .state.tense   { border-left-color: #d29922; } .state.tense .fill   { background: #d29922; } .state.tense .ind   { background: #d29922; }
+    .state.high    { border-left-color: #f85149; } .state.high .fill    { background: #f85149; } .state.high .ind    { background: #f85149; }
+    .state.wait    { border-left-color: #6e7681; } .state.wait .fill    { background: #6e7681; } .state.wait .ind    { background: #6e7681; }
+
+    .cards { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
     .card {
       background: #161b22; border: 1px solid #21262d; border-radius: 12px;
-      padding: 16px 20px; min-width: 150px;
+      padding: 14px 18px; min-width: 140px;
     }
     .card .label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: .05em; }
-    .card .value { font-size: 40px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
-    .card .unit { font-size: 14px; color: #8b949e; font-weight: 400; margin-left: 4px; }
-    .chart-wrap { padding: 0 24px 24px; }
+    .card .value { font-size: 36px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .card .unit { font-size: 13px; color: #8b949e; font-weight: 400; margin-left: 4px; }
+    .card .base { font-size: 12px; color: #6e7681; margin-top: 4px; min-height: 16px; }
+    .delta.up { color: #f85149; } .delta.down { color: #3fb950; }
     canvas { background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 12px; }
+    .section { display: flex; align-items: baseline; gap: 12px; margin: 22px 2px 8px; }
+    .section-title { font-size: 14px; font-weight: 600; color: #e6edf3; }
+    .note { font-size: 11px; color: #6e7681; margin-top: 10px; }
   </style>
 </head>
 <body>
   <header>
     <h1>RMSSD · Polar H10</h1>
     <span id="conn">接続待機中…</span>
+    <span id="calib"></span>
+    <span class="spacer"></span>
+    <span id="histInfo" style="font-size:12px;color:#6e7681"></span>
+    <button id="recalibBtn" title="今を安静として基準値を取り直す">安静で基準を取り直す</button>
+    <button id="clearBtn" title="保存した履歴を消去">履歴をクリア</button>
   </header>
 
-  <div class="cards">
-    <div class="card"><div class="label">RMSSD</div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div></div>
-    <div class="card"><div class="label">心拍数</div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div></div>
-    <div class="card"><div class="label">SDNN</div><div class="value"><span id="sdnn">–</span><span class="unit">ms</span></div></div>
-    <div class="card"><div class="label">RR (窓内)</div><div class="value"><span id="count">–</span></div></div>
+  <div class="wrap">
+    <div class="state wait" id="stateCard">
+      <div class="ind" id="stateInd"></div>
+      <div class="body">
+        <div class="label" id="stateLabel">計測待ち</div>
+        <div class="detail" id="stateDetail">心拍データを待っています</div>
+        <div class="arousal">
+          <div class="track"><div class="fill" id="arousalFill"></div></div>
+          <div class="scale"><span>リラックス</span><span>覚醒度</span><span>興奮</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="cards">
+      <div class="card"><div class="label">RMSSD</div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div><div class="base" id="rmssdBase"></div></div>
+      <div class="card"><div class="label">心拍数</div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div><div class="base" id="hrBase"></div></div>
+      <div class="card"><div class="label">呼吸数</div><div class="value"><span id="resp">–</span><span class="unit">br/min</span></div><div class="base" id="respBase"></div></div>
+      <div class="card"><div class="label">SDNN</div><div class="value"><span id="sdnn">–</span><span class="unit">ms</span></div><div class="base"></div></div>
+      <div class="card"><div class="label">RR (窓内)</div><div class="value"><span id="count">–</span></div><div class="base"></div></div>
+    </div>
+
+    <canvas id="chart" height="100"></canvas>
+
+    <div class="section">
+      <span class="section-title">長期トレンド（15分平均）</span>
+      <span id="trendInfo" style="font-size:12px;color:#6e7681"></span>
+    </div>
+    <canvas id="trendChart" height="80"></canvas>
+
+    <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。上のグラフは直近約1時間の詳細（1秒間隔）、下のグラフは15分平均の長期トレンドで、どちらもこのブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。</div>
   </div>
 
-  <div class="chart-wrap"><canvas id="chart" height="110"></canvas></div>
-
   <script>
-    const MAX_POINTS = 600; // ~ last several minutes of 1 Hz updates
+    const STORAGE_KEY = 'rmssd-h10n.history.v1';
+    const MAX_POINTS = 3600;          // ~1h at 1 Hz
+    const SAVE_EVERY_MS = 3000;       // throttle localStorage writes
+
+    // ---- history persistence (localStorage) ----
+    let history = loadHistory();      // [{ t, rmssd, hr, resp }]
+    let lastSaved = 0;
+
+    function loadHistory() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        const arr = raw ? JSON.parse(raw) : [];
+        return Array.isArray(arr) ? arr.slice(-MAX_POINTS) : [];
+      } catch (_) { return []; }
+    }
+    function saveHistory(force) {
+      const now = Date.now();
+      if (!force && now - lastSaved < SAVE_EVERY_MS) return;
+      lastSaved = now;
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(history)); } catch (_) {}
+    }
+    function updateHistInfo() {
+      document.getElementById('histInfo').textContent =
+        history.length ? `履歴 ${history.length} 点` : '';
+    }
+
+    // ---- state band (autonomic state painted behind the lines, over time) ----
+    const STATE_COLORS = {
+      calm: '#3fb950', recover: '#56d364', neutral: '#58a6ff',
+      focus: '#2dd4bf', tense: '#d29922', high: '#f85149', wait: '#6e7681',
+    };
+
+    // Client mirror of analysis.classifyRaw (lnRMSSD + HR deltas), used ONLY to
+    // back-fill the state band for historical points recorded before the tone
+    // was streamed. Live points carry their own tone (with server hysteresis).
+    const LN = { up: Math.log(1.25), upSlight: Math.log(1.1), drop: Math.log(0.8), bigDrop: Math.log(0.55) };
+    function toneFromVitals(rmssd, hr, base) {
+      if (rmssd == null || hr == null || !base || !base.rmssd) return null;
+      const dLn = (base.rmssd > 0 && rmssd > 0) ? Math.log(rmssd / base.rmssd) : 0;
+      const hrDelta = hr - base.hr;
+      if (hrDelta >= 12 || dLn <= LN.bigDrop) return 'high';
+      if (dLn <= LN.drop && hrDelta >= 5) return 'tense';
+      if (hrDelta >= 4 && dLn <= LN.upSlight) return 'focus';
+      if (dLn >= LN.up && hrDelta <= -2) return 'calm';
+      if (dLn >= LN.upSlight && hrDelta <= 2) return 'recover';
+      return 'neutral';
+    }
+    const toneOf = (p, base) => p.tone || toneFromVitals(p.rmssd, p.hr, base);
+    let curBaseline = null;     // latest baseline, for back-filling past tones
+    let lastBaselineKey = '';
+    const stateBandPlugin = {
+      id: 'stateBand',
+      beforeDatasetsDraw(chart) {
+        const tones = chart.$tones;
+        if (!tones || !tones.length) return;
+        const { ctx, chartArea: area, scales: { x } } = chart;
+        ctx.save();
+        ctx.globalAlpha = 0.14;
+        for (let i = 0; i < tones.length; i++) {
+          const col = STATE_COLORS[tones[i]];
+          if (!col) continue;
+          const cx = x.getPixelForValue(i);
+          const prev = i > 0 ? x.getPixelForValue(i - 1) : area.left;
+          const next = i < tones.length - 1 ? x.getPixelForValue(i + 1) : area.right;
+          const l = i === 0 ? area.left : (prev + cx) / 2;
+          const r = i === tones.length - 1 ? area.right : (cx + next) / 2;
+          ctx.fillStyle = col;
+          ctx.fillRect(l, area.top, Math.max(1, r - l), area.bottom - area.top);
+        }
+        ctx.restore();
+      },
+    };
+
+    // ---- chart ----
     const ctx = document.getElementById('chart');
     const chart = new Chart(ctx, {
       type: 'line',
+      plugins: [stateBandPlugin],
       data: {
         labels: [],
         datasets: [
           { label: 'RMSSD (ms)', data: [], yAxisID: 'y', borderColor: '#58a6ff', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 2 },
           { label: 'HR (bpm)', data: [], yAxisID: 'y1', borderColor: '#f85149', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 1.5 },
+          { label: '呼吸 (br/min)', data: [], yAxisID: 'y2', borderColor: '#2dd4bf', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 1.5, borderDash: [4, 3] },
         ],
       },
       options: {
-        animation: false,
-        responsive: true,
+        animation: false, responsive: true,
         interaction: { intersect: false, mode: 'index' },
         scales: {
           x: { ticks: { color: '#8b949e', maxTicksLimit: 8 }, grid: { color: '#21262d' } },
           y: { position: 'left', title: { display: true, text: 'RMSSD (ms)', color: '#58a6ff' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
           y1: { position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
+          y2: { display: false, min: 5, max: 30 },
         },
         plugins: { legend: { labels: { color: '#e6edf3' } } },
       },
     });
 
+    const trendChart = new Chart(document.getElementById('trendChart'), {
+      type: 'line',
+      plugins: [stateBandPlugin],
+      data: {
+        labels: [],
+        datasets: [
+          { label: 'RMSSD (ms)', data: [], yAxisID: 'y', borderColor: '#58a6ff', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 2 },
+          { label: 'HR (bpm)', data: [], yAxisID: 'y1', borderColor: '#f85149', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 1.5 },
+          { label: '呼吸 (br/min)', data: [], yAxisID: 'y2', borderColor: '#2dd4bf', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 1.5, borderDash: [4, 3], spanGaps: true },
+        ],
+      },
+      options: {
+        animation: false, responsive: true,
+        interaction: { intersect: false, mode: 'index' },
+        scales: {
+          x: { ticks: { color: '#8b949e', maxTicksLimit: 10 }, grid: { color: '#21262d' } },
+          y: { position: 'left', title: { display: true, text: 'RMSSD (ms)', color: '#58a6ff' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+          y1: { position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
+          y2: { display: false, min: 5, max: 30 },
+        },
+        plugins: { legend: { labels: { color: '#e6edf3' } } },
+      },
+    });
+
+    function redrawFromHistory() {
+      chart.data.labels = history.map((p) => new Date(p.t).toLocaleTimeString('ja-JP'));
+      chart.data.datasets[0].data = history.map((p) => p.rmssd);
+      chart.data.datasets[1].data = history.map((p) => p.hr);
+      chart.data.datasets[2].data = history.map((p) => p.resp);
+      chart.$tones = history.map((p) => toneOf(p, curBaseline));
+      chart.update('none');
+      updateHistInfo();
+    }
+
+    // ---- long-term trend (15-min averages, persisted separately) ----
+    const TREND_KEY = 'rmssd-h10n.trend.v1';
+    const TREND_BUCKET_MS = 15 * 60 * 1000;
+    const MAX_TREND = 1500;           // ~15.6 days of 15-min buckets
+
+    let trend = loadTrend();          // [{ t, hr, rmssd, resp, n }] finalized buckets
+    let liveBucket = null;            // accumulator for the in-progress bucket
+    let lastTrendSaved = 0;
+
+    function loadTrend() {
+      try {
+        const a = JSON.parse(localStorage.getItem(TREND_KEY) || '[]');
+        return Array.isArray(a) ? a.slice(-MAX_TREND) : [];
+      } catch (_) { return []; }
+    }
+    function saveTrend(force) {
+      const now = Date.now();
+      if (!force && now - lastTrendSaved < SAVE_EVERY_MS) return;
+      lastTrendSaved = now;
+      try { localStorage.setItem(TREND_KEY, JSON.stringify(trend)); } catch (_) {}
+    }
+    const bucketStartOf = (tms) => Math.floor(tms / TREND_BUCKET_MS) * TREND_BUCKET_MS;
+    const newBucket = (start) => ({ start, hrSum: 0, hrN: 0, rmssdSum: 0, rmssdN: 0, respSum: 0, respN: 0, tones: {} });
+    function accBucket(b, p) {
+      if (p.hr != null) { b.hrSum += p.hr; b.hrN++; }
+      if (p.rmssd != null) { b.rmssdSum += p.rmssd; b.rmssdN++; }
+      if (p.resp != null) { b.respSum += p.resp; b.respN++; }
+      if (p.tone) b.tones[p.tone] = (b.tones[p.tone] || 0) + 1;
+    }
+    const dominantTone = (counts) => {
+      const e = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]);
+      return e.length ? e[0][0] : null;
+    };
+    const finalizeBucket = (b) => ({
+      t: b.start,
+      hr: b.hrN ? +(b.hrSum / b.hrN).toFixed(1) : null,
+      rmssd: b.rmssdN ? +(b.rmssdSum / b.rmssdN).toFixed(1) : null,
+      resp: b.respN ? +(b.respSum / b.respN).toFixed(1) : null,
+      tone: dominantTone(b.tones),
+      n: b.hrN,
+    });
+    const fmtBucketLabel = (tms) =>
+      new Date(tms).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+    // Rebuild trend from the detail history on load: finalise past buckets not
+    // already stored, and reconstruct the current (open) bucket accumulator.
+    function rebuildTrendFromHistory() {
+      const lastT = trend.length ? trend[trend.length - 1].t : -Infinity;
+      const nowBucket = bucketStartOf(Date.now());
+      const acc = new Map();
+      for (const p of history) {
+        const bs = bucketStartOf(new Date(p.t).getTime());
+        if (bs <= lastT) continue;        // already finalised in the trend store
+        if (!acc.has(bs)) acc.set(bs, newBucket(bs));
+        accBucket(acc.get(bs), p);
+      }
+      for (const bs of [...acc.keys()].sort((a, b) => a - b)) {
+        if (bs === nowBucket) liveBucket = acc.get(bs);
+        else trend.push(finalizeBucket(acc.get(bs)));
+      }
+      if (trend.length > MAX_TREND) trend = trend.slice(-MAX_TREND);
+    }
+
+    function trendSeries() {
+      const all = trend.slice();
+      if (liveBucket && (liveBucket.hrN || liveBucket.rmssdN)) all.push(finalizeBucket(liveBucket));
+      return all;
+    }
+    function redrawTrend() {
+      const s = trendSeries();
+      trendChart.data.labels = s.map((b) => fmtBucketLabel(b.t));
+      trendChart.data.datasets[0].data = s.map((b) => b.rmssd);
+      trendChart.data.datasets[1].data = s.map((b) => b.hr);
+      trendChart.data.datasets[2].data = s.map((b) => b.resp);
+      trendChart.$tones = s.map((b) => b.tone);
+      trendChart.update('none');
+      document.getElementById('trendInfo').textContent = s.length ? `${s.length} 区間 / 15分` : '';
+    }
+
+    // Fold one live point into the trend, finalising the previous bucket on roll-over.
+    function feedTrend(p) {
+      const bs = bucketStartOf(new Date(p.t).getTime());
+      if (!liveBucket) liveBucket = newBucket(bs);
+      if (bs !== liveBucket.start) {
+        if (bs > liveBucket.start && (liveBucket.hrN || liveBucket.rmssdN)) {
+          trend.push(finalizeBucket(liveBucket));
+          if (trend.length > MAX_TREND) trend.shift();
+          saveTrend(true);
+        }
+        liveBucket = newBucket(bs);
+      }
+      accBucket(liveBucket, p);
+      redrawTrend();
+      saveTrend(false);
+    }
+
+    // Back-fill state bands for historical data once a baseline is known: the
+    // detail history keeps RMSSD/HR per point, so past tones can be recomputed,
+    // and trend buckets still within the retained history get a dominant tone.
+    function recomputeTrendTones() {
+      const acc = new Map();
+      for (const p of history) {
+        const t = toneOf(p, curBaseline);
+        if (!t) continue;
+        const bs = bucketStartOf(new Date(p.t).getTime());
+        if (!acc.has(bs)) acc.set(bs, {});
+        const m = acc.get(bs); m[t] = (m[t] || 0) + 1;
+      }
+      for (const b of trend) if (!b.tone && acc.has(b.t)) b.tone = dominantTone(acc.get(b.t));
+      if (liveBucket && acc.has(liveBucket.start)) liveBucket.tones = acc.get(liveBucket.start);
+    }
+    function refreshBands() {
+      chart.$tones = history.map((p) => toneOf(p, curBaseline));
+      chart.update('none');
+      recomputeTrendTones();
+      redrawTrend();
+      saveTrend(true);
+    }
+
     const fmt = (v, d = 1) => (v == null ? '–' : Number(v).toFixed(d));
+
+    function deltaHtml(cur, base, unit) {
+      if (cur == null || base == null) return '基準 –';
+      const d = cur - base;
+      const arrow = d > 0 ? '▲' : d < 0 ? '▼' : '＝';
+      const cls = d > 0 ? 'up' : d < 0 ? 'down' : '';
+      const sign = d > 0 ? '+' : '';
+      return `基準 ${fmt(base)}${unit} <span class="delta ${cls}">${arrow} ${sign}${fmt(d)}</span>`;
+    }
 
     function applyStatus(s) {
       const conn = document.getElementById('conn');
       conn.textContent = s.connected ? '接続中 ●' : '未接続';
       conn.className = s.connected ? 'on' : '';
+
+      const calib = document.getElementById('calib');
+      calib.textContent = (s.connected && s.calibration != null && s.calibration < 1)
+        ? `基準値キャリブレーション中… ${Math.round(s.calibration * 100)}%` : '';
+
       document.getElementById('rmssd').textContent = fmt(s.rmssd);
       document.getElementById('hr').textContent = fmt(s.hr, 0);
       document.getElementById('sdnn').textContent = fmt(s.sdnn);
       document.getElementById('count').textContent = s.rrCount ?? '–';
+      document.getElementById('resp').textContent = fmt(s.respiration);
+
+      const base = s.baseline;
+      // When the baseline first arrives (or changes), back-fill past state bands.
+      if (base) {
+        const key = `${base.rmssd}|${base.hr}`;
+        if (key !== lastBaselineKey) {
+          lastBaselineKey = key;
+          curBaseline = base;
+          refreshBands();
+        }
+      }
+      document.getElementById('rmssdBase').innerHTML = deltaHtml(s.rmssd, base ? base.rmssd : null, 'ms');
+      document.getElementById('hrBase').innerHTML = deltaHtml(s.hr, base ? base.hr : null, '');
+      document.getElementById('respBase').innerHTML =
+        s.respirationConfidence != null && s.respiration != null
+          ? `信号品質 ${Math.round(s.respirationConfidence * 100)}%${s.respirationPreview ? ' · 暫定' : ''}`
+          : '推定待ち';
+
+      const st = s.state || { label: '計測待ち', tone: 'wait', detail: '', arousal: null };
+      document.getElementById('stateCard').className = 'state ' + (st.tone || 'wait');
+      document.getElementById('stateLabel').textContent = st.label || '–';
+      document.getElementById('stateDetail').textContent = st.detail || '';
+      document.getElementById('arousalFill').style.width = (st.arousal != null ? st.arousal : 0) + '%';
     }
 
     function pushPoint(p) {
-      const t = new Date(p.t).toLocaleTimeString();
-      chart.data.labels.push(t);
+      history.push({ t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone });
+      if (history.length > MAX_POINTS) history.shift();
+
+      chart.data.labels.push(new Date(p.t).toLocaleTimeString('ja-JP'));
       chart.data.datasets[0].data.push(p.rmssd);
       chart.data.datasets[1].data.push(p.hr);
+      chart.data.datasets[2].data.push(p.resp);
       if (chart.data.labels.length > MAX_POINTS) {
         chart.data.labels.shift();
         chart.data.datasets.forEach((d) => d.data.shift());
       }
+      chart.$tones = history.map((q) => toneOf(q, curBaseline));
       chart.update('none');
+      saveHistory(false);
+      updateHistInfo();
+
+      feedTrend(p);
     }
+
+    document.getElementById('clearBtn').addEventListener('click', () => {
+      if (!confirm('保存した履歴（詳細・長期トレンド）をすべて消去しますか？')) return;
+      history = [];
+      trend = [];
+      liveBucket = null;
+      try { localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(TREND_KEY); } catch (_) {}
+      redrawFromHistory();
+      redrawTrend();
+    });
+
+    document.getElementById('recalibBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('recalibBtn');
+      btn.disabled = true;
+      try {
+        await fetch('/api/baseline/reset', { method: 'POST' });
+        document.getElementById('calib').textContent = '基準値を取り直しています…';
+      } catch (_) {}
+      setTimeout(() => { btn.disabled = false; }, 1500);
+    });
+
+    window.addEventListener('beforeunload', () => { saveHistory(true); saveTrend(true); });
+
+    redrawFromHistory();
+    rebuildTrendFromHistory();
+    redrawTrend();
 
     function connect() {
       const ws = new WebSocket(`ws://${location.host}`);
