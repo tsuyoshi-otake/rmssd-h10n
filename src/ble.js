@@ -98,6 +98,18 @@ async function discoverPmd(peripheral) {
 }
 
 /**
+ * Disconnect a peripheral but never hang: if the GATT disconnect does not
+ * resolve (common when the device already dropped on WinRT), resolve anyway
+ * after `ms` so shutdown can proceed.
+ */
+function disconnectWithTimeout(peripheral, ms = 4000) {
+  return Promise.race([
+    peripheral.disconnectAsync().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, ms)),
+  ]);
+}
+
+/**
  * Discover the standard Heart Rate Measurement characteristic (0x2A37), which
  * carries beat-to-beat RR intervals on the Polar H10.
  * @returns {Promise<{ hrm: any }>}
@@ -112,4 +124,4 @@ async function discoverHr(peripheral) {
   return { hrm };
 }
 
-module.exports = { noble, scanAndConnect, discoverPmd, discoverHr };
+module.exports = { noble, scanAndConnect, discoverPmd, discoverHr, disconnectWithTimeout };

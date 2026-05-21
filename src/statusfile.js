@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { localIso } = require('./time');
 
 /**
  * Writes the current vitals to a JSON file so external observers (e.g. Claude
@@ -16,7 +17,7 @@ class StatusFile {
   }
 
   write(obj) {
-    const payload = JSON.stringify({ ...obj, updatedAt: new Date().toISOString() }, null, 2);
+    const payload = JSON.stringify({ ...obj, updatedAt: localIso() }, null, 2);
     fs.writeFileSync(this.tmpPath, payload);
     fs.renameSync(this.tmpPath, this.filePath);
   }

@@ -4,6 +4,7 @@
 const path = require('path');
 const pmd = require('./src/pmd');
 const { parseHrm } = require('./src/hrm');
+const { localIso } = require('./src/time');
 const { QRSDetector } = require('./src/qrs');
 const { RmssdWindow } = require('./src/rmssd');
 const { CsvLogger } = require('./src/csv');
@@ -38,7 +39,7 @@ function parseArgs(argv) {
     }
   }
   if (!opts.csv) {
-    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const ts = localIso().replace(/[:.+]/g, '-');
     opts.csv = path.join(__dirname, 'data', `rmssd-${ts}.csv`);
   }
   return opts;
@@ -89,7 +90,7 @@ async function main() {
   // 1 Hz reporting loop: compute window stats, publish to file/server/console/CSV.
   const reportTimer = setInterval(() => {
     const { rmssd, hr, sdnn, count } = rmssdWin.compute(lastPeakMs ?? undefined);
-    const wall = new Date().toISOString();
+    const wall = localIso();
     const effHr = deviceHr != null ? deviceHr : hr;
 
     const status = {
@@ -181,32 +182,82 @@ async function main() {
     });
   } else {
     await runHrRr(opts, log, cleanup, {
-      onConnected: () => { connected = true; if (server) server.setStatus({ connected: true }); },
+      setConnected: (v) => {
+        connected = v;
+        if (!v) deviceHr = null; // clear stale HR while reconnecting
+        if (server) server.setStatus({ connected: v });
+      },
       onRr: (rr) => { lastPeakMs = (lastPeakMs ?? 0) + rr; handleRR(lastPeakMs, rr); },
       onHr: (hr) => { deviceHr = hr; },
-      onDisconnect: () => { log('Device disconnected.'); shutdown(1); },
     });
   }
   } // end startMode
 }
 
-// Default path: standard HR service (0x2A37) RR intervals.
-async function runHrRr(opts, log, cleanup, { onConnected, onRr, onHr, onDisconnect }) {
+// Default path: standard HR service (0x2A37) RR intervals, with auto-reconnect
+// so the monitor survives the H10 dropping the BLE link mid-session.
+async function runHrRr(opts, log, cleanup, { setConnected, onRr, onHr }) {
   const ble = require('./src/ble');
-  const peripheral = await ble.scanAndConnect({ nameMatch: opts.name, timeoutMs: opts.scanTimeout, log });
-  peripheral.once('disconnect', onDisconnect);
-  cleanup.fns.push(async () => { try { await peripheral.disconnectAsync(); } catch (_) {} });
+  let stopping = false;
+  let current = null; // currently connected peripheral, if any
 
-  const { hrm } = await ble.discoverHr(peripheral);
-  hrm.on('data', (buf) => {
-    const { hr, rr } = parseHrm(buf);
-    if (hr != null) onHr(hr);
-    for (const interval of rr) onRr(interval);
+  // On shutdown: stop reconnecting and disconnect (timeout-guarded so an already
+  // dropped device cannot hang the exit path).
+  cleanup.fns.push(async () => {
+    stopping = true;
+    if (current) await ble.disconnectWithTimeout(current, 4000);
   });
-  await hrm.subscribeAsync();
-  cleanup.fns.push(async () => { try { await hrm.unsubscribeAsync(); } catch (_) {} });
-  onConnected();
-  log('Subscribed to HR Measurement (0x2A37). Reading RR intervals.');
+
+  // Reject if a promise (e.g. a WinRT GATT op) does not settle in time.
+  const withTimeout = (p, ms, what) =>
+    Promise.race([
+      p,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms)),
+    ]);
+
+  async function attach(peripheral) {
+    current = peripheral;
+    let live = false; // only handle drops AFTER a successful subscribe
+    peripheral.once('disconnect', () => {
+      current = null;
+      if (!live || stopping) return;
+      setConnected(false);
+      log('Device disconnected — reconnecting...');
+      connectLoop();
+    });
+    // Service discovery / subscribe can hang on WinRT after a flaky connect;
+    // bound them so a stuck attach falls through to a clean retry.
+    const { hrm } = await withTimeout(ble.discoverHr(peripheral), 10000, 'discoverHr');
+    hrm.on('data', (buf) => {
+      const { hr, rr } = parseHrm(buf);
+      if (hr != null) onHr(hr);
+      for (const interval of rr) onRr(interval);
+    });
+    await withTimeout(hrm.subscribeAsync(), 8000, 'subscribe');
+    live = true;
+    setConnected(true);
+    log('Subscribed to HR Measurement (0x2A37). Reading RR intervals.');
+  }
+
+  async function connectLoop() {
+    while (!stopping) {
+      try {
+        const peripheral = await ble.scanAndConnect({ nameMatch: opts.name, timeoutMs: opts.scanTimeout, log });
+        if (stopping) { await ble.disconnectWithTimeout(peripheral, 4000); return; }
+        await attach(peripheral);
+        return; // connected; the disconnect handler re-enters connectLoop on drop
+      } catch (e) {
+        if (stopping) return;
+        // Drop a half-open connection (e.g. connected but discover/subscribe hung)
+        // before retrying, so the device is released for the next attempt.
+        if (current) { await ble.disconnectWithTimeout(current, 3000); current = null; }
+        log(`Connect/attach failed (${e.message}); retrying in 5s...`);
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+    }
+  }
+
+  await connectLoop();
 }
 
 // Experimental path: Polar PMD raw ECG + local QRS detection.
@@ -214,9 +265,7 @@ async function runEcg(opts, log, cleanup, { onConnected, onPeak, onDisconnect })
   const ble = require('./src/ble');
   const peripheral = await ble.scanAndConnect({ nameMatch: opts.name, timeoutMs: opts.scanTimeout, log });
   peripheral.once('disconnect', onDisconnect);
-  cleanup.fns.push(async () => {
-    try { await peripheral.disconnectAsync(); } catch (_) {}
-  });
+  cleanup.fns.push(async () => { await ble.disconnectWithTimeout(peripheral, 4000); });
 
   const { control, data } = await ble.discoverPmd(peripheral);
   const detector = new QRSDetector({

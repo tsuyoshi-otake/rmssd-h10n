@@ -17,6 +17,7 @@ const ble = require('../src/ble');
 const pmd = require('../src/pmd');
 const { parseHrm } = require('../src/hrm');
 const { QRSDetector } = require('../src/qrs');
+const { localIso } = require('../src/time');
 
 function parseArgs(argv) {
   const o = { seconds: 30, name: 'polar', mode: 'hr-rr', rr: false, pretty: false, scanTimeout: 30000 };
@@ -69,7 +70,7 @@ function emit(obj, pretty) {
 
 (async () => {
   const opts = parseArgs(process.argv);
-  const startedAt = new Date().toISOString();
+  const startedAt = localIso();
 
   // Single exit point: emit JSON exactly once, then exit. Guarded so the
   // watchdog and the normal path can never double-emit.
@@ -150,7 +151,7 @@ function emit(obj, pretty) {
   }
 
   if (captureError) {
-    return finish({ ok: false, error: 'capture_failed', message: captureError.message, device: deviceName, mode: opts.mode, startedAt, finishedAt: new Date().toISOString(), samples: { rrAccepted: rrMs.length, beatsTotal: raw } }, 2);
+    return finish({ ok: false, error: 'capture_failed', message: captureError.message, device: deviceName, mode: opts.mode, startedAt, finishedAt: localIso(), samples: { rrAccepted: rrMs.length, beatsTotal: raw } }, 2);
   }
 
   const result = {
@@ -158,7 +159,7 @@ function emit(obj, pretty) {
     device: deviceName,
     mode: opts.mode,
     startedAt,
-    finishedAt: new Date().toISOString(),
+    finishedAt: localIso(),
     durationSec: opts.seconds,
     samples: { rrAccepted: rrMs.length, rrRejected: raw - rrMs.length, beatsTotal: raw },
     metrics: stats(rrMs),

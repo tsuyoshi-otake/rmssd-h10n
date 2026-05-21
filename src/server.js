@@ -4,6 +4,7 @@ const http = require('http');
 const path = require('path');
 const express = require('express');
 const { WebSocketServer } = require('ws');
+const { localIso } = require('./time');
 
 /**
  * Live dashboard server: static graph page, a /api/status JSON endpoint (so any
@@ -40,7 +41,7 @@ function createServer({ port = 3000, log = () => {} } = {}) {
   }
 
   function setStatus(partial) {
-    latest = { ...latest, ...partial, updatedAt: new Date().toISOString() };
+    latest = { ...latest, ...partial, updatedAt: localIso() };
     broadcast('status', latest);
   }
 
