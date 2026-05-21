@@ -54,9 +54,16 @@ node index.js --ecg
 # 主なオプション
 node index.js --window 60 --port 3000 --csv data/run.csv
 
-# 直近(24h以内)の安静baselineを再利用して開始
-node index.js --load-baseline
+# データが溜まるにつれ、全履歴の安静クラスタから基準値を自動で取り直す
+node index.js --auto-baseline                 # 既定15分間隔
+node index.js --auto-baseline --auto-baseline-interval 10
+
+# ユーザー1〜5を選んで開始（基準値・CSV・グラフ履歴は個別に保存）
+node index.js --user 3
 ```
+
+- **ユーザー切り替え**: ダッシュボード右上の `ユーザー 1〜5` ボタン、または `POST /api/user {"user":N}` で計測対象を切替。切替時はその人の安静基準（`data/baseline-u<N>.json`、24h以内なら）を再利用し、計測窓・分類器・CSVをリセットして新規セッションを開始する。各人の基準値・CSV(`data/rmssd-u<N>-*.csv`)・ダッシュボードのグラフ履歴(localStorage)は完全に独立。
+- **自動リベースライン** (`--auto-baseline`): 初回確定後も全履歴の「安静クラスタ（HR下位25%）」から RMSSD/HR の中央値を一定間隔で再算出し、EMA(±20%上限)で基準を緩やかに追従させる。安静らしい区間が足りない時間帯は更新しない。
 
 - ダッシュボード: <http://localhost:3000>
 - ステータス API: <http://localhost:3000/api/status>
@@ -180,7 +187,7 @@ node tools/shutdown-test.js   # server.close()がWS接続中でも解決する�
 
 ## CSV 列
 
-`wallClock, tMs, rr_ms, rmssd_ms, sdnn_ms, hr_bpm, rrCount, resp_brpm, resp_conf, corrected, state`
+`user, wallClock, tMs, rr_ms, rmssd_ms, sdnn_ms, hr_bpm, rrCount, resp_brpm, resp_conf, corrected, state`
 
 （`resp_conf` = 呼吸数の信号品質、`corrected` = アーティファクト除去拍の累積）
 
