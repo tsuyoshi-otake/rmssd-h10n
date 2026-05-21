@@ -55,6 +55,7 @@ node index.js --window 60 --port 3000 --csv data/run.csv
 - ダッシュボード: <http://localhost:3000>
 - ステータス API: <http://localhost:3000/api/status>
 - 停止: ターミナルで **Ctrl+C**（`disconnectAsync` が走り BLE 接続を綺麗に解放する）
+- **自動再接続**: HR-RR 経路は H10 が接続をドロップしても再スキャン→再接続を自動でリトライ（discover/subscribe にもタイムアウトあり）。長時間モニタリングに対応。
 
 ## Claude Code / シェルからのバイタル観測
 
@@ -80,9 +81,11 @@ cat data/status.json
   "rrCount": 23,
   "beatsTotal": 23,
   "rejected": 0,
-  "updatedAt": "2026-05-21T11:44:48.000Z"
+  "updatedAt": "2026-05-21T20:44:48.000+09:00"
 }
 ```
+
+> タイムスタンプ（`updatedAt`・CSVの`wallClock`）は **JST オフセット付き ISO-8601**（`+09:00`）で記録される。
 
 ## CLI ワンショット計測（生成AI / プログラム連携向け）
 
