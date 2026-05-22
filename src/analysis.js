@@ -112,13 +112,14 @@ class Baseline {
   add(rmssd, hr) {
     if (rmssd == null || hr == null) return;
 
-    // Adaptive mode records every valid reading so the resting cluster can be
-    // recomputed from the whole session (the rest gate below only shapes the
-    // *initial* freeze; restClusterBaseline does its own low-HR selection).
-    if (this.adaptive) {
-      this.history.push({ rmssd, hr });
-      if (this.history.length > this.adaptive.histCap) this.history.shift();
-    }
+    // Always record valid readings so the resting cluster can be recomputed from
+    // the whole session — both for adaptive re-baselining and the manual
+    // "re-derive from the full session" action (refreezeFromHistory). The rest
+    // gate below only shapes the *initial* freeze; restClusterBaseline does its
+    // own low-HR selection over this history.
+    this.history.push({ rmssd, hr });
+    const histCap = this.adaptive ? this.adaptive.histCap : 6 * 60 * 60; // ~6 h @1Hz
+    if (this.history.length > histCap) this.history.shift();
 
     if (!this.frozen) {
       // Rest gate: skip samples taken during an HR transient (just sat down,
@@ -172,6 +173,26 @@ class Baseline {
     };
     this.adaptedAt = now;
     return true;
+  }
+
+  /**
+   * Re-derive the baseline from the resting cluster of the WHOLE session so far
+   * (the low-HR slice of every reading collected — see restClusterBaseline) and
+   * freeze it immediately. Unlike reset(), which discards the reference and
+   * recalibrates over the next ~minute, this uses the data already gathered, so
+   * the refreshed baseline applies at once. Returns the new frozen baseline, or
+   * null if there is not yet a solid resting cluster.
+   */
+  refreezeFromHistory({ hrQuantile = 0.25, minCluster = 30 } = {}) {
+    const est = restClusterBaseline(this.history, { hrQuantile, minCluster });
+    if (!est) return null;
+    this.frozen = { rmssd: est.rmssd, hr: est.hr, n: est.n, savedAt: Date.now() };
+    // The in-progress (reset-style) accumulators are now irrelevant; clear them
+    // so progress() reports complete and a later reset() starts clean.
+    this.rmssd = [];
+    this.hr = [];
+    this.recentHr = [];
+    return this.frozen;
   }
 
   reset() {

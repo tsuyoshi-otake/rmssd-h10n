@@ -190,6 +190,22 @@ async function main() {
       lastAdaptedAt = null;
       log('Baseline reset requested — recalibrating.');
     });
+    // "Re-derive from the full session": freeze the baseline now from the resting
+    // cluster of all data collected so far, persist it, and report the outcome.
+    server.events.on('baseline-full', (reply) => {
+      const b = baseline.refreezeFromHistory();
+      if (b) {
+        respHistory.length = 0;
+        baselineSaved = true;
+        lastAdaptedAt = baseline.adaptedAt;
+        try { fs.writeFileSync(baselineFileFor(currentUser), JSON.stringify(baseline.toJSON())); } catch (_) {}
+        log(`User ${currentUser}: baseline re-derived from full session: RMSSD ${b.rmssd.toFixed(1)} ms, HR ${b.hr.toFixed(1)} bpm (rest cluster n=${b.n}).`);
+        reply({ ok: true, applied: true, baseline: { rmssd: Number(b.rmssd.toFixed(1)), hr: Number(b.hr.toFixed(1)), n: b.n } });
+      } else {
+        log('Full-session baseline requested, but no solid resting cluster yet — keeping current baseline.');
+        reply({ ok: true, applied: false, reason: 'insufficient-data' });
+      }
+    });
     server.events.on('user-switch', switchUser);
     server.setStatus({ user: currentUser });
   }
@@ -273,7 +289,11 @@ async function main() {
     statusFile.write(status);
     if (server) {
       server.setStatus(status);
-      server.pushPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone });
+      // Only push a chart point when there is an actual reading; emitting nulls
+      // while disconnected floods the dashboard history and flattens the graph.
+      if (hrVal != null || rmssdVal != null) {
+        server.pushPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone });
+      }
     }
     csv.write({
       user: currentUser,

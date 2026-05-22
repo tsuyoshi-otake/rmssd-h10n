@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RMSSD · Polar H10</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="chart.umd.js"></script>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -12,7 +12,7 @@
       margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
       background: #0d1117; color: #e6edf3;
     }
-    header { padding: 16px 24px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    header { padding: 16px 24px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; position: sticky; top: 0; z-index: 5; background: #0d1117; }
     header h1 { font-size: 18px; margin: 0; font-weight: 600; }
     #conn { font-size: 13px; color: #8b949e; }
     #conn.on { color: #3fb950; }
@@ -25,6 +25,7 @@
     button:hover { background: #30363d; }
     .users { display: flex; align-items: center; gap: 6px; }
     .users .lbl { font-size: 13px; color: #8b949e; }
+    .lbl-short { display: none; } /* shown only in landscape (compact 1-line header) */
     .users button { padding: 6px 11px; min-width: 34px; }
     .users button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; }
     .wrap { padding: 24px; }
@@ -67,11 +68,85 @@
     .section { display: flex; align-items: baseline; gap: 12px; margin: 22px 2px 8px; }
     .section-title { font-size: 14px; font-weight: 600; color: #e6edf3; }
     .note { font-size: 11px; color: #6e7681; margin-top: 10px; }
+
+    /* Landscape (phone/tablet held sideways): compress the chrome — the header is
+       sticky so its buttons stay reachable — and let the graphs grow with the
+       viewport so the chart is the focus. The WebView only renders on-device, so
+       plain orientation is enough; there is no desktop layout to mis-trigger. */
+    @media (orientation: landscape) {
+      /* Single-line header: drop the title text / "ユーザー" label / hist count,
+         swap buttons to their short labels, and stop wrapping. */
+      header { padding: 7px 12px; gap: 6px; flex-wrap: nowrap; }
+      header h1 { font-size: 14px; white-space: nowrap; }
+      header button { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
+      .users { gap: 4px; }
+      .users button { padding: 5px 8px; min-width: 28px; }
+      .users .lbl { display: none; }
+      #histInfo { display: none; }
+      #conn, #calib { font-size: 11px; white-space: nowrap; }
+      .lbl-full { display: none; }
+      .lbl-short { display: inline; }
+      .wrap { padding: 10px 14px; }
+      .state { padding: 9px 14px; margin-bottom: 10px; gap: 12px; }
+      .state .label { font-size: 18px; }
+      .state .detail { font-size: 12px; margin-top: 2px; }
+      .arousal { margin-top: 6px; }
+      .cards { gap: 10px; margin-bottom: 10px; }
+      .card { padding: 8px 12px; min-width: 88px; }
+      .card .value { font-size: 26px; }
+      .chartbox { height: 60vh; min-height: 240px; }
+      .chartbox.trend { height: 52vh; min-height: 200px; }
+      .section { margin: 14px 2px 6px; }
+      .note { display: none; }
+    }
+
+    /* --- activity logging (record bar + chips + picker modal) --- */
+    .actbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+    /* When sitting inside the card row, fill the empty space to the right of the
+       last metric card: right-aligned, stacked (record button + ongoing chips). */
+    .cards .actbar { margin: 0 0 0 auto; flex-direction: column; align-items: stretch;
+      justify-content: center; gap: 8px; min-width: 160px; }
+    .cards .actbar .act-none { font-size: 12px; text-align: center; color: #6e7681; }
+    .cards .actbar .act-chip { justify-content: space-between; }
+    .actbar .start { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; }
+    .actbar .start:hover { background: #388bfd; }
+    .act-chip { display: inline-flex; align-items: center; gap: 8px; background: #161b22;
+      border: 1px solid #21262d; border-left: 4px solid #8b949e; border-radius: 10px; padding: 6px 8px 6px 12px; font-size: 13px; }
+    .act-chip .nm { font-weight: 600; }
+    .act-chip .el { color: #8b949e; font-variant-numeric: tabular-nums; }
+    .act-chip button { padding: 3px 9px; font-size: 12px; }
+    .act-none { color: #6e7681; font-size: 13px; }
+
+    .modal-bg { position: fixed; inset: 0; background: rgba(1,4,9,.72); z-index: 50;
+      display: none; align-items: center; justify-content: center; padding: 18px; }
+    .modal-bg.open { display: flex; }
+    .modal { background: #0d1117; border: 1px solid #30363d; border-radius: 16px;
+      padding: 18px 20px; width: min(580px, 100%); max-height: 88vh; overflow-y: auto; }
+    .modal h2 { margin: 0; font-size: 17px; }
+    .modal .sub { color: #8b949e; font-size: 12px; margin: 4px 0 6px; }
+    .modal .cat { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 8px; }
+    .modal .close { float: right; }
+    .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+    .grid button { padding: 12px 6px; border-radius: 10px; border-left: 4px solid #8b949e; text-align: center; line-height: 1.3; }
+    .recent-row { display: flex; align-items: center; gap: 10px; padding: 7px 4px; border-bottom: 1px solid #161b22; font-size: 13px; }
+    .recent-row .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+    .recent-row .meta { color: #6e7681; font-size: 12px; }
+    .recent-row .sp { flex: 1; }
+    .recent-row button { padding: 3px 9px; font-size: 12px; }
+    .recent-row.editing { flex-wrap: wrap; align-items: flex-end; }
+    .recent-row select, .recent-row input { font: inherit; font-size: 12px; color: #e6edf3;
+      background: #161b22; border: 1px solid #30363d; border-radius: 7px; padding: 5px 7px; }
+    .recent-row input[type="datetime-local"] { color-scheme: dark; }
+    .recent-row .fld { display: flex; flex-direction: column; gap: 2px; }
+    .recent-row .fld label { font-size: 10px; color: #6e7681; }
+    .recent-row .start { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+    @media (max-width: 520px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+    @media (orientation: landscape) { .grid { grid-template-columns: repeat(5, 1fr); } }
   </style>
 </head>
 <body>
   <header>
-    <h1>RMSSD · Polar H10</h1>
+    <h1><span class="lbl-full">RMSSD · Polar H10</span><span class="lbl-short">RMSSD</span></h1>
     <span id="conn">接続待機中…</span>
     <span id="calib"></span>
     <span class="spacer"></span>
@@ -79,9 +154,10 @@
       <span class="lbl">ユーザー</span>
     </span>
     <span id="histInfo" style="font-size:12px;color:#6e7681"></span>
-    <button id="recalibBtn" title="今を安静として基準値を取り直す">安静で基準を取り直す</button>
-    <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算">全期間で基準を取り直す</button>
-    <button id="clearBtn" title="保存した履歴を消去">履歴をクリア</button>
+    <button id="recalibBtn" title="今を安静として基準値を取り直す"><span class="lbl-full">安静で基準を取り直す</span><span class="lbl-short">基準:安静</span></button>
+    <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算"><span class="lbl-full">全期間で基準を取り直す</span><span class="lbl-short">基準:全期間</span></button>
+    <button id="clearBtn" title="保存した履歴を消去"><span class="lbl-full">履歴をクリア</span><span class="lbl-short">クリア</span></button>
+    <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
   </header>
 
   <div class="wrap">
@@ -103,6 +179,10 @@
       <div class="card"><div class="label">呼吸数</div><div class="value"><span id="resp">–</span><span class="unit">br/min</span></div><div class="base" id="respBase"></div></div>
       <div class="card"><div class="label">SDNN</div><div class="value"><span id="sdnn">–</span><span class="unit">ms</span></div><div class="base"></div></div>
       <div class="card"><div class="label">RR (窓内)</div><div class="value"><span id="count">–</span></div><div class="base"></div></div>
+      <div class="actbar" id="actbar">
+        <button class="start" id="actStartBtn">アクティビティ管理</button>
+        <span class="act-none" id="actNone">進行中なし</span>
+      </div>
     </div>
 
     <div class="chartbox"><canvas id="chart"></canvas></div>
@@ -116,6 +196,18 @@
     <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。上のグラフは直近約1時間の詳細（1秒間隔）、下のグラフは15分平均の長期トレンドで、どちらもこのブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。</div>
   </div>
 
+  <div class="modal-bg" id="actModal">
+    <div class="modal">
+      <button class="close" id="actClose">閉じる</button>
+      <h2>アクティビティ管理</h2>
+      <div class="sub">種類を選んで開始。進行中の終了、記録の編集・削除もここから。グラフ上部に期間バーで表示されます。</div>
+      <div id="actOngoing"></div>
+      <div id="actChoices"></div>
+      <div id="actRecent"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
   <script>
     // ---- active user (1-5): history/trend are stored under per-user keys ----
     let currentUser = 1;
@@ -207,11 +299,38 @@
       },
     };
 
+    // Activity bands: thin colored bars (with a start marker line + label) along
+    // the top of the detail chart, showing when logged activities ran. Lanes are
+    // pre-assigned in activitySpans() so overlapping activities stack vertically.
+    const activityBandPlugin = {
+      id: 'activityBand',
+      afterDatasetsDraw(chart) {
+        const spans = chart.$activitySpans;
+        if (!spans || !spans.length) return;
+        const { ctx, chartArea: area, scales: { x } } = chart;
+        ctx.save();
+        const barH = 5, gap = 12; // gap leaves room for the label under each bar
+        for (const sp of spans) {
+          const xl = x.getPixelForValue(sp.s);
+          const xr = Math.max(xl + 3, x.getPixelForValue(sp.e));
+          const y = area.top + 2 + sp.lane * (barH + gap);
+          ctx.globalAlpha = 0.32; ctx.strokeStyle = sp.color; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(xl + 0.5, area.top); ctx.lineTo(xl + 0.5, area.bottom); ctx.stroke();
+          ctx.globalAlpha = sp.ongoing ? 0.95 : 0.8; ctx.fillStyle = sp.color;
+          ctx.fillRect(xl, y, xr - xl, barH);
+          ctx.globalAlpha = 0.92; ctx.fillStyle = '#e6edf3';
+          ctx.font = '10px system-ui, sans-serif'; ctx.textBaseline = 'top';
+          ctx.fillText(sp.label + (sp.ongoing ? ' …' : ''), xl + 3, y + barH + 1);
+        }
+        ctx.restore();
+      },
+    };
+
     // ---- chart ----
     const ctx = document.getElementById('chart');
     const chart = new Chart(ctx, {
       type: 'line',
-      plugins: [stateBandPlugin],
+      plugins: [stateBandPlugin, activityBandPlugin],
       data: {
         labels: [],
         datasets: [
@@ -263,6 +382,7 @@
       chart.data.datasets[1].data = history.map((p) => p.hr);
       chart.data.datasets[2].data = history.map((p) => p.resp);
       chart.$tones = history.map((p) => toneOf(p, curBaseline));
+      chart.$activitySpans = activitySpans();
       chart.update('none');
       updateHistInfo();
     }
@@ -456,6 +576,7 @@
         chart.data.datasets.forEach((d) => d.data.shift());
       }
       chart.$tones = history.map((q) => toneOf(q, curBaseline));
+      chart.$activitySpans = activitySpans();
       chart.update('none');
       saveHistory(false);
       updateHistInfo();
@@ -475,14 +596,17 @@
       currentUser = n;
       STORAGE_KEY = histKeyFor(n);
       TREND_KEY = trendKeyFor(n);
+      ACT_KEY = actKeyFor(n);
       history = loadHistory();
       trend = loadTrend();
+      activities = loadActivities();
       liveBucket = null;
       lastSaved = 0; lastTrendSaved = 0;
       curBaseline = null; lastBaselineKey = '';
       redrawFromHistory();
       rebuildTrendFromHistory();
       redrawTrend();
+      renderActbar();
       highlightUser(n);
     }
     (function buildUserButtons() {
@@ -495,7 +619,7 @@
         b.addEventListener('click', async () => {
           if (n === currentUser) return;
           for (const x of sel.querySelectorAll('button')) x.disabled = true;
-          try { await fetch('/api/user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user: n }) }); } catch (_) {}
+          try { RmssdBridge.switchUser(n); } catch (_) {}
           setTimeout(() => { for (const x of sel.querySelectorAll('button')) x.disabled = false; }, 1200);
         });
         sel.appendChild(b);
@@ -517,7 +641,7 @@
       const btn = document.getElementById('recalibBtn');
       btn.disabled = true;
       try {
-        await fetch('/api/baseline/reset', { method: 'POST' });
+        RmssdBridge.resetBaseline();
         document.getElementById('calib').textContent = '基準値を取り直しています…';
       } catch (_) {}
       setTimeout(() => { btn.disabled = false; }, 1500);
@@ -528,7 +652,7 @@
       const calib = document.getElementById('calib');
       btn.disabled = true;
       try {
-        const r = await fetch('/api/baseline/full', { method: 'POST' }).then((x) => x.json());
+        const r = RmssdBridge.refreezeBaseline();
         baselineMsgUntil = Date.now() + 4000; // hold the message against per-second status overwrites
         calib.textContent = (r && r.applied)
           ? `全期間の安静データで基準を再計算（RMSSD ${r.baseline.rmssd}ms / HR ${Math.round(r.baseline.hr)} · n=${r.baseline.n}）`
@@ -537,22 +661,247 @@
       setTimeout(() => { btn.disabled = false; }, 1500);
     });
 
+    // ---- screen orientation toggle (auto → portrait → landscape) ----
+    // Cycles the device orientation via the native plugin (RmssdBridge.setOrientation);
+    // 'auto' unlocks back to the device's rotation setting. The choice persists.
+    const ORIENT_KEY = 'rmssd-h10n.orient.v1';
+    const ORIENT_MODES = ['auto', 'portrait', 'landscape'];
+    const ORIENT_LABEL = { auto: '自動', portrait: '縦', landscape: '横' };
+    let orientMode = ORIENT_MODES.includes(localStorage.getItem(ORIENT_KEY))
+      ? localStorage.getItem(ORIENT_KEY) : 'auto';
+    function applyOrient(persist) {
+      document.getElementById('orientBtn').textContent = '画面: ' + ORIENT_LABEL[orientMode];
+      try { RmssdBridge.setOrientation && RmssdBridge.setOrientation(orientMode); } catch (_) {}
+      if (persist) { try { localStorage.setItem(ORIENT_KEY, orientMode); } catch (_) {} }
+    }
+    document.getElementById('orientBtn').addEventListener('click', () => {
+      orientMode = ORIENT_MODES[(ORIENT_MODES.indexOf(orientMode) + 1) % ORIENT_MODES.length];
+      applyOrient(true);
+    });
+    applyOrient(false); // restore saved orientation on load
+    setTimeout(() => window.scrollTo(0, 0), 0); // start at the top even if the WebView restored a scroll position
+
     window.addEventListener('beforeunload', () => { saveHistory(true); saveTrend(true); });
+
+    // ===== activity logging =====
+    // Period events (start → end) the user logs to correlate activities with HRV.
+    // Stored per-user in localStorage and drawn as bands on the detail chart.
+    const ACTIVITY_TYPES = [
+      { id: 'sleep',   label: '睡眠',         cat: 'rest',     color: '#3fb950' },
+      { id: 'nap',     label: '仮眠',         cat: 'rest',     color: '#3fb950' },
+      { id: 'bath',    label: '入浴',         cat: 'rest',     color: '#3fb950' },
+      { id: 'rest',    label: '休憩',         cat: 'rest',     color: '#3fb950' },
+      { id: 'breath',  label: '瞑想・深呼吸', cat: 'rest',     color: '#3fb950' },
+      { id: 'walk',    label: 'ウォーキング', cat: 'exercise', color: '#f0883e' },
+      { id: 'squat',   label: 'スクワット',   cat: 'exercise', color: '#f0883e' },
+      { id: 'calf',    label: 'カーフレイズ', cat: 'exercise', color: '#f0883e' },
+      { id: 'bike',    label: 'エアロバイク', cat: 'exercise', color: '#f0883e' },
+      { id: 'stretch', label: 'ストレッチ',   cat: 'exercise', color: '#f0883e' },
+      { id: 'meal',    label: '食事',         cat: 'intake',   color: '#a371f7' },
+      { id: 'coffee',  label: 'コーヒー',     cat: 'intake',   color: '#a371f7' },
+      { id: 'smoke',   label: 'タバコ',       cat: 'intake',   color: '#a371f7' },
+      { id: 'alcohol', label: '飲酒',         cat: 'intake',   color: '#a371f7' },
+      { id: 'work',    label: '集中作業',     cat: 'work',     color: '#58a6ff' },
+      { id: 'meeting', label: '会議',         cat: 'work',     color: '#58a6ff' },
+    ];
+    const ACTIVITY_CATS = [
+      { id: 'rest',     label: '回復・休息' },
+      { id: 'exercise', label: '運動' },
+      { id: 'intake',   label: '嗜好・摂取' },
+      { id: 'work',     label: '作業・負荷' },
+    ];
+    const TYPE_BY_ID = Object.fromEntries(ACTIVITY_TYPES.map((t) => [t.id, t]));
+    const actKeyFor = (u) => `rmssd-h10n.activities.v1.u${u}`;
+    let ACT_KEY = actKeyFor(currentUser);
+    let activities = loadActivities();
+
+    function loadActivities() {
+      try { const a = JSON.parse(localStorage.getItem(ACT_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+      catch (_) { return []; }
+    }
+    function saveActivities() {
+      try { localStorage.setItem(ACT_KEY, JSON.stringify(activities.slice(-500))); } catch (_) {}
+    }
+    const nowIso = () => { try { return RmssdBridge.now(); } catch (_) { return new Date().toISOString(); } };
+    const ongoingActs = () => activities.filter((a) => !a.end);
+    function fmtElapsed(ms) {
+      const s = Math.max(0, Math.floor(ms / 1000));
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+      const p = (n) => String(n).padStart(2, '0');
+      return h ? `${h}:${p(m)}:${p(ss)}` : `${m}:${p(ss)}`;
+    }
+    const fmtClock = (iso) => new Date(iso).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
+
+    // Map each activity's start/end onto detail-history indices (the chart x-axis
+    // is categorical), clamped to the visible window, assigning vertical lanes so
+    // overlapping activities don't draw on top of each other.
+    function activitySpans() {
+      if (!history.length || !activities.length) return [];
+      const t0 = new Date(history[0].t).getTime();
+      const t1 = new Date(history[history.length - 1].t).getTime();
+      const nowMs = Date.now();
+      const idxOf = (ms) => { // first index with history[i].t >= ms (binary search)
+        let lo = 0, hi = history.length;
+        while (lo < hi) { const mid = (lo + hi) >> 1; if (new Date(history[mid].t).getTime() >= ms) hi = mid; else lo = mid + 1; }
+        return lo;
+      };
+      const spans = [];
+      for (const a of activities) {
+        const sMs = new Date(a.start).getTime();
+        const eMs = a.end ? new Date(a.end).getTime() : nowMs;
+        if (eMs < t0 || sMs > t1) continue; // entirely outside the visible detail window
+        let s = idxOf(Math.max(sMs, t0)); if (s >= history.length) s = history.length - 1;
+        let e = a.end ? idxOf(Math.min(eMs, t1)) : history.length - 1;
+        if (e >= history.length) e = history.length - 1;
+        if (e < s) e = s;
+        spans.push({ s, e, label: a.label, color: a.color, ongoing: !a.end });
+      }
+      spans.sort((p, q) => p.s - q.s);
+      const laneEnd = [];
+      for (const sp of spans) {
+        let lane = 0;
+        while (lane < laneEnd.length && laneEnd[lane] >= sp.s) lane++;
+        laneEnd[lane] = sp.e; sp.lane = lane;
+      }
+      return spans;
+    }
+    function refreshActivityBands() { chart.$activitySpans = activitySpans(); chart.update('none'); }
+
+    function startActivity(typeId) {
+      const t = TYPE_BY_ID[typeId]; if (!t) return;
+      activities.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+        type: t.id, label: t.label, color: t.color, cat: t.cat, start: nowIso(), end: null });
+      saveActivities(); renderActbar(); refreshActivityBands();
+    }
+    function endActivity(id) {
+      const a = activities.find((x) => x.id === id && !x.end); if (!a) return;
+      a.end = nowIso(); saveActivities(); renderActbar(); renderModal(); refreshActivityBands();
+    }
+    function deleteActivity(id) {
+      activities = activities.filter((x) => x.id !== id);
+      saveActivities(); renderActbar(); renderModal(); refreshActivityBands();
+    }
+
+    function renderActbar() {
+      const bar = document.getElementById('actbar');
+      bar.querySelectorAll('.act-chip').forEach((e) => e.remove());
+      const ong = ongoingActs();
+      document.getElementById('actNone').style.display = ong.length ? 'none' : '';
+      for (const a of ong) {
+        const chip = document.createElement('span');
+        chip.className = 'act-chip'; chip.style.borderLeftColor = a.color;
+        const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = a.label;
+        const el = document.createElement('span'); el.className = 'el'; el.dataset.start = a.start;
+        const btn = document.createElement('button'); btn.textContent = '終了';
+        btn.addEventListener('click', () => endActivity(a.id));
+        chip.append(nm, el, btn); bar.appendChild(chip);
+      }
+      tickElapsed();
+    }
+    function tickElapsed() {
+      const now = Date.now();
+      for (const el of document.querySelectorAll('.el[data-start]')) {
+        el.textContent = fmtElapsed(now - new Date(el.dataset.start).getTime());
+      }
+    }
+    setInterval(() => { tickElapsed(); if (ongoingActs().length) refreshActivityBands(); }, 1000);
+
+    let editingId = null;
+    const mkBtn = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', fn); return b; };
+
+    // One record row: read-only (with 編集 / 終了 or 削除), or — when it is the row
+    // being edited — an inline form: type select + start/end datetime-local pickers
+    // (empty end = still ongoing) + 保存 / 取消 / 削除.
+    function actRow(a) {
+      const row = document.createElement('div'); row.className = 'recent-row';
+      if (a.id !== editingId) {
+        const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = a.color;
+        const nm = document.createElement('span'); nm.textContent = a.label;
+        const meta = document.createElement('span'); meta.className = 'meta';
+        if (a.end) meta.textContent = `${fmtClock(a.start)}–${fmtClock(a.end)}`;
+        else { meta.classList.add('el'); meta.dataset.start = a.start; } // live elapsed via tickElapsed
+        const sp = document.createElement('span'); sp.className = 'sp';
+        const edit = mkBtn('編集', () => { editingId = a.id; renderModal(); });
+        const last = a.end ? mkBtn('削除', () => deleteActivity(a.id)) : mkBtn('終了', () => endActivity(a.id));
+        row.append(dot, nm, meta, sp, edit, last);
+      } else {
+        row.classList.add('editing');
+        const sel = document.createElement('select');
+        for (const cat of ACTIVITY_CATS) {
+          const og = document.createElement('optgroup'); og.label = cat.label;
+          for (const t of ACTIVITY_TYPES.filter((x) => x.cat === cat.id)) {
+            const o = document.createElement('option'); o.value = t.id; o.textContent = t.label; og.appendChild(o);
+          }
+          sel.appendChild(og);
+        }
+        sel.value = a.type;
+        const fld = (text, input) => { const w = document.createElement('span'); w.className = 'fld';
+          const l = document.createElement('label'); l.textContent = text; w.append(l, input); return w; };
+        const si = document.createElement('input'); si.type = 'datetime-local'; si.step = 60; si.value = a.start.slice(0, 16);
+        const ei = document.createElement('input'); ei.type = 'datetime-local'; ei.step = 60; ei.value = a.end ? a.end.slice(0, 16) : '';
+        const save = mkBtn('保存', () => applyEdit(a.id, sel.value, si.value, ei.value)); save.className = 'start';
+        const cancel = mkBtn('取消', () => { editingId = null; renderModal(); });
+        const del = mkBtn('削除', () => deleteActivity(a.id));
+        row.append(sel, fld('開始', si), fld('終了 (空=進行中)', ei), save, cancel, del);
+      }
+      return row;
+    }
+
+    function applyEdit(id, typeId, startVal, endVal) {
+      const a = activities.find((x) => x.id === id); if (!a) return;
+      const t = TYPE_BY_ID[typeId];
+      if (t) { a.type = t.id; a.label = t.label; a.color = t.color; a.cat = t.cat; }
+      if (startVal) a.start = RmssdBridge.iso(new Date(startVal).getTime());
+      a.end = endVal ? RmssdBridge.iso(new Date(endVal).getTime()) : null;
+      if (a.end && new Date(a.end).getTime() < new Date(a.start).getTime()) a.end = a.start; // guard inverted range
+      editingId = null;
+      saveActivities(); renderActbar(); renderModal(); refreshActivityBands();
+    }
+
+    function renderModal() {
+      const ong = ongoingActs();
+      const oc = document.getElementById('actOngoing');
+      oc.innerHTML = '';
+      if (ong.length) {
+        const h = document.createElement('div'); h.className = 'cat'; h.textContent = '進行中'; oc.appendChild(h);
+        for (const a of ong) oc.appendChild(actRow(a));
+      }
+      const ch = document.getElementById('actChoices');
+      ch.innerHTML = '';
+      for (const cat of ACTIVITY_CATS) {
+        const h = document.createElement('div'); h.className = 'cat'; h.textContent = cat.label; ch.appendChild(h);
+        const g = document.createElement('div'); g.className = 'grid';
+        for (const t of ACTIVITY_TYPES.filter((x) => x.cat === cat.id)) {
+          const b = document.createElement('button'); b.textContent = t.label; b.style.borderLeftColor = t.color;
+          b.addEventListener('click', () => { startActivity(t.id); closeModal(); });
+          g.appendChild(b);
+        }
+        ch.appendChild(g);
+      }
+      const recent = activities.filter((a) => a.end).slice(-8).reverse();
+      const rc = document.getElementById('actRecent');
+      rc.innerHTML = '';
+      if (recent.length) {
+        const h = document.createElement('div'); h.className = 'cat'; h.textContent = '最近の記録'; rc.appendChild(h);
+        for (const a of recent) rc.appendChild(actRow(a));
+      }
+      tickElapsed();
+    }
+    function openModal() { renderModal(); document.getElementById('actModal').classList.add('open'); }
+    function closeModal() { document.getElementById('actModal').classList.remove('open'); }
+    document.getElementById('actStartBtn').addEventListener('click', openModal);
+    document.getElementById('actClose').addEventListener('click', closeModal);
+    document.getElementById('actModal').addEventListener('click', (e) => { if (e.target.id === 'actModal') closeModal(); });
+    renderActbar();
 
     redrawFromHistory();
     rebuildTrendFromHistory();
     redrawTrend();
 
-    function connect() {
-      const ws = new WebSocket(`ws://${location.host}`);
-      ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === 'status') applyStatus(msg.data);
-        else if (msg.type === 'point') pushPoint(msg.data);
-      };
-      ws.onclose = () => setTimeout(connect, 1500);
-    }
-    connect();
+    // Live data comes from the in-app Monitor via the bridge (no WebSocket).
+    RmssdBridge.onStatus(applyStatus);
+    RmssdBridge.onPoint(pushPoint);
+    RmssdBridge.start();
   </script>
 </body>
 </html>

@@ -1,0 +1,193 @@
+'use strict';
+
+// Browser/Capacitor port of the desktop monitor's 1 Hz reporting loop
+// (index.js). The pure-JS analysis modules are reused verbatim from ../../src;
+// only the I/O differs: instead of fs + a WebSocket server, this emits status /
+// point objects through callbacks and persists the baseline to localStorage.
+//
+// It is transport-agnostic: feed it RR intervals via onRr() (and optional HR via
+// onHr()) from any source — native BLE on Android, or a synthetic generator in
+// the browser — and subscribe to onStatus / onPoint for the dashboard.
+import { RmssdWindow, median } from '../../src/rmssd.js';
+import { Baseline, StateClassifier } from '../../src/analysis.js';
+import { estimateRespiration } from '../../src/respiration.js';
+import { localIso } from '../../src/time.js';
+import { loadBaseline, saveBaseline } from './store.js';
+
+export class Monitor {
+  constructor({ windowSec = 30, user = 1, mode = 'hr-rr', adaptive = null,
+                onStatus = () => {}, onPoint = () => {} } = {}) {
+    this.windowSec = windowSec;
+    this.mode = mode;
+    this.adaptive = adaptive;
+    this.onStatus = onStatus;
+    this.onPoint = onPoint;
+    this.RESP_WINDOW_MS = 120000; // RSA respiration buffer span
+
+    this.currentUser = user;
+    this._lastStatus = null;
+    this._timer = null;
+    this._initUserState();
+  }
+
+  _initUserState() {
+    this.rmssdWin = new RmssdWindow({ windowMs: this.windowSec * 1000 });
+    this.baseline = new Baseline({ samples: 60, adaptive: this.adaptive });
+    this.classifier = new StateClassifier({ minDwellMs: 45000 }); // hysteresis
+    this.respBuffer = []; // { tMs, rr } of artifact-cleaned NN for RSA
+    this.respHistory = []; // recent { brpm, conf } for temporal smoothing
+    this.beats = 0;
+    this.lastPeakMs = null; // running session time (sum of observed RR)
+    this.lastRr = null;
+    this.deviceHr = null; // HR reported directly by the device
+    this.connected = false;
+    this.baselineSaved = false;
+    this.lastAdaptedAt = null;
+
+    // Reuse this user's recent (< 24 h) saved baseline so a session starts
+    // calibrated rather than recalibrating from scratch.
+    const saved = loadBaseline(this.currentUser);
+    if (saved) {
+      this.baseline.loadFrozen(saved);
+      this.baselineSaved = true;
+    }
+  }
+
+  start() {
+    if (this._timer) return;
+    this._timer = setInterval(() => this._tick(), 1000);
+  }
+
+  stop() {
+    if (this._timer) { clearInterval(this._timer); this._timer = null; }
+  }
+
+  // --- data ingestion (called by the BLE adapter or the simulator) ----------
+  setConnected(v) {
+    this.connected = v;
+    if (!v) this.deviceHr = null; // clear stale HR while reconnecting
+  }
+
+  onHr(hr) { this.deviceHr = hr; }
+
+  onRr(rr) {
+    this.lastPeakMs = (this.lastPeakMs ?? 0) + rr;
+    this._handleRR(this.lastPeakMs, rr);
+  }
+
+  _handleRR(tMs, rr) {
+    this.beats++;
+    this.lastRr = rr;
+    const accepted = this.rmssdWin.add(tMs, rr);
+    // Only artifact-accepted (NN) beats feed the respiration buffer, so a single
+    // ectopic/missed beat cannot corrupt the RSA spectrum.
+    if (accepted) {
+      this.respBuffer.push({ tMs, rr });
+      const cutoff = tMs - this.RESP_WINDOW_MS;
+      while (this.respBuffer.length && this.respBuffer[0].tMs < cutoff) this.respBuffer.shift();
+    }
+  }
+
+  // --- baseline controls (wired to the dashboard buttons) -------------------
+  resetBaseline() {
+    this.baseline.reset();
+    this.respHistory.length = 0;
+    this.baselineSaved = false;
+    this.lastAdaptedAt = null;
+  }
+
+  // Re-derive the baseline from the resting cluster of the whole session so far
+  // and apply it at once. Returns the same shape as the desktop /api/baseline/full.
+  refreezeFromHistory() {
+    const b = this.baseline.refreezeFromHistory();
+    if (b) {
+      this.respHistory.length = 0;
+      this.baselineSaved = true;
+      this.lastAdaptedAt = this.baseline.adaptedAt;
+      saveBaseline(this.currentUser, this.baseline.toJSON());
+      return { ok: true, applied: true,
+        baseline: { rmssd: Number(b.rmssd.toFixed(1)), hr: Number(b.hr.toFixed(1)), n: b.n } };
+    }
+    return { ok: true, applied: false, reason: 'insufficient-data' };
+  }
+
+  switchUser(n) {
+    if (!(Number.isInteger(n) && n >= 1 && n <= 5) || n === this.currentUser) return;
+    if (this.baseline.get()) saveBaseline(this.currentUser, this.baseline.toJSON());
+    this.currentUser = n;
+    this._initUserState(); // fresh windows/classifier/baseline + reused saved baseline
+    // The next _tick (≤ 1 s) reports the new user; the UI also highlights optimistically.
+  }
+
+  getStatus() { return this._lastStatus; }
+
+  // --- 1 Hz reporting loop (mirrors index.js) -------------------------------
+  _tick() {
+    const { rmssd, rmssdEma, hr, sdnn, count, corrected } = this.rmssdWin.compute(this.lastPeakMs ?? undefined);
+    const wall = localIso();
+    const effHr = this.deviceHr != null ? this.deviceHr : hr;
+
+    const rmssdVal = rmssd != null ? Number(rmssd.toFixed(1)) : null;
+    const rmssdSmoothed = rmssdEma != null ? Number(rmssdEma.toFixed(1)) : null;
+    const hrVal = effHr != null ? Number(effHr.toFixed(1)) : null;
+
+    // Baseline (settled readings) reads the SMOOTHED RMSSD so the label does not
+    // chase per-second noise; persist on first freeze and on adaptive nudges.
+    if (this.connected) {
+      this.baseline.add(rmssdSmoothed, hrVal);
+      if (this.baseline.get() && !this.baselineSaved) {
+        saveBaseline(this.currentUser, this.baseline.toJSON());
+        this.baselineSaved = true;
+      }
+      if (this.baseline.adaptedAt && this.baseline.adaptedAt !== this.lastAdaptedAt) {
+        this.lastAdaptedAt = this.baseline.adaptedAt;
+        saveBaseline(this.currentUser, this.baseline.toJSON());
+      }
+    }
+    const base = this.baseline.get();
+    const state = this.classifier.update(rmssdSmoothed, hrVal, base, Date.now());
+
+    // Respiration via RSA, median-smoothed across recent estimates.
+    const resp = estimateRespiration(this.respBuffer);
+    let respOut = null, respConf = null, respPreview = false;
+    if (resp && (resp.valid || resp.preview)) {
+      this.respHistory.push({ brpm: resp.breathsPerMin, conf: resp.confidence });
+      if (this.respHistory.length > 5) this.respHistory.shift();
+      respOut = Number(median(this.respHistory.map((e) => e.brpm)).toFixed(1));
+      respConf = Number(median(this.respHistory.map((e) => e.conf)).toFixed(2));
+      respPreview = resp.preview;
+    } else {
+      this.respHistory.length = 0;
+    }
+
+    const status = {
+      connected: this.connected,
+      user: this.currentUser,
+      mode: this.mode,
+      hr: hrVal,
+      rmssd: rmssdVal,
+      rmssdSmoothed,
+      sdnn: sdnn != null ? Number(sdnn.toFixed(1)) : null,
+      rrCount: count,
+      beatsTotal: this.beats,
+      rejected: this.rmssdWin.rejected,
+      corrected,
+      baseline: base ? { rmssd: Number(base.rmssd.toFixed(1)), hr: Number(base.hr.toFixed(1)) } : null,
+      calibration: Number(this.baseline.progress().toFixed(2)),
+      state,
+      respiration: respOut,
+      respirationConfidence: respConf,
+      respirationPreview: respPreview,
+      updatedAt: wall,
+    };
+    this._lastStatus = status;
+    this.onStatus(status);
+    // Only push a chart point when there is an actual reading. Emitting nulls
+    // while disconnected floods the history and graph with empty points and
+    // flattens the lines — a long unconnected stretch would otherwise dominate
+    // the time axis and bury the real data.
+    if (hrVal != null || rmssdVal != null) {
+      this.onPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone });
+    }
+  }
+}

@@ -45,6 +45,14 @@ function createServer({ port = 3000, log = () => {} } = {}) {
     res.json({ ok: true });
   });
 
+  // Re-derive the resting baseline from the whole session collected so far (vs.
+  // /reset, which recalibrates over the next minute). The monitor computes it
+  // synchronously and replies through the callback with whether it applied.
+  app.post('/api/baseline/full', (_req, res) => {
+    const handled = events.emit('baseline-full', (result) => res.json(result));
+    if (!handled) res.json({ ok: true, applied: false, reason: 'no-listener' });
+  });
+
   // Switch the active user profile (1-5). The monitor loads that user's saved
   // resting baseline (if recent), separates their CSV log, and recalibrates.
   app.post('/api/user', (req, res) => {

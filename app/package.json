@@ -1,0 +1,22 @@
+{
+  "name": "rmssd-h10n-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Polar H10 real-time RMSSD (HRV) monitor — Android app (Capacitor)",
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "copy": "npm run build && cap copy",
+    "sync": "npm run build && cap sync",
+    "open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor-community/bluetooth-le": "^8.1.3",
+    "@capacitor/android": "^8.3.4",
+    "@capacitor/cli": "^8.3.4",
+    "@capacitor/core": "^8.3.4",
+    "@capacitor/screen-orientation": "^8.0.1",
+    "chart.js": "^4.5.1",
+    "esbuild": "^0.28.0"
+  }
+}

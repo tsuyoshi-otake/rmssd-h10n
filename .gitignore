@@ -10,3 +10,6 @@ data/*
 
 *.log
 .DS_Store
+
+# Playwright MCP scratch (browser-test screenshots/snapshots)
+.playwright-mcp/
