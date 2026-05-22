@@ -12,7 +12,7 @@ import { RmssdWindow, median } from '../../src/rmssd.js';
 import { Baseline, StateClassifier } from '../../src/analysis.js';
 import { estimateRespiration } from '../../src/respiration.js';
 import { localIso } from '../../src/time.js';
-import { loadBaseline, saveBaseline } from './store.js';
+import { loadBaseline, saveBaseline, loadHistSamples, saveHistSamples } from './store.js';
 
 export class Monitor {
   constructor({ windowSec = 30, user = 1, mode = 'hr-rr', adaptive = null,
@@ -51,6 +51,11 @@ export class Monitor {
       this.baseline.loadFrozen(saved);
       this.baselineSaved = true;
     }
+
+    // Persisted whole-history (1-min downsampled) samples backing the 全期間
+    // re-baseline, so it spans restarts (Baseline.history is memory-only).
+    this.persistHist = loadHistSamples(this.currentUser);
+    this._minBuf = []; // collects the current minute's smoothed readings
   }
 
   start() {
@@ -99,7 +104,7 @@ export class Monitor {
   // Re-derive the baseline from the resting cluster of the whole session so far
   // and apply it at once. Returns the same shape as the desktop /api/baseline/full.
   refreezeFromHistory() {
-    const b = this.baseline.refreezeFromHistory();
+    const b = this.baseline.refreezeFromHistory({ extra: this.persistHist });
     if (b) {
       this.respHistory.length = 0;
       this.baselineSaved = true;
@@ -188,6 +193,22 @@ export class Monitor {
     // the time axis and bury the real data.
     if (hrVal != null || rmssdVal != null) {
       this.onPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone });
+    }
+
+    // Persist a 1-min downsampled {rmssd, hr} so 全期間 re-baseline survives
+    // restarts. Uses the smoothed RMSSD (same signal the baseline tracks).
+    if (this.connected && rmssdSmoothed != null && hrVal != null) {
+      this._minBuf.push({ rmssd: rmssdSmoothed, hr: hrVal });
+      if (this._minBuf.length >= 60) {
+        this.persistHist.push({
+          rmssd: Number(median(this._minBuf.map((s) => s.rmssd)).toFixed(1)),
+          hr: Number(median(this._minBuf.map((s) => s.hr)).toFixed(1)),
+          t: Date.now(),
+        });
+        if (this.persistHist.length > 14 * 24 * 60) this.persistHist.shift();
+        saveHistSamples(this.currentUser, this.persistHist);
+        this._minBuf = [];
+      }
     }
   }
 }

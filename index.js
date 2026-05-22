@@ -132,6 +132,32 @@ async function main() {
     return null;
   }
 
+  // Read every (rmssd, hr) this user has logged to CSV, so the "全期間" re-baseline
+  // truly spans all sessions/days — not just the current run's in-memory history.
+  // Parses by header name to stay robust to column order.
+  function loadAllCsvSamples(n) {
+    const samples = [];
+    let files;
+    try { files = fs.readdirSync(dataDir).filter((f) => f.startsWith(`rmssd-u${n}-`) && f.endsWith('.csv')); }
+    catch (_) { return samples; }
+    for (const f of files) {
+      let text;
+      try { text = fs.readFileSync(path.join(dataDir, f), 'utf8'); } catch (_) { continue; }
+      const lines = text.split('\n');
+      if (lines.length < 2) continue;
+      const cols = lines[0].split(',');
+      const ri = cols.indexOf('rmssd_ms'), hi = cols.indexOf('hr_bpm');
+      if (ri < 0 || hi < 0) continue;
+      for (let i = 1; i < lines.length; i++) {
+        if (!lines[i]) continue;
+        const c = lines[i].split(',');
+        const r = parseFloat(c[ri]), h = parseFloat(c[hi]);
+        if (Number.isFinite(r) && Number.isFinite(h) && r > 0 && h > 0) samples.push({ rmssd: r, hr: h });
+      }
+    }
+    return samples;
+  }
+
   const loaded = tryLoadBaseline(currentUser);
   if (loaded) {
     baselineSaved = true;
@@ -193,16 +219,17 @@ async function main() {
     // "Re-derive from the full session": freeze the baseline now from the resting
     // cluster of all data collected so far, persist it, and report the outcome.
     server.events.on('baseline-full', (reply) => {
-      const b = baseline.refreezeFromHistory();
+      const csvSamples = loadAllCsvSamples(currentUser); // whole history across all sessions/days
+      const b = baseline.refreezeFromHistory({ extra: csvSamples });
       if (b) {
         respHistory.length = 0;
         baselineSaved = true;
         lastAdaptedAt = baseline.adaptedAt;
         try { fs.writeFileSync(baselineFileFor(currentUser), JSON.stringify(baseline.toJSON())); } catch (_) {}
-        log(`User ${currentUser}: baseline re-derived from full session: RMSSD ${b.rmssd.toFixed(1)} ms, HR ${b.hr.toFixed(1)} bpm (rest cluster n=${b.n}).`);
+        log(`User ${currentUser}: baseline re-derived from full history (CSV ${csvSamples.length} + session): RMSSD ${b.rmssd.toFixed(1)} ms, HR ${b.hr.toFixed(1)} bpm (rest cluster n=${b.n}).`);
         reply({ ok: true, applied: true, baseline: { rmssd: Number(b.rmssd.toFixed(1)), hr: Number(b.hr.toFixed(1)), n: b.n } });
       } else {
-        log('Full-session baseline requested, but no solid resting cluster yet — keeping current baseline.');
+        log('Full-history baseline requested, but no solid resting cluster yet — keeping current baseline.');
         reply({ ok: true, applied: false, reason: 'insufficient-data' });
       }
     });

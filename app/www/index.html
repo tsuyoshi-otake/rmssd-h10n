@@ -86,18 +86,47 @@
       #conn, #calib { font-size: 11px; white-space: nowrap; }
       .lbl-full { display: none; }
       .lbl-short { display: inline; }
-      .wrap { padding: 10px 14px; }
-      .state { padding: 9px 14px; margin-bottom: 10px; gap: 12px; }
-      .state .label { font-size: 18px; }
-      .state .detail { font-size: 12px; margin-top: 2px; }
-      .arousal { margin-top: 6px; }
-      .cards { gap: 10px; margin-bottom: 10px; }
-      .card { padding: 8px 12px; min-width: 88px; }
-      .card .value { font-size: 26px; }
+      .wrap { padding: 8px 14px; }
+      .state { padding: 6px 14px; margin-bottom: 8px; gap: 10px; }
+      .state .ind { width: 11px; height: 11px; }
+      .state .label { font-size: 15px; }
+      .state .detail { font-size: 11px; margin-top: 1px; }
+      .arousal { margin-top: 4px; }
+      .arousal .track { height: 5px; }
+      .arousal .scale { display: none; } /* hide リラックス/覚醒度/興奮 labels to save height */
+      .cards { gap: 8px; margin-bottom: 8px; }
+      .card { padding: 6px 10px; min-width: 76px; }
+      .card .label { font-size: 10px; }
+      .card .value { font-size: 21px; }
+      .card .unit { font-size: 11px; }
+      .card .base { font-size: 10px; min-height: 0; margin-top: 2px; }
       .chartbox { height: 60vh; min-height: 240px; }
       .chartbox.trend { height: 52vh; min-height: 200px; }
       .section { margin: 14px 2px 6px; }
       .note { display: none; }
+    }
+
+    /* Portrait (phone upright): trim the default (desktop-derived) sizing so the
+       header / state / cards aren't so tall — short button labels, smaller cards. */
+    @media (orientation: portrait) {
+      header { padding: 10px 16px; gap: 8px; }
+      header h1 { font-size: 16px; }
+      header button { padding: 5px 10px; font-size: 12px; }
+      .users button { padding: 5px 9px; min-width: 30px; }
+      .users .lbl { display: none; }
+      #histInfo { display: none; }
+      .lbl-full { display: none; }
+      .lbl-short { display: inline; }
+      .wrap { padding: 12px; }
+      .state { padding: 10px 16px; margin-bottom: 10px; gap: 12px; }
+      .state .label { font-size: 18px; }
+      .state .detail { font-size: 12px; margin-top: 2px; }
+      .arousal { margin-top: 5px; }
+      .cards { gap: 10px; margin-bottom: 10px; }
+      .card { padding: 9px 13px; min-width: 104px; }
+      .card .label { font-size: 11px; }
+      .card .value { font-size: 25px; }
+      .card .base { font-size: 11px; min-height: 0; margin-top: 3px; }
     }
 
     /* --- activity logging (record bar + chips + picker modal) --- */

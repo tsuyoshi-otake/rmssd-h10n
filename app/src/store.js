@@ -25,3 +25,21 @@ export function saveBaseline(user, obj) {
   if (!obj) return;
   try { localStorage.setItem(KEY(user), JSON.stringify(obj)); } catch (_) {}
 }
+
+// Whole-history downsampled samples ({rmssd, hr, t}) backing the "全期間で基準を
+//取り直す" action. Unlike Baseline.history (memory-only, ~6 h ring buffer), this
+// is PERSISTED, so the resting baseline can be re-derived from data accumulated
+// ACROSS restarts. Stored per user, 1-min downsampled, capped to ~14 days.
+const HS_KEY = (user) => `rmssd-h10n.histsamples.v1.u${user}`;
+const HS_CAP = 14 * 24 * 60; // ~14 days of 1-min samples (20160 points)
+
+export function loadHistSamples(user) {
+  try {
+    const a = JSON.parse(localStorage.getItem(HS_KEY(user)) || '[]');
+    return Array.isArray(a) ? a : [];
+  } catch (_) { return []; }
+}
+
+export function saveHistSamples(user, arr) {
+  try { localStorage.setItem(HS_KEY(user), JSON.stringify(arr.slice(-HS_CAP))); } catch (_) {}
+}

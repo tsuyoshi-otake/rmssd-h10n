@@ -183,8 +183,12 @@ class Baseline {
    * the refreshed baseline applies at once. Returns the new frozen baseline, or
    * null if there is not yet a solid resting cluster.
    */
-  refreezeFromHistory({ hrQuantile = 0.25, minCluster = 30 } = {}) {
-    const est = restClusterBaseline(this.history, { hrQuantile, minCluster });
+  refreezeFromHistory({ hrQuantile = 0.25, minCluster = 30, extra = null } = {}) {
+    // `extra` = persisted whole-history samples (past sessions / CSV), merged
+    // with this session's in-memory history so "全期間" truly spans restarts
+    // rather than just the current run's ring buffer.
+    const all = extra && extra.length ? extra.concat(this.history) : this.history;
+    const est = restClusterBaseline(all, { hrQuantile, minCluster });
     if (!est) return null;
     this.frozen = { rmssd: est.rmssd, hr: est.hr, n: est.n, savedAt: Date.now() };
     // The in-progress (reset-style) accumulators are now irrelevant; clear them
