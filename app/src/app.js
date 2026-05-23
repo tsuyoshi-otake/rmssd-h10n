@@ -167,6 +167,7 @@ const hostBridge = {
   setBaseline: (rmssd, hr) => monitor.setBaseline(rmssd, hr), // manual override -> { ok, baseline? }
   setPostureRef: () => monitor.setPostureReference(), // capture upright posture -> { ok }
   setSupineRef: () => monitor.setSupineReference(), // capture supine reference (sleep position) -> { ok }
+  toggleSleepLR: () => monitor.toggleSleepLR(), // flip sleep-position left/right -> { ok, swap }
   setOrientation: (mode) => applyOrientation(mode), // 'auto' | 'portrait' | 'landscape'
   exportFiles: (files) => exportFiles(files), // share/download CSVs -> { method, count }
   getRrLog: () => monitor.getRrLog(), // recent raw RR beats for the Kubios export
@@ -240,6 +241,7 @@ function makeRemoteBridge() {
     setBaseline: () => ({ ok: false }),
     setPostureRef: () => ({ ok: false }),
     setSupineRef: () => ({ ok: false }),
+    toggleSleepLR: () => ({ ok: false }),
     setOrientation: noop,
     exportFiles: (files) => exportFiles(files), // browser download
     getRrLog: () => [], // raw RR is host-only (not streamed to remote)

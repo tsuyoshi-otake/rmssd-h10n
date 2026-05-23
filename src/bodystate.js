@@ -32,7 +32,7 @@ class BodyStateEstimator {
   static get MOVE_ENTER_MS() { return 4000; }    // sustained movement before "active"
   static get ACTIVE_EXIT_MS() { return 30000; }  // stillness before active → sitting/lying
   static get MIN_DWELL_MS() { return 12000; }    // min time between (slow) state changes
-  static get LYING_DEG() { return 70; }          // near-horizontal → lying (reclining stays sitting)
+  static get LYING_DEG() { return 65; }          // matches posture's lying boundary (reclining < 65° stays sitting)
   static get SLEEP_STILL_MS() { return 5 * 60000; } // stillness required before sleep eligible
   static get SLEEP_HOLD_MS() { return 2 * 60000; }  // signature held continuously → asleep
   static get HR_MARGIN() { return 3; }           // bpm below resting baseline

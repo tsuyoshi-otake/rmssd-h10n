@@ -79,6 +79,17 @@ export function saveSupineRef(user, ref) {
   try { localStorage.setItem(SUP_KEY(user), JSON.stringify(ref)); } catch (_) {}
 }
 
+// Per-user left/right swap for sleep-position detection (mirror correction).
+const LR_KEY = (user) => `rmssd-h10n.sleeplr.v1.u${user}`;
+
+export function loadSleepSwap(user) {
+  try { return localStorage.getItem(LR_KEY(user)) === '1'; } catch (_) { return false; }
+}
+
+export function saveSleepSwap(user, swap) {
+  try { localStorage.setItem(LR_KEY(user), swap ? '1' : '0'); } catch (_) {}
+}
+
 // Per-user daily step total: { day: local-midnight ms, total }. Persisted so the
 // running count survives a restart within the same day (resets when day rolls).
 const STEPS_KEY = (user) => `rmssd-h10n.stepsday.v1.u${user}`;

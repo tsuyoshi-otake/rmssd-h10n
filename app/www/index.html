@@ -237,7 +237,7 @@
     .baseactions .start { background: var(--accent); border-color: var(--accent); color: #04121c; font-weight: 650; }
     /* remote (PC) view is read-only: hide control buttons, but keep the settings
        menu reachable so export (CSV) still works from the browser. */
-    .remote-view #recalibBtn, .remote-view #recalibFullBtn, .remote-view #editBaseBtn, .remote-view #recalPostureBtn, .remote-view #supineBtn,
+    .remote-view #recalibBtn, .remote-view #recalibFullBtn, .remote-view #editBaseBtn, .remote-view #recalPostureBtn, .remote-view #supineBtn, .remote-view #sleepLRBtn,
     .remote-view #clearBtn, .remote-view #orientBtn, .remote-view #serverBtn, .remote-view .srvurl,
     .remote-view #userSel, .remote-view #actStartBtn, .remote-view #settingsMenu .sep { display: none !important; }
     @media (max-width: 520px) { .grid { grid-template-columns: repeat(3, 1fr); } }
@@ -262,6 +262,7 @@
         <button id="editBaseBtn" title="基準値(RMSSD/心拍)を手動で設定">基準を編集</button>
         <button id="recalPostureBtn" title="今のまっすぐな姿勢を基準（傾き0°）として登録">姿勢の基準を取り直す</button>
         <button id="supineBtn" title="あおむけで横になった状態を寝姿勢の基準として登録">あおむけで基準を取る</button>
+        <button id="sleepLRBtn" title="寝姿勢の左右が逆に出るとき押す">寝姿勢の左右を反転</button>
         <div class="sep"></div>
         <button id="exportBtn" title="履歴・トレンド・アクティビティ・基準値をCSVで書き出して共有"><span class="lbl-full">エクスポート (CSV)</span></button>
         <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
@@ -1186,6 +1187,17 @@
         calib.textContent = (r && r.ok)
           ? 'あおむけの基準を登録しました（寝姿勢を判定します）'
           : 'あおむけで横になってから押してください。';
+      } catch (_) {}
+    });
+
+    document.getElementById('sleepLRBtn').addEventListener('click', () => {
+      const calib = document.getElementById('calib');
+      try {
+        const r = RmssdBridge.toggleSleepLR();
+        baselineMsgUntil = Date.now() + 4000;
+        calib.textContent = (r && r.ok)
+          ? '寝姿勢の左右を反転しました（' + (r.swap ? '反転ON' : '通常') + '）'
+          : '反転できませんでした。';
       } catch (_) {}
     });
 

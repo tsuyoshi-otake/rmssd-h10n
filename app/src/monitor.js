@@ -17,7 +17,7 @@ import { BodyStateEstimator } from '../../src/bodystate.js';
 import { localIso } from '../../src/time.js';
 import { loadBaseline, saveBaseline, loadHistSamples, saveHistSamples,
          loadPostureRef, savePostureRef, loadStepsDay, saveStepsDay,
-         loadSupineRef, saveSupineRef } from './store.js';
+         loadSupineRef, saveSupineRef, loadSleepSwap, saveSleepSwap } from './store.js';
 
 // Local-midnight epoch ms for a given time (day boundary for the step counter).
 function dayStartOf(ms) { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); }
@@ -75,6 +75,7 @@ export class Monitor {
     this.posture = new PostureTracker({
       ref: loadPostureRef(this.currentUser),
       supineRef: loadSupineRef(this.currentUser),
+      latSign: loadSleepSwap(this.currentUser) ? -1 : 1,
     });
     this._postureSavedAt = this.posture.calibratedAt;
 
@@ -184,6 +185,15 @@ export class Monitor {
     if (!ref) return { ok: false, reason: 'not-lying' };
     saveSupineRef(this.currentUser, ref);
     return { ok: true };
+  }
+
+  // Flip the sleep-position left/right mapping (mirror correction). Returns the
+  // new swap state.
+  toggleSleepLR() {
+    const swap = this.posture.latSign === 1; // true → becomes mirrored
+    this.posture.latSign = swap ? -1 : 1;
+    saveSleepSwap(this.currentUser, swap);
+    return { ok: true, swap };
   }
 
   switchUser(n) {

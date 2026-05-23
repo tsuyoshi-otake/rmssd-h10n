@@ -35,7 +35,7 @@ function angleBetween(a, b) {
 }
 
 class PostureTracker {
-  constructor({ ref = null, supineRef = null, sampleRate = 25 } = {}) {
+  constructor({ ref = null, supineRef = null, latSign = 1, sampleRate = 25 } = {}) {
     // Gravity low-pass: ~1.5 s time constant at 25 Hz. Activity uses the same
     // residual, EMA-smoothed a bit faster.
     this.aG = 1 - Math.exp(-1 / (1.5 * sampleRate));
@@ -51,6 +51,9 @@ class PostureTracker {
     // the upright ref it fixes the body's posterior + lateral axes, so a lying
     // gravity vector resolves to supine / prone / left / right.
     this.supineRef = supineRef && supineRef.x != null ? { x: supineRef.x, y: supineRef.y, z: supineRef.z } : null;
+    // Left/right depends on the sensor-frame handedness and how the strap is
+    // worn; if it comes out mirrored, this flips it (set from a UI toggle).
+    this.latSign = latSign === -1 ? -1 : 1;
     this._lastAutoCalAttempt = 0;
   }
 
@@ -115,7 +118,7 @@ class PostureTracker {
     const Lat = norm(cross(Lh, Ph));                 // body-right
     if (!Lat) return null;
     const gp = sub(this.g, scale(Lh, dot(this.g, Lh)));
-    const aP = dot(gp, Ph), aLat = dot(gp, Lat);
+    const aP = dot(gp, Ph), aLat = this.latSign * dot(gp, Lat);
     if (Math.abs(aP) >= Math.abs(aLat)) return aP > 0 ? 'supine' : 'prone';
     return aLat > 0 ? 'right' : 'left';
   }
