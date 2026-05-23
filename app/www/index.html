@@ -303,6 +303,7 @@
       <div class="card steps"><div class="label">歩数（今日）</div><div class="value"><span id="steps">0</span></div><div class="base" id="stepsBase">歩調 –</div></div>
       <div class="mini">
         <div class="row"><span class="k">SDNN</span><span class="v"><span id="sdnn">–</span><span class="unit">ms</span></span></div>
+        <div class="row" title="5分窓のRMSSD（標準参照窓。30秒値は約0.6〜0.7倍）"><span class="k">RMSSD 5分</span><span class="v"><span id="rmssd5">–</span><span class="unit">ms</span></span></div>
         <div class="row"><span class="k">RR (窓内)</span><span class="v"><span id="count">–</span></span></div>
       </div>
     </div>
@@ -830,6 +831,7 @@
       document.getElementById('rmssd').textContent = fmt(s.rmssd);
       document.getElementById('hr').textContent = fmt(s.hr, 0);
       document.getElementById('sdnn').textContent = fmt(s.sdnn);
+      document.getElementById('rmssd5').textContent = s.rmssd5 != null ? fmt(s.rmssd5) : '–';
       document.getElementById('count').textContent = s.rrCount ?? '–';
       document.getElementById('resp').textContent = fmt(s.respiration);
 
@@ -1108,6 +1110,15 @@
             content: toCsv(['rmssd_ms', 'hr_bpm'],
               curBaseline ? [[curBaseline.rmssd, curBaseline.hr]] : []) },
         ];
+        // Raw RR intervals (host only) — feed this into Kubios / Elite HRV for
+        // gold-standard 5-min-window HRV. `accepted=0` marks artifact-rejected beats.
+        try {
+          const rr = RmssdBridge.getRrLog ? RmssdBridge.getRrLog() : [];
+          if (rr && rr.length) {
+            files.push({ name: `rmssd-u${u}-rr-${stamp}.csv`, mime: 'text/csv',
+              content: toCsv(['wallClock', 'rr_ms', 'accepted'], rr.map((b) => [b.wall, b.rr, b.accepted])) });
+          }
+        } catch (_) {}
         const r = await RmssdBridge.exportFiles(files);
         if (r && r.method === 'download') alert(`${r.count} 件のCSVをダウンロードしました。`);
       } catch (e) {

@@ -40,6 +40,11 @@ export class Monitor {
 
   _initUserState() {
     this.rmssdWin = new RmssdWindow({ windowMs: this.windowSec * 1000 });
+    // A second, 5-minute window so the app can show the value at the standard
+    // HRV reference window (the 30 s reading runs ~0.6–0.7× of it).
+    this.rmssdWin5 = new RmssdWindow({ windowMs: 300000 });
+    // Recent raw RR intervals (for the Kubios/Elite-HRV export). Bounded ring.
+    this.rrLog = []; // { wall, rr, accepted }
     this.baseline = new Baseline({ samples: 60, adaptive: this.adaptive });
     this.classifier = new StateClassifier({ minDwellMs: 45000 }); // hysteresis
     this.respBuffer = []; // { tMs, rr } of artifact-cleaned NN for RSA
@@ -114,6 +119,10 @@ export class Monitor {
     this.beats++;
     this.lastRr = rr;
     const accepted = this.rmssdWin.add(tMs, rr);
+    this.rmssdWin5.add(tMs, rr);
+    // Log the raw beat for the RR export (capped to ~25 min of beats).
+    this.rrLog.push({ wall: localIso(), rr: Number(rr.toFixed(1)), accepted: accepted ? 1 : 0 });
+    if (this.rrLog.length > 2500) this.rrLog.shift();
     // Only artifact-accepted (NN) beats feed the respiration buffer, so a single
     // ectopic/missed beat cannot corrupt the RSA spectrum.
     if (accepted) {
@@ -187,9 +196,15 @@ export class Monitor {
 
   getStatus() { return this._lastStatus; }
 
+  // Recent raw RR intervals for the export (Kubios / Elite HRV). Copy so callers
+  // can't mutate the live ring.
+  getRrLog() { return this.rrLog.slice(); }
+
   // --- 1 Hz reporting loop (mirrors index.js) -------------------------------
   _tick() {
     const { rmssd, rmssdEma, hr, sdnn, count, corrected } = this.rmssdWin.compute(this.lastPeakMs ?? undefined);
+    const r5 = this.rmssdWin5.compute(this.lastPeakMs ?? undefined);
+    const rmssd5 = r5.rmssd != null ? Number(r5.rmssd.toFixed(1)) : null;
     const wall = localIso();
     const effHr = this.deviceHr != null ? this.deviceHr : hr;
 
@@ -265,6 +280,7 @@ export class Monitor {
       mode: this.mode,
       hr: hrVal,
       rmssd: rmssdVal,
+      rmssd5, // 5-min window RMSSD (standard reference window)
       rmssdSmoothed,
       sdnn: sdnn != null ? Number(sdnn.toFixed(1)) : null,
       rrCount: count,

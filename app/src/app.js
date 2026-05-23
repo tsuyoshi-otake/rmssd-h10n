@@ -169,6 +169,7 @@ const hostBridge = {
   setSupineRef: () => monitor.setSupineReference(), // capture supine reference (sleep position) -> { ok }
   setOrientation: (mode) => applyOrientation(mode), // 'auto' | 'portrait' | 'landscape'
   exportFiles: (files) => exportFiles(files), // share/download CSVs -> { method, count }
+  getRrLog: () => monitor.getRrLog(), // recent raw RR beats for the Kubios export
   now: () => localIso(), // JST ISO timestamp, matching point.t — used for activity logging
   iso: (ms) => localIso(new Date(ms)), // arbitrary epoch ms → JST ISO (activity time edits)
   isRemote: false,
@@ -241,6 +242,7 @@ function makeRemoteBridge() {
     setSupineRef: () => ({ ok: false }),
     setOrientation: noop,
     exportFiles: (files) => exportFiles(files), // browser download
+    getRrLog: () => [], // raw RR is host-only (not streamed to remote)
     now: () => localIso(),
     iso: (ms) => localIso(new Date(ms)),
     isRemote: true,
