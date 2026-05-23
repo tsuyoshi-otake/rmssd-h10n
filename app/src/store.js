@@ -43,3 +43,21 @@ export function loadHistSamples(user) {
 export function saveHistSamples(user, arr) {
   try { localStorage.setItem(HS_KEY(user), JSON.stringify(arr.slice(-HS_CAP))); } catch (_) {}
 }
+
+// Per-user upright posture reference (the gravity vector captured while sitting
+// straight). Reused within 24 h so posture is calibrated across restarts; after
+// that the strap may have been re-mounted, so we recalibrate fresh.
+const POS_KEY = (user) => `rmssd-h10n.posture.v1.u${user}`;
+
+export function loadPostureRef(user) {
+  try {
+    const r = JSON.parse(localStorage.getItem(POS_KEY(user)) || 'null');
+    if (r && r.x != null && Date.now() - (r.savedAt ?? 0) < MAX_AGE_MS) return r;
+  } catch (_) {}
+  return null;
+}
+
+export function savePostureRef(user, ref) {
+  if (!ref) return;
+  try { localStorage.setItem(POS_KEY(user), JSON.stringify(ref)); } catch (_) {}
+}

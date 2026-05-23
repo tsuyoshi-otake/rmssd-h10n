@@ -53,12 +53,9 @@
       border-radius: var(--pill); color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
     .users button:hover { background: var(--raised); color: var(--text); }
     .users button.active { background: var(--accent); border-color: var(--accent); color: #04121c; font-weight: 700; }
-    /* server pill + settings menu */
-    .srv { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; padding: 6px 11px;
-      border-radius: var(--pill); border: 1px solid var(--line); background: var(--surface); color: var(--muted); white-space: nowrap; cursor: pointer; }
-    .srv .d { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); transition: background .3s; }
-    .srv.on { color: var(--hrv); border-color: rgba(52,211,153,.4); } .srv.on .d { background: var(--hrv); }
-    #serverUrl { font-family: var(--mono); font-size: 11px; color: var(--hrv); cursor: pointer; white-space: nowrap; }
+    /* settings menu */
+    .srvurl { font-family: var(--mono); font-size: 11px; color: var(--hrv);
+      cursor: pointer; padding: 2px 12px 8px; word-break: break-all; }
     .menu-wrap { position: relative; }
     .menu { position: absolute; right: 0; top: calc(100% + 8px); min-width: 232px; z-index: 30;
       background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm);
@@ -67,6 +64,7 @@
     .menu button { width: 100%; text-align: left; background: transparent; border: none;
       padding: 10px 12px; border-radius: 8px; color: var(--text); font-size: 13px; }
     .menu button:hover { background: var(--raised); }
+    .menu button#serverBtn.on { color: var(--hrv); }
     .menu .sep { height: 1px; background: var(--line); margin: 5px 4px; }
     .menu .lbl-short { display: none; } .menu .lbl-full { display: inline; }
     .wrap { padding: 22px; max-width: 1180px; margin: 0 auto; }
@@ -111,13 +109,13 @@
     .state.high    { --tone: var(--high); }
     .state.wait    { --tone: var(--wait); }
 
-    .cards { display: grid; grid-template-columns: repeat(3, 1fr) minmax(168px, .82fr); gap: 14px; margin-bottom: 14px; align-items: stretch; }
+    .cards { display: grid; grid-template-columns: repeat(4, 1fr) minmax(150px, .72fr); gap: 14px; margin-bottom: 14px; align-items: stretch; }
     .card {
       position: relative; background: var(--surface); border: 1px solid var(--line);
       border-radius: var(--r-sm); padding: 15px 18px; overflow: hidden;
     }
     .card::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--c, var(--faint)); }
-    .card.rmssd { --c: var(--hrv); } .card.hr { --c: var(--hr); } .card.resp { --c: var(--resp); }
+    .card.rmssd { --c: var(--hrv); } .card.hr { --c: var(--hr); } .card.resp { --c: var(--resp); } .card.posture { --c: #a78bfa; }
     .card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
     .card .value { font-family: var(--mono); font-size: 34px; font-weight: 600; margin-top: 7px; font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: -.01em; }
     .card .unit { font-family: var(--sans); font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 5px; }
@@ -226,8 +224,8 @@
     .baseactions .start { background: var(--accent); border-color: var(--accent); color: #04121c; font-weight: 650; }
     /* remote (PC) view is read-only: hide control buttons, but keep the settings
        menu reachable so export (CSV) still works from the browser. */
-    .remote-view #recalibBtn, .remote-view #recalibFullBtn, .remote-view #editBaseBtn,
-    .remote-view #clearBtn, .remote-view #orientBtn, .remote-view #serverBtn,
+    .remote-view #recalibBtn, .remote-view #recalibFullBtn, .remote-view #editBaseBtn, .remote-view #recalPostureBtn,
+    .remote-view #clearBtn, .remote-view #orientBtn, .remote-view #serverBtn, .remote-view .srvurl,
     .remote-view #userSel, .remote-view #actStartBtn, .remote-view #settingsMenu .sep { display: none !important; }
     @media (max-width: 520px) { .grid { grid-template-columns: repeat(3, 1fr); } }
     @media (orientation: landscape) { .grid { grid-template-columns: repeat(5, 1fr); } }
@@ -243,17 +241,19 @@
       <span class="lbl">ユーザー</span>
     </span>
     <span id="histInfo" style="display:none"></span>
-    <span class="srv" id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止"><span class="d"></span><span id="serverLabel">サーバー</span></span>
-    <span id="serverUrl" title="クリックでURLをコピー"></span>
     <div class="menu-wrap">
       <button id="menuBtn" title="設定・操作">設定</button>
       <div class="menu" id="settingsMenu">
         <button id="recalibBtn" title="今を安静として基準値を取り直す">安静で基準を取り直す</button>
         <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算">全期間で基準を取り直す</button>
         <button id="editBaseBtn" title="基準値(RMSSD/心拍)を手動で設定">基準を編集</button>
+        <button id="recalPostureBtn" title="今のまっすぐな姿勢を「直立」の基準として登録">姿勢の基準を取り直す</button>
         <div class="sep"></div>
         <button id="exportBtn" title="履歴・トレンド・アクティビティ・基準値をCSVで書き出して共有"><span class="lbl-full">エクスポート (CSV)</span></button>
         <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
+        <div class="sep"></div>
+        <button id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止">PC共有サーバー: <span id="serverLabel">OFF</span></button>
+        <div id="serverUrl" class="srvurl" title="クリックでURLをコピー" style="display:none"></div>
         <div class="sep"></div>
         <button id="clearBtn" title="保存した履歴を消去">履歴をクリア</button>
       </div>
@@ -284,6 +284,7 @@
       <div class="card rmssd"><div class="label">RMSSD</div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div><div class="base" id="rmssdBase"></div></div>
       <div class="card hr"><div class="label">心拍数</div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div><div class="base" id="hrBase"></div></div>
       <div class="card resp"><div class="label">呼吸数</div><div class="value"><span id="resp">–</span><span class="unit">br/min</span></div><div class="base" id="respBase"></div></div>
+      <div class="card posture"><div class="label">姿勢</div><div class="value"><span id="postureDeg">–</span><span class="unit" id="postureUnit" style="display:none">°</span></div><div class="base" id="postureBase">ACC待ち</div></div>
       <div class="mini">
         <div class="row"><span class="k">SDNN</span><span class="v"><span id="sdnn">–</span><span class="unit">ms</span></span></div>
         <div class="row"><span class="k">RR (窓内)</span><span class="v"><span id="count">–</span></span></div>
@@ -378,6 +379,15 @@
     const STATE_COLORS = {
       calm: '#34d399', recover: '#4ade80', neutral: '#38bdf8',
       focus: '#2dd4bf', tense: '#fbbf24', high: '#f87171', wait: '#5b6573',
+    };
+    // Posture classes from the H10 accelerometer (lean angle vs upright reference).
+    const POSTURE = {
+      upright:  { label: '直立',     color: '#34d399' },
+      lean:     { label: '前傾',     color: '#fbbf24' },
+      reclined: { label: 'もたれ',   color: '#fb923c' },
+      lying:    { label: '横臥',     color: '#38bdf8' },
+      uncal:    { label: '基準待ち', color: '#8b95a3' },
+      nosignal: { label: '受信なし', color: '#5b6573' },
     };
 
     // Client mirror of analysis.classifyRaw (lnRMSSD + HR deltas), used ONLY to
@@ -713,6 +723,26 @@
         document.getElementById('anScores').textContent = '';
       }
 
+      // Posture from the H10 accelerometer (lean angle vs upright + activity).
+      const p = s.posture;
+      const degEl = document.getElementById('postureDeg');
+      const unitEl = document.getElementById('postureUnit');
+      const pBase = document.getElementById('postureBase');
+      if (p && p.receiving && p.calibrated && p.leanDeg != null) {
+        const info = POSTURE[p.state] || POSTURE.upright;
+        degEl.textContent = p.leanDeg;
+        degEl.style.color = info.color;
+        unitEl.style.display = '';
+        pBase.innerHTML = `<span style="color:${info.color};font-weight:600">${info.label}</span> · ${p.moving ? '動作中' : '安静'}`;
+      } else {
+        degEl.textContent = '–';
+        degEl.style.color = '';
+        unitEl.style.display = 'none';
+        const info = p ? (POSTURE[p.state] || null) : null;
+        pBase.textContent = p && p.receiving ? '基準未取得（安静で自動取得）'
+          : (info ? info.label : 'ACC待ち');
+      }
+
       // Breathing as an interpretation-confidence layer (Shaffer & Ginsberg 2017):
       // slow/fast breathing changes how much of the HRV is RSA, not autonomic tone.
       const r = s.respiration;
@@ -827,8 +857,9 @@
     const setServerUi = (info) => {
       const running = info && info.running;
       serverBtn.classList.toggle('on', !!running);
-      serverLabel.textContent = running ? 'サーバー ON' : 'サーバー';
+      serverLabel.textContent = running ? 'ON' : 'OFF';
       serverUrl.textContent = running && info.url ? info.url : '';
+      serverUrl.style.display = (running && info.url) ? 'block' : 'none';
       if (running && !snapTimer) { pushSnapshot(); snapTimer = setInterval(pushSnapshot, 4000); }
       if (!running && snapTimer) { clearInterval(snapTimer); snapTimer = null; }
     };
@@ -848,6 +879,7 @@
       });
     } else {
       serverBtn.style.display = 'none';
+      serverUrl.style.display = 'none';
     }
 
     document.getElementById('clearBtn').addEventListener('click', () => {
@@ -930,6 +962,17 @@
           : '全期間の安静データが不足しています。しばらく計測してから再試行してください。';
       } catch (_) {}
       setTimeout(() => { btn.disabled = false; }, 1500);
+    });
+
+    document.getElementById('recalPostureBtn').addEventListener('click', () => {
+      const calib = document.getElementById('calib');
+      try {
+        const r = RmssdBridge.setPostureRef();
+        baselineMsgUntil = Date.now() + 4000;
+        calib.textContent = (r && r.ok)
+          ? '今の姿勢を「直立」の基準に設定しました'
+          : 'ACCを受信していません。装着と接続を確認してください。';
+      } catch (_) {}
     });
 
     // ---- manual baseline edit (set RMSSD/HR known from prior data) ----

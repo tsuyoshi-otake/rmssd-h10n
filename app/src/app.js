@@ -63,6 +63,7 @@ async function startBle() {
     preferredId: '24:AC:AC:1B:54:C8',
     onRr: (rr) => monitor.onRr(rr),
     onHr: (hr) => monitor.onHr(hr),
+    onAcc: (s) => monitor.onAcc(s),
     onConnected: (v) => monitor.setConnected(v),
     log: (m) => console.log('[BLE]', m),
   });
@@ -123,6 +124,7 @@ const hostBridge = {
   resetBaseline: () => monitor.resetBaseline(),
   refreezeBaseline: () => monitor.refreezeFromHistory(), // { applied, baseline? }
   setBaseline: (rmssd, hr) => monitor.setBaseline(rmssd, hr), // manual override -> { ok, baseline? }
+  setPostureRef: () => monitor.setPostureReference(), // capture upright posture -> { ok }
   setOrientation: (mode) => applyOrientation(mode), // 'auto' | 'portrait' | 'landscape'
   exportFiles: (files) => exportFiles(files), // share/download CSVs -> { method, count }
   now: () => localIso(), // JST ISO timestamp, matching point.t — used for activity logging
@@ -192,6 +194,7 @@ function makeRemoteBridge() {
     resetBaseline: noop,
     refreezeBaseline: () => ({ ok: false, applied: false }),
     setBaseline: () => ({ ok: false }),
+    setPostureRef: () => ({ ok: false }),
     setOrientation: noop,
     exportFiles: (files) => exportFiles(files), // browser download
     now: () => localIso(),

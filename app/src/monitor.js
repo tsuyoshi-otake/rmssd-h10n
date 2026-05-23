@@ -11,8 +11,10 @@
 import { RmssdWindow, median } from '../../src/rmssd.js';
 import { Baseline, StateClassifier } from '../../src/analysis.js';
 import { estimateRespiration } from '../../src/respiration.js';
+import { PostureTracker } from '../../src/posture.js';
 import { localIso } from '../../src/time.js';
-import { loadBaseline, saveBaseline, loadHistSamples, saveHistSamples } from './store.js';
+import { loadBaseline, saveBaseline, loadHistSamples, saveHistSamples,
+         loadPostureRef, savePostureRef } from './store.js';
 
 export class Monitor {
   constructor({ windowSec = 30, user = 1, mode = 'hr-rr', adaptive = null,
@@ -56,6 +58,11 @@ export class Monitor {
     // re-baseline, so it spans restarts (Baseline.history is memory-only).
     this.persistHist = loadHistSamples(this.currentUser);
     this._minBuf = []; // collects the current minute's smoothed readings
+
+    // Posture from the H10 accelerometer. Reuse a recent upright reference so
+    // posture is calibrated immediately on reconnect.
+    this.posture = new PostureTracker({ ref: loadPostureRef(this.currentUser) });
+    this._postureSavedAt = this.posture.calibratedAt;
   }
 
   start() {
@@ -74,6 +81,9 @@ export class Monitor {
   }
 
   onHr(hr) { this.deviceHr = hr; }
+
+  // Accelerometer sample {x,y,z} in mg from the H10 (via the BLE adapter).
+  onAcc(s) { this.posture.add(s); }
 
   onRr(rr) {
     this.lastPeakMs = (this.lastPeakMs ?? 0) + rr;
@@ -128,6 +138,16 @@ export class Monitor {
     return { ok: true, baseline: { rmssd: Number(f.rmssd.toFixed(1)), hr: Number(f.hr.toFixed(1)) } };
   }
 
+  // Capture the current orientation as the upright posture reference (wired to
+  // the dashboard's 姿勢の基準を取り直す button). Persists like the HRV baseline.
+  setPostureReference() {
+    const ref = this.posture.setReference();
+    if (!ref) return { ok: false, reason: 'no-signal' };
+    this._postureSavedAt = this.posture.calibratedAt;
+    savePostureRef(this.currentUser, ref);
+    return { ok: true };
+  }
+
   switchUser(n) {
     if (!(Number.isInteger(n) && n >= 1 && n <= 5) || n === this.currentUser) return;
     if (this.baseline.get()) saveBaseline(this.currentUser, this.baseline.toJSON());
@@ -177,6 +197,14 @@ export class Monitor {
       this.respHistory.length = 0;
     }
 
+    // Posture from the accelerometer. Persist the reference when the tracker
+    // auto-calibrates (resting gate), so it survives a restart like the baseline.
+    const posture = this.posture.compute();
+    if (this.posture.calibratedAt && this.posture.calibratedAt !== this._postureSavedAt) {
+      this._postureSavedAt = this.posture.calibratedAt;
+      savePostureRef(this.currentUser, { ...this.posture.ref, savedAt: this.posture.calibratedAt });
+    }
+
     const status = {
       connected: this.connected,
       user: this.currentUser,
@@ -195,6 +223,7 @@ export class Monitor {
       respiration: respOut,
       respirationConfidence: respConf,
       respirationPreview: respPreview,
+      posture,
       updatedAt: wall,
     };
     this._lastStatus = status;
