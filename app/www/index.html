@@ -335,7 +335,7 @@
     </div>
     <div class="chartbox trend"><canvas id="trend15Chart"></canvas></div>
 
-    <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。最上段は直近15分の詳細（1秒間隔）、下段は5分平均・15分平均の全期間トレンドで、日付セレクタ（全期間／Today／Yesterday／各日）で表示を絞り込めます。いずれもこのブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。</div>
+    <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。最上段は直近15分の詳細（1秒間隔）、下段は5分平均・15分平均の全期間トレンドで、日付セレクタ（全期間／Today／Yesterday／各日）で表示を絞り込めます。いずれもこのブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。グラフ下端の細い帯は活動状態（水色=座位・橙=活動中・紫=臥位・藍=睡眠の可能性）です。</div>
   </div>
 
   <div class="modal-bg" id="actModal">
@@ -500,11 +500,37 @@
       },
     };
 
+    // Body-state strip: a thin segmented bar along the bottom of each chart,
+    // coloured by the contextual state (座位/活動中/臥位/睡眠) per point/bucket.
+    const bodyBandPlugin = {
+      id: 'bodyBand',
+      afterDatasetsDraw(chart) {
+        const bodies = chart.$bodies;
+        if (!bodies || !bodies.length) return;
+        const { ctx, chartArea: area, scales: { x } } = chart;
+        const h = 6, y = area.bottom - h;
+        ctx.save();
+        ctx.globalAlpha = 0.9;
+        for (let i = 0; i < bodies.length; i++) {
+          const info = BODYSTATE[bodies[i]];
+          if (!info) continue;
+          const cx = x.getPixelForValue(i);
+          const prev = i > 0 ? x.getPixelForValue(i - 1) : area.left;
+          const next = i < bodies.length - 1 ? x.getPixelForValue(i + 1) : area.right;
+          const l = i === 0 ? area.left : (prev + cx) / 2;
+          const r = i === bodies.length - 1 ? area.right : (cx + next) / 2;
+          ctx.fillStyle = info.color;
+          ctx.fillRect(l, y, Math.max(1, r - l), h);
+        }
+        ctx.restore();
+      },
+    };
+
     // ---- chart ----
     const ctx = document.getElementById('chart');
     const chart = new Chart(ctx, {
       type: 'line',
-      plugins: [stateBandPlugin, activityBandPlugin],
+      plugins: [stateBandPlugin, activityBandPlugin, bodyBandPlugin],
       data: {
         labels: [],
         datasets: [
@@ -531,7 +557,7 @@
     // Both averaged charts (5-min, 15-min) share the same configuration.
     const makeTrendChart = (canvasId) => new Chart(document.getElementById(canvasId), {
       type: 'line',
-      plugins: [stateBandPlugin],
+      plugins: [stateBandPlugin, bodyBandPlugin],
       data: {
         labels: [],
         datasets: [
@@ -564,6 +590,7 @@
       chart.data.datasets[2].data = history.map((p) => p.resp);
       chart.data.datasets[3].data = history.map((p) => p.lean ?? null);
       chart.$tones = history.map((p) => toneOf(p, curBaseline));
+      chart.$bodies = history.map((p) => p.body || null);
       chart.$activitySpans = activitySpans();
       chart.update('none');
       updateHistInfo();
@@ -679,6 +706,7 @@
         chart.data.datasets[2].data = s.map((b) => b.resp);
         chart.data.datasets[3].data = s.map((b) => b.lean ?? null);
         chart.$tones = s.map((b) => b.tone);
+        chart.$bodies = s.map((b) => b.body || null);
         chart.update('none');
         infoEl.textContent = s.length ? `${s.length} 区間 / ${gran}` : 'データなし';
       }
@@ -899,6 +927,7 @@
         chart.data.datasets.forEach((d) => d.data.shift());
       }
       chart.$tones = history.map((q) => toneOf(q, curBaseline));
+      chart.$bodies = history.map((q) => q.body || null);
       chart.$activitySpans = activitySpans();
       chart.update('none');
       saveHistory(false);
