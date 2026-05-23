@@ -38,6 +38,47 @@ const monitor = new Monitor({
   onPoint: (p) => { for (const cb of pointListeners) cb(p); hostBroadcast('point', p); },
 });
 
+// ---- smart alerts (Android host only) -------------------------------------
+// Watch the live status for sustained sedentary / forward-lean / high-load
+// conditions and raise an Android notification (works in the background via the
+// foreground service). Each alert re-arms only after its condition clears, and
+// re-fires once per interval while it persists. Toggleable from the dashboard
+// (localStorage flag, shared with the inline UI in the same WebView).
+const ALERT_FLAG = 'rmssd-h10n.alerts.v1';
+function makeAlertEngine() {
+  // Note: no forward-slouch alert — a chest accelerometer reads only the lean
+  // *angle*, not its direction, so leaning back on a backrest is indistinguishable
+  // from slouching forward; nagging on a normal reclined posture would be wrong.
+  // IDs avoid MonitorService's foreground-notification id (1) so alerts never
+  // overwrite the ongoing-service notification.
+  const defs = {
+    sedentary: { id: 101, ms: 60 * 60000, title: '座りすぎです', body: '60分以上座っています。少し立って動きましょう。' },
+    load:      { id: 103, ms: 20 * 60000, title: '高負荷が続いています', body: '緊張・高負荷の状態が続いています。深呼吸や休憩を。' },
+  };
+  const since = { sedentary: null, load: null };
+  const enabled = () => { try { return localStorage.getItem(ALERT_FLAG) !== '0'; } catch (_) { return true; } };
+  return (s) => {
+    if (!enabled()) { since.sedentary = since.load = null; return; }
+    const now = Date.now();
+    const cond = {
+      sedentary: s.body === 'sitting',
+      load: !!s.state && (s.state.tone === 'high' || s.state.tone === 'tense'),
+    };
+    for (const k of Object.keys(defs)) {
+      if (cond[k]) {
+        if (since[k] == null) since[k] = now;
+        if (now - since[k] >= defs[k].ms) {
+          try { LocalServer.showAlert({ id: defs[k].id, title: defs[k].title, body: defs[k].body }); } catch (_) {}
+          since[k] = now; // re-arm for the next full interval while it persists
+        }
+      } else {
+        since[k] = null;
+      }
+    }
+  };
+}
+if (isAndroid) statusListeners.push(makeAlertEngine());
+
 let ble = null;
 
 // Synthetic RR generator for the browser — mirrors index.js --simulate.

@@ -264,6 +264,7 @@
         <div class="sep"></div>
         <button id="exportBtn" title="履歴・トレンド・アクティビティ・基準値をCSVで書き出して共有"><span class="lbl-full">エクスポート (CSV)</span></button>
         <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
+        <button id="alertBtn" title="座りすぎ・高負荷が続いたら通知">通知: ON</button>
         <div class="sep"></div>
         <button id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止">PC共有サーバー: <span id="serverLabel">OFF</span></button>
         <div id="serverUrl" class="srvurl" title="クリックでURLをコピー" style="display:none"></div>
@@ -1130,6 +1131,21 @@
       } catch (_) {}
       setTimeout(() => { btn.disabled = false; }, 1500);
     });
+
+    // Smart-alerts on/off (Android host only; the engine in app.js reads this
+    // localStorage flag). Hidden on remote/sim where notifications can't fire.
+    (function () {
+      const btn = document.getElementById('alertBtn');
+      if (!RmssdBridge.canServe) { btn.style.display = 'none'; return; }
+      const KEY = 'rmssd-h10n.alerts.v1';
+      const isOn = () => { try { return localStorage.getItem(KEY) !== '0'; } catch (_) { return true; } };
+      const render = () => { btn.textContent = '通知: ' + (isOn() ? 'ON' : 'OFF'); };
+      render();
+      btn.addEventListener('click', () => {
+        try { localStorage.setItem(KEY, isOn() ? '0' : '1'); } catch (_) {}
+        render();
+      });
+    })();
 
     document.getElementById('recalPostureBtn').addEventListener('click', () => {
       const calib = document.getElementById('calib');

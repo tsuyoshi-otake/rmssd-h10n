@@ -113,6 +113,39 @@ public class LocalServerPlugin extends Plugin {
         call.resolve();
     }
 
+    /** Post a heads-up notification (smart alerts: sedentary / posture / load). */
+    @PluginMethod
+    public void showAlert(PluginCall call) {
+        String title = call.getString("title", "RMSSD");
+        String body = call.getString("body", "");
+        int id = call.getInt("id", 100);
+        android.app.NotificationManager nm = (android.app.NotificationManager)
+                getContext().getSystemService(android.content.Context.NOTIFICATION_SERVICE);
+        if (nm == null) { call.resolve(); return; }
+        String ch = "rmssd_alert";
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            android.app.NotificationChannel c = new android.app.NotificationChannel(
+                    ch, "RMSSD アラート", android.app.NotificationManager.IMPORTANCE_DEFAULT);
+            c.setDescription("座りすぎ・姿勢・高負荷のお知らせ");
+            nm.createNotificationChannel(c);
+        }
+        android.content.Intent open = new android.content.Intent(getContext(), MainActivity.class);
+        int piFlags = android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                | (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M ? android.app.PendingIntent.FLAG_IMMUTABLE : 0);
+        android.app.PendingIntent pi = android.app.PendingIntent.getActivity(getContext(), id, open, piFlags);
+        android.app.Notification n = new androidx.core.app.NotificationCompat.Builder(getContext(), ch)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setStyle(new androidx.core.app.NotificationCompat.BigTextStyle().bigText(body))
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setAutoCancel(true)
+                .setContentIntent(pi)
+                .setPriority(androidx.core.app.NotificationCompat.PRIORITY_DEFAULT)
+                .build();
+        nm.notify(id, n);
+        call.resolve();
+    }
+
     String getSnapshot() { return snapshot; }
     void register(NanoWSD.WebSocket c) { clients.add(c); }
     void unregister(NanoWSD.WebSocket c) { clients.remove(c); }
