@@ -182,6 +182,7 @@ function makeRemoteBridge() {
     try {
       if (snap.history) localStorage.setItem(`rmssd-h10n.history.v1.u${u}`, JSON.stringify(snap.history));
       if (snap.trend) localStorage.setItem(`rmssd-h10n.trend.v1.u${u}`, JSON.stringify(snap.trend));
+      if (snap.trend5) localStorage.setItem(`rmssd-h10n.trend5.v1.u${u}`, JSON.stringify(snap.trend5));
       if (snap.activities) localStorage.setItem(`rmssd-h10n.activities.v1.u${u}`, JSON.stringify(snap.activities));
     } catch (_) {}
     if (window.__reloadFromStorage) window.__reloadFromStorage(u);
