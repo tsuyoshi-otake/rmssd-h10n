@@ -96,6 +96,23 @@ public class LocalServerPlugin extends Plugin {
         call.resolve();
     }
 
+    /** Start/stop the foreground service that keeps monitoring alive in the background. */
+    @PluginMethod
+    public void keepAlive(PluginCall call) {
+        boolean enabled = call.getBoolean("enabled", true);
+        android.content.Intent svc = new android.content.Intent(getContext(), MonitorService.class);
+        if (enabled) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                getContext().startForegroundService(svc);
+            } else {
+                getContext().startService(svc);
+            }
+        } else {
+            getContext().stopService(svc);
+        }
+        call.resolve();
+    }
+
     String getSnapshot() { return snapshot; }
     void register(NanoWSD.WebSocket c) { clients.add(c); }
     void unregister(NanoWSD.WebSocket c) { clients.remove(c); }

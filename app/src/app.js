@@ -138,11 +138,19 @@ const hostBridge = {
   },
   // Hand the current localStorage snapshot to the server for GET /api/snapshot.
   setSnapshot: (json) => { try { return LocalServer.setSnapshot({ data: json }); } catch (_) {} },
+  // Start/stop the foreground service that keeps monitoring + server alive in the background.
+  keepAlive: (enabled) => { try { return LocalServer.keepAlive({ enabled }); } catch (_) {} },
   start: () => {
     monitor.start();
     const s = monitor.getStatus();
     if (s) for (const cb of statusListeners) cb(s);
-    if (platform === 'web') startSimulate(); else startBle();
+    if (platform === 'web') {
+      startSimulate();
+    } else {
+      startBle();
+      // Keep running with the screen off / app backgrounded (foreground service).
+      try { LocalServer.keepAlive({ enabled: true }); } catch (_) {}
+    }
   },
 };
 
