@@ -237,7 +237,7 @@
     .baseactions .start { background: var(--accent); border-color: var(--accent); color: #04121c; font-weight: 650; }
     /* remote (PC) view is read-only: hide control buttons, but keep the settings
        menu reachable so export (CSV) still works from the browser. */
-    .remote-view #recalibBtn, .remote-view #recalibFullBtn, .remote-view #editBaseBtn, .remote-view #recalPostureBtn,
+    .remote-view #recalibBtn, .remote-view #recalibFullBtn, .remote-view #editBaseBtn, .remote-view #recalPostureBtn, .remote-view #supineBtn,
     .remote-view #clearBtn, .remote-view #orientBtn, .remote-view #serverBtn, .remote-view .srvurl,
     .remote-view #userSel, .remote-view #actStartBtn, .remote-view #settingsMenu .sep { display: none !important; }
     @media (max-width: 520px) { .grid { grid-template-columns: repeat(3, 1fr); } }
@@ -261,6 +261,7 @@
         <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算">全期間で基準を取り直す</button>
         <button id="editBaseBtn" title="基準値(RMSSD/心拍)を手動で設定">基準を編集</button>
         <button id="recalPostureBtn" title="今のまっすぐな姿勢を基準（傾き0°）として登録">姿勢の基準を取り直す</button>
+        <button id="supineBtn" title="あおむけで横になった状態を寝姿勢の基準として登録">あおむけで基準を取る</button>
         <div class="sep"></div>
         <button id="exportBtn" title="履歴・トレンド・アクティビティ・基準値をCSVで書き出して共有"><span class="lbl-full">エクスポート (CSV)</span></button>
         <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
@@ -423,6 +424,8 @@
       uncal:    { label: '基準待ち', color: '#8b95a3' },
       nosignal: { label: '受信なし', color: '#5b6573' },
     };
+    // Sleep position (when lying), from the supine reference + upright reference.
+    const SLEEPPOS = { supine: 'あおむけ', prone: 'うつぶせ', left: '左向き', right: '右向き' };
     // Contextual body/activity state (posture + steps + autonomic + breathing).
     const BODYSTATE = {
       walking: { label: '歩行',         color: '#f59e0b' },
@@ -604,7 +607,7 @@
     const trend15KeyFor = (u) => trendKeyFor(u); // existing 15-min key (back-compat)
 
     const bucketStartOf = (tms, ms) => Math.floor(tms / ms) * ms;
-    const newBucket = (start) => ({ start, hrSum: 0, hrN: 0, rmssdSum: 0, rmssdN: 0, respSum: 0, respN: 0, leanSum: 0, leanN: 0, stepSum: 0, postures: {}, bodies: {}, tones: {} });
+    const newBucket = (start) => ({ start, hrSum: 0, hrN: 0, rmssdSum: 0, rmssdN: 0, respSum: 0, respN: 0, leanSum: 0, leanN: 0, stepSum: 0, postures: {}, bodies: {}, sleepPositions: {}, tones: {} });
     function accBucket(b, p) {
       if (p.hr != null) { b.hrSum += p.hr; b.hrN++; }
       if (p.rmssd != null) { b.rmssdSum += p.rmssd; b.rmssdN++; }
@@ -615,6 +618,7 @@
         b.postures[p.posture] = (b.postures[p.posture] || 0) + 1;
       }
       if (p.body) b.bodies[p.body] = (b.bodies[p.body] || 0) + 1;
+      if (p.sleepPos) b.sleepPositions[p.sleepPos] = (b.sleepPositions[p.sleepPos] || 0) + 1;
       if (p.tone) b.tones[p.tone] = (b.tones[p.tone] || 0) + 1;
     }
     const dominantTone = (counts) => {
@@ -629,6 +633,7 @@
       lean: b.leanN ? +(b.leanSum / b.leanN).toFixed(0) : null,
       posture: dominantTone(b.postures),
       body: dominantTone(b.bodies),
+      sleepPos: dominantTone(b.sleepPositions),
       steps: b.stepSum || 0,
       tone: dominantTone(b.tones),
       n: b.hrN,
@@ -894,10 +899,14 @@
         stp && stp.walking ? `歩調 ${stp.cadence} spm` : '歩調 –';
 
       // Contextual body/activity state chip (活動 / 座位 / 臥位 / 睡眠の可能性).
+      // When lying/asleep, append the sleep position (あおむけ等) if calibrated.
       const bsEl = document.getElementById('bodyState');
       const bi = s.body ? BODYSTATE[s.body] : null;
-      if (bi) { bsEl.textContent = bi.label; bsEl.style.setProperty('--bc', bi.color); }
-      else { bsEl.textContent = ''; }
+      if (bi) {
+        const pos = (s.body === 'lying' || s.body === 'asleep') && s.posture && SLEEPPOS[s.posture.sleepPos];
+        bsEl.textContent = bi.label + (pos ? ' · ' + pos : '');
+        bsEl.style.setProperty('--bc', bi.color);
+      } else { bsEl.textContent = ''; }
 
       // Breathing as an interpretation-confidence layer (Shaffer & Ginsberg 2017):
       // slow/fast breathing changes how much of the HRV is RSA, not autonomic tone.
@@ -915,7 +924,7 @@
 
     function pushPoint(p) {
       history.push({ t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone,
-        lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null, step: p.step || 0, body: p.body || null });
+        lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null, step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
       if (history.length > MAX_POINTS) history.shift();
 
       chart.data.labels.push(new Date(p.t).toLocaleTimeString('ja-JP'));
@@ -1080,17 +1089,17 @@
         const u = currentUser, stamp = exportStamp();
         const files = [
           { name: `rmssd-u${u}-detail-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'state', 'lean_deg', 'posture', 'activity_mg', 'steps', 'body'],
+            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'state', 'lean_deg', 'posture', 'activity_mg', 'steps', 'body', 'sleep_pos'],
               history.map((p) => [p.t, p.rmssd, p.hr, p.resp, toneOf(p, curBaseline) || '',
-                p.lean ?? '', p.posture || '', p.act ?? '', p.step || 0, p.body || ''])) },
+                p.lean ?? '', p.posture || '', p.act ?? '', p.step || 0, p.body || '', p.sleepPos || ''])) },
           { name: `rmssd-u${u}-trend5m-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body'],
+            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
               trend5.data.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
-                b.lean ?? '', b.posture || '', b.steps || 0, b.body || ''])) },
+                b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) },
           { name: `rmssd-u${u}-trend15m-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body'],
+            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
               trend15.data.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
-                b.lean ?? '', b.posture || '', b.steps || 0, b.body || ''])) },
+                b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) },
           { name: `rmssd-u${u}-activities-${stamp}.csv`, mime: 'text/csv',
             content: toCsv(['type', 'label', 'category', 'start', 'end', 'duration_sec'],
               activities.map((a) => [a.type, a.label, a.cat, a.start, a.end || '',
@@ -1155,6 +1164,17 @@
         calib.textContent = (r && r.ok)
           ? '今の姿勢を基準（傾き0°）に設定しました'
           : 'ACCを受信していません。装着と接続を確認してください。';
+      } catch (_) {}
+    });
+
+    document.getElementById('supineBtn').addEventListener('click', () => {
+      const calib = document.getElementById('calib');
+      try {
+        const r = RmssdBridge.setSupineRef();
+        baselineMsgUntil = Date.now() + 4000;
+        calib.textContent = (r && r.ok)
+          ? 'あおむけの基準を登録しました（寝姿勢を判定します）'
+          : 'あおむけで横になってから押してください。';
       } catch (_) {}
     });
 

@@ -166,6 +166,7 @@ const hostBridge = {
   refreezeBaseline: () => monitor.refreezeFromHistory(), // { applied, baseline? }
   setBaseline: (rmssd, hr) => monitor.setBaseline(rmssd, hr), // manual override -> { ok, baseline? }
   setPostureRef: () => monitor.setPostureReference(), // capture upright posture -> { ok }
+  setSupineRef: () => monitor.setSupineReference(), // capture supine reference (sleep position) -> { ok }
   setOrientation: (mode) => applyOrientation(mode), // 'auto' | 'portrait' | 'landscape'
   exportFiles: (files) => exportFiles(files), // share/download CSVs -> { method, count }
   now: () => localIso(), // JST ISO timestamp, matching point.t — used for activity logging
@@ -237,6 +238,7 @@ function makeRemoteBridge() {
     refreezeBaseline: () => ({ ok: false, applied: false }),
     setBaseline: () => ({ ok: false }),
     setPostureRef: () => ({ ok: false }),
+    setSupineRef: () => ({ ok: false }),
     setOrientation: noop,
     exportFiles: (files) => exportFiles(files), // browser download
     now: () => localIso(),

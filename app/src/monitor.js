@@ -16,7 +16,8 @@ import { StepCounter } from '../../src/steps.js';
 import { BodyStateEstimator } from '../../src/bodystate.js';
 import { localIso } from '../../src/time.js';
 import { loadBaseline, saveBaseline, loadHistSamples, saveHistSamples,
-         loadPostureRef, savePostureRef, loadStepsDay, saveStepsDay } from './store.js';
+         loadPostureRef, savePostureRef, loadStepsDay, saveStepsDay,
+         loadSupineRef, saveSupineRef } from './store.js';
 
 // Local-midnight epoch ms for a given time (day boundary for the step counter).
 function dayStartOf(ms) { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); }
@@ -66,7 +67,10 @@ export class Monitor {
 
     // Posture from the H10 accelerometer. Reuse a recent upright reference so
     // posture is calibrated immediately on reconnect.
-    this.posture = new PostureTracker({ ref: loadPostureRef(this.currentUser) });
+    this.posture = new PostureTracker({
+      ref: loadPostureRef(this.currentUser),
+      supineRef: loadSupineRef(this.currentUser),
+    });
     this._postureSavedAt = this.posture.calibratedAt;
 
     // Step counter (same ACC stream). Daily total persists within the day.
@@ -161,6 +165,15 @@ export class Monitor {
     if (!ref) return { ok: false, reason: 'no-signal' };
     this._postureSavedAt = this.posture.calibratedAt;
     savePostureRef(this.currentUser, ref);
+    return { ok: true };
+  }
+
+  // Capture the current orientation as the supine (on-the-back) reference for
+  // sleep-position detection. Only valid while lying. Returns { ok }.
+  setSupineReference() {
+    const ref = this.posture.setSupineReference();
+    if (!ref) return { ok: false, reason: 'not-lying' };
+    saveSupineRef(this.currentUser, ref);
     return { ok: true };
   }
 
@@ -278,7 +291,8 @@ export class Monitor {
     if (hrVal != null || rmssdVal != null) {
       this.onPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone,
         lean: (posture.calibrated && posture.receiving) ? posture.leanDeg : null,
-        posture: posture.state, activity: posture.activity, step: stepDelta, body: body.state });
+        posture: posture.state, activity: posture.activity, step: stepDelta, body: body.state,
+        sleepPos: posture.sleepPos || null });
     }
 
     // Persist a 1-min downsampled {rmssd, hr} so 全期間 re-baseline survives

@@ -17,18 +17,25 @@
 const RAD2DEG = 180 / Math.PI;
 
 function mag(v) { return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z); }
+function dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+function sub(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z }; }
+function scale(a, k) { return { x: a.x * k, y: a.y * k, z: a.z * k }; }
+function cross(a, b) {
+  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
+}
+function norm(v) { const m = mag(v); return m < 1e-6 ? null : scale(v, 1 / m); }
 
 // Angle (deg) between two vectors via the normalised dot product.
 function angleBetween(a, b) {
   const ma = mag(a), mb = mag(b);
   if (ma < 1e-6 || mb < 1e-6) return 0;
-  let c = (a.x * b.x + a.y * b.y + a.z * b.z) / (ma * mb);
+  let c = dot(a, b) / (ma * mb);
   c = Math.max(-1, Math.min(1, c));
   return Math.acos(c) * RAD2DEG;
 }
 
 class PostureTracker {
-  constructor({ ref = null, sampleRate = 25 } = {}) {
+  constructor({ ref = null, supineRef = null, sampleRate = 25 } = {}) {
     // Gravity low-pass: ~1.5 s time constant at 25 Hz. Activity uses the same
     // residual, EMA-smoothed a bit faster.
     this.aG = 1 - Math.exp(-1 / (1.5 * sampleRate));
@@ -40,6 +47,10 @@ class PostureTracker {
     // Calibrated upright reference {x,y,z}. Reused across restarts if recent.
     this.ref = ref && ref.x != null ? { x: ref.x, y: ref.y, z: ref.z } : null;
     this.calibratedAt = ref && ref.savedAt ? ref.savedAt : null;
+    // Supine reference: gravity captured while lying on the back. Together with
+    // the upright ref it fixes the body's posterior + lateral axes, so a lying
+    // gravity vector resolves to supine / prone / left / right.
+    this.supineRef = supineRef && supineRef.x != null ? { x: supineRef.x, y: supineRef.y, z: supineRef.z } : null;
     this._lastAutoCalAttempt = 0;
   }
 
@@ -81,6 +92,34 @@ class PostureTracker {
   // Returns the persistable reference, or null if no reading yet.
   setReference() { return this._setRef(); }
 
+  // Capture the current gravity as the SUPINE (on-the-back) reference. Only
+  // valid while actually lying (torso roughly horizontal vs the upright ref),
+  // so a press while seated is rejected. Returns the persistable vector or null.
+  setSupineReference() {
+    if (!this.g || !this.ref) return null;
+    if (angleBetween(this.g, this.ref) < 55) return null; // not lying down
+    this.supineRef = { x: this.g.x, y: this.g.y, z: this.g.z };
+    return { ...this.supineRef, savedAt: Date.now() };
+  }
+
+  // Resolve the current lying orientation to supine/prone/left/right using the
+  // upright (longitudinal) + supine (posterior) references. Returns null if not
+  // calibrated. Right/left follow the right-handed sensor frame; if the strap is
+  // worn flipped they swap, but supine/prone stay correct.
+  _sleepPos() {
+    if (!this.g || !this.ref || !this.supineRef) return null;
+    const Lh = norm(this.ref);                       // longitudinal (down-body)
+    if (!Lh) return null;
+    const Ph = norm(sub(this.supineRef, scale(Lh, dot(this.supineRef, Lh)))); // posterior
+    if (!Ph) return null;
+    const Lat = norm(cross(Lh, Ph));                 // body-right
+    if (!Lat) return null;
+    const gp = sub(this.g, scale(Lh, dot(this.g, Lh)));
+    const aP = dot(gp, Ph), aLat = dot(gp, Lat);
+    if (Math.abs(aP) >= Math.abs(aLat)) return aP > 0 ? 'supine' : 'prone';
+    return aLat > 0 ? 'right' : 'left';
+  }
+
   // Snapshot for the 1 Hz status. `state` is the orientation class; `moving`
   // flags active movement; `receiving` says ACC frames are currently arriving.
   compute(nowMs = Date.now()) {
@@ -102,7 +141,8 @@ class PostureTracker {
     else if (leanDeg <= L.lean) state = 'lean';
     else if (leanDeg <= L.reclined) state = 'reclined';
     else state = 'lying';
-    return { receiving: true, calibrated: true, state, leanDeg, activity, moving };
+    const sleepPos = state === 'lying' ? this._sleepPos() : null;
+    return { receiving: true, calibrated: true, state, leanDeg, activity, moving, sleepPos };
   }
 }
 
@@ -132,6 +172,16 @@ if (require.main === module) {
   s = t.compute();
   ok(s.leanDeg >= 80, `~90° lean (got ${s.leanDeg})`);
   ok(s.state === 'lying', `lying class (got ${s.state})`);
+
+  // Sleep position: body axes x=right, y=head(up), z=anterior(front).
+  // Upright gravity → toward feet (-y); supine gravity → toward back (-z).
+  const sp = new PostureTracker({ sampleRate: 25 });
+  sp.ref = { x: 0, y: -1000, z: 0 };
+  sp.supineRef = { x: 0, y: 0, z: -1000 };
+  sp.g = { x: 0, y: 0, z: -1000 }; ok(sp._sleepPos() === 'supine', `supine (got ${sp._sleepPos()})`);
+  sp.g = { x: 0, y: 0, z: 1000 };  ok(sp._sleepPos() === 'prone', `prone (got ${sp._sleepPos()})`);
+  sp.g = { x: 1000, y: 0, z: 0 };  ok(sp._sleepPos() === 'right', `right side (got ${sp._sleepPos()})`);
+  sp.g = { x: -1000, y: 0, z: 0 }; ok(sp._sleepPos() === 'left', `left side (got ${sp._sleepPos()})`);
 
   console.log(fail === 0 ? 'posture.js self-test: OK' : `posture.js self-test: ${fail} FAILED`);
   process.exit(fail === 0 ? 0 : 1);

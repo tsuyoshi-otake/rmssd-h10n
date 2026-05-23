@@ -62,6 +62,23 @@ export function savePostureRef(user, ref) {
   try { localStorage.setItem(POS_KEY(user), JSON.stringify(ref)); } catch (_) {}
 }
 
+// Per-user supine (on-the-back) reference for sleep-position detection. Same 24 h
+// reuse window as the upright reference.
+const SUP_KEY = (user) => `rmssd-h10n.supine.v1.u${user}`;
+
+export function loadSupineRef(user) {
+  try {
+    const r = JSON.parse(localStorage.getItem(SUP_KEY(user)) || 'null');
+    if (r && r.x != null && Date.now() - (r.savedAt ?? 0) < MAX_AGE_MS) return r;
+  } catch (_) {}
+  return null;
+}
+
+export function saveSupineRef(user, ref) {
+  if (!ref) return;
+  try { localStorage.setItem(SUP_KEY(user), JSON.stringify(ref)); } catch (_) {}
+}
+
 // Per-user daily step total: { day: local-midnight ms, total }. Persisted so the
 // running count survives a restart within the same day (resets when day rolls).
 const STEPS_KEY = (user) => `rmssd-h10n.stepsday.v1.u${user}`;
