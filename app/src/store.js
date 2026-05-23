@@ -61,3 +61,20 @@ export function savePostureRef(user, ref) {
   if (!ref) return;
   try { localStorage.setItem(POS_KEY(user), JSON.stringify(ref)); } catch (_) {}
 }
+
+// Per-user daily step total: { day: local-midnight ms, total }. Persisted so the
+// running count survives a restart within the same day (resets when day rolls).
+const STEPS_KEY = (user) => `rmssd-h10n.stepsday.v1.u${user}`;
+
+export function loadStepsDay(user) {
+  try {
+    const r = JSON.parse(localStorage.getItem(STEPS_KEY(user)) || 'null');
+    if (r && typeof r.day === 'number' && typeof r.total === 'number') return r;
+  } catch (_) {}
+  return null;
+}
+
+export function saveStepsDay(user, obj) {
+  if (!obj) return;
+  try { localStorage.setItem(STEPS_KEY(user), JSON.stringify(obj)); } catch (_) {}
+}

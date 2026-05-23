@@ -12,9 +12,13 @@ import { RmssdWindow, median } from '../../src/rmssd.js';
 import { Baseline, StateClassifier } from '../../src/analysis.js';
 import { estimateRespiration } from '../../src/respiration.js';
 import { PostureTracker } from '../../src/posture.js';
+import { StepCounter } from '../../src/steps.js';
 import { localIso } from '../../src/time.js';
 import { loadBaseline, saveBaseline, loadHistSamples, saveHistSamples,
-         loadPostureRef, savePostureRef } from './store.js';
+         loadPostureRef, savePostureRef, loadStepsDay, saveStepsDay } from './store.js';
+
+// Local-midnight epoch ms for a given time (day boundary for the step counter).
+function dayStartOf(ms) { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); }
 
 export class Monitor {
   constructor({ windowSec = 30, user = 1, mode = 'hr-rr', adaptive = null,
@@ -63,6 +67,14 @@ export class Monitor {
     // posture is calibrated immediately on reconnect.
     this.posture = new PostureTracker({ ref: loadPostureRef(this.currentUser) });
     this._postureSavedAt = this.posture.calibratedAt;
+
+    // Step counter (same ACC stream). Daily total persists within the day.
+    this.steps = new StepCounter();
+    this._lastStepCount = 0;
+    const sd = loadStepsDay(this.currentUser);
+    const today = dayStartOf(Date.now());
+    this.stepsDay = (sd && sd.day === today) ? sd : { day: today, total: 0 };
+    this._stepsSavedAt = 0;
   }
 
   start() {
@@ -83,7 +95,7 @@ export class Monitor {
   onHr(hr) { this.deviceHr = hr; }
 
   // Accelerometer sample {x,y,z} in mg from the H10 (via the BLE adapter).
-  onAcc(s) { this.posture.add(s); }
+  onAcc(s) { this.posture.add(s); this.steps.add(s); }
 
   onRr(rr) {
     this.lastPeakMs = (this.lastPeakMs ?? 0) + rr;
@@ -205,6 +217,23 @@ export class Monitor {
       savePostureRef(this.currentUser, { ...this.posture.ref, savedAt: this.posture.calibratedAt });
     }
 
+    // Steps: fold this tick's increment into the persisted daily total (rolling
+    // over at local midnight). `stepDelta` rides on the point for trend/CSV.
+    const stepNow = this.steps.steps;
+    let stepDelta = stepNow - this._lastStepCount;
+    if (stepDelta < 0) stepDelta = 0; // counter reset (shouldn't happen)
+    this._lastStepCount = stepNow;
+    const today = dayStartOf(Date.now());
+    if (this.stepsDay.day !== today) this.stepsDay = { day: today, total: 0 };
+    if (stepDelta > 0) {
+      this.stepsDay.total += stepDelta;
+      if (Date.now() - this._stepsSavedAt > 5000) {
+        this._stepsSavedAt = Date.now();
+        saveStepsDay(this.currentUser, this.stepsDay);
+      }
+    }
+    const stepInfo = { today: this.stepsDay.total, cadence: this.steps.cadence(), walking: this.steps.walking() };
+
     const status = {
       connected: this.connected,
       user: this.currentUser,
@@ -224,6 +253,7 @@ export class Monitor {
       respirationConfidence: respConf,
       respirationPreview: respPreview,
       posture,
+      steps: stepInfo,
       updatedAt: wall,
     };
     this._lastStatus = status;
@@ -235,7 +265,7 @@ export class Monitor {
     if (hrVal != null || rmssdVal != null) {
       this.onPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone,
         lean: (posture.calibrated && posture.receiving) ? posture.leanDeg : null,
-        posture: posture.state, activity: posture.activity });
+        posture: posture.state, activity: posture.activity, step: stepDelta });
     }
 
     // Persist a 1-min downsampled {rmssd, hr} so 全期間 re-baseline survives
