@@ -6,212 +6,293 @@
   <title>RMSSD · Polar H10</title>
   <script src="chart.umd.js"></script>
   <style>
-    :root { color-scheme: dark; }
+    :root {
+      color-scheme: dark;
+      --bg: #0a0d13; --surface: #121824; --surface-2: #19202e; --raised: #232c3d;
+      --line: #232b39; --line-soft: #1a212c;
+      --text: #e9eef6; --muted: #8a96a8; --faint: #586474;
+      --hrv: #34d399; --hr: #fb7185; --resp: #60a5fa; --accent: #38bdf8;
+      --calm: #34d399; --recover: #4ade80; --neutral: #38bdf8;
+      --focus: #2dd4bf; --tense: #fbbf24; --high: #f87171; --wait: #5b6573;
+      --r: 16px; --r-sm: 11px; --pill: 999px;
+      --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, monospace;
+      --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --shadow: 0 10px 30px -16px rgba(0,0,0,.7);
+    }
     * { box-sizing: border-box; }
     body {
-      margin: 0; font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-      background: #0d1117; color: #e6edf3;
+      margin: 0; font-family: var(--sans); background: var(--bg); color: var(--text);
+      background-image: radial-gradient(1100px 520px at 82% -8%, rgba(56,189,248,.06), transparent 62%);
+      background-attachment: fixed; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
     }
-    header { padding: 16px 24px; border-bottom: 1px solid #21262d; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; position: sticky; top: 0; z-index: 5; background: #0d1117; }
-    header h1 { font-size: 18px; margin: 0; font-weight: 600; }
-    #conn { font-size: 13px; color: #8b949e; }
-    #conn.on { color: #3fb950; }
-    #calib { font-size: 13px; color: #d29922; }
+    header {
+      position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 13px;
+      padding: 11px 20px; border-bottom: 1px solid var(--line);
+      background: rgba(10,13,19,.82); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    }
+    .brand { display: flex; align-items: center; gap: 9px; }
+    .brand .mark { width: 9px; height: 9px; border-radius: 50%; background: var(--wait); flex: none; transition: background .4s; }
+    .brand.on .mark { background: var(--hrv); color: var(--hrv); animation: pulse 2.4s ease-out infinite; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(52,211,153,.5); } 70% { box-shadow: 0 0 0 7px rgba(52,211,153,0); } 100% { box-shadow: 0 0 0 0 rgba(52,211,153,0); } }
+    header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .01em; white-space: nowrap; }
+    #conn { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    #conn.on { color: var(--hrv); }
+    #calib { font-size: 12px; color: var(--tense); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 34vw; }
     .spacer { flex: 1; }
     button {
-      font: inherit; font-size: 13px; color: #e6edf3; background: #21262d;
-      border: 1px solid #30363d; border-radius: 8px; padding: 6px 14px; cursor: pointer;
+      font: inherit; font-size: 13px; color: var(--text); background: var(--surface);
+      border: 1px solid var(--line); border-radius: 9px; padding: 7px 13px; cursor: pointer;
+      transition: background .15s, border-color .15s;
     }
-    button:hover { background: #30363d; }
-    .users { display: flex; align-items: center; gap: 6px; }
-    .users .lbl { font-size: 13px; color: #8b949e; }
-    .lbl-short { display: none; } /* shown only in landscape (compact 1-line header) */
-    .users button { padding: 6px 11px; min-width: 34px; }
-    .users button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; }
-    .wrap { padding: 24px; }
+    button:hover { background: var(--raised); }
+    .users { display: flex; align-items: center; gap: 3px; background: var(--surface);
+      border: 1px solid var(--line); border-radius: var(--pill); padding: 3px; }
+    .users .lbl { display: none; }
+    .lbl-short { display: none; }
+    .users button { border: none; background: transparent; padding: 5px 10px; min-width: 30px;
+      border-radius: var(--pill); color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+    .users button:hover { background: var(--raised); color: var(--text); }
+    .users button.active { background: var(--accent); border-color: var(--accent); color: #04121c; font-weight: 700; }
+    /* server pill + settings menu */
+    .srv { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; padding: 6px 11px;
+      border-radius: var(--pill); border: 1px solid var(--line); background: var(--surface); color: var(--muted); white-space: nowrap; cursor: pointer; }
+    .srv .d { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); transition: background .3s; }
+    .srv.on { color: var(--hrv); border-color: rgba(52,211,153,.4); } .srv.on .d { background: var(--hrv); }
+    #serverUrl { font-family: var(--mono); font-size: 11px; color: var(--hrv); cursor: pointer; white-space: nowrap; }
+    .menu-wrap { position: relative; }
+    .menu { position: absolute; right: 0; top: calc(100% + 8px); min-width: 232px; z-index: 30;
+      background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-sm);
+      padding: 6px; display: none; flex-direction: column; gap: 1px; box-shadow: var(--shadow); }
+    .menu.open { display: flex; }
+    .menu button { width: 100%; text-align: left; background: transparent; border: none;
+      padding: 10px 12px; border-radius: 8px; color: var(--text); font-size: 13px; }
+    .menu button:hover { background: var(--raised); }
+    .menu .sep { height: 1px; background: var(--line); margin: 5px 4px; }
+    .menu .lbl-short { display: none; } .menu .lbl-full { display: inline; }
+    .wrap { padding: 22px; max-width: 1180px; margin: 0 auto; }
 
     .state {
-      display: flex; align-items: center; gap: 18px;
-      background: #161b22; border: 1px solid #21262d; border-left: 5px solid #8b949e;
-      border-radius: 14px; padding: 18px 22px; margin-bottom: 16px;
+      display: grid; grid-template-columns: 1fr minmax(176px, 224px); gap: 24px; align-items: center;
+      background: linear-gradient(165deg, var(--surface), var(--surface-2));
+      border: 1px solid var(--line); border-radius: var(--r); padding: 22px 24px 22px 26px;
+      margin-bottom: 18px; position: relative; overflow: hidden; box-shadow: var(--shadow);
     }
-    .state .ind { width: 14px; height: 14px; border-radius: 50%; background: #8b949e; flex: none; }
-    .state .body { flex: 1; }
-    .state .label { font-size: 24px; font-weight: 700; }
-    .state .detail { font-size: 13px; color: #8b949e; margin-top: 4px; }
-    .arousal { margin-top: 10px; }
-    .arousal .track { height: 8px; background: #21262d; border-radius: 5px; overflow: hidden; }
-    .arousal .fill { height: 100%; width: 0; border-radius: 5px; transition: width .4s ease; background: #58a6ff; }
-    .arousal .scale { display: flex; justify-content: space-between; font-size: 11px; color: #6e7681; margin-top: 3px; }
+    .state::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+      background: var(--tone, var(--wait)); box-shadow: 0 0 26px 1px var(--tone, transparent); }
+    .state .ind { display: none; } /* tone is shown by the left accent bar now */
+    .state .body { min-width: 0; }
+    .state .label { font-size: 26px; font-weight: 700; letter-spacing: .01em; }
+    .state .detail { font-size: 13px; color: var(--muted); margin-top: 5px; line-height: 1.5; max-width: 52ch; }
+    /* autonomic 2-axis map: x = vagal HRV (recovery), y = load/arousal */
+    .anmap { position: relative; width: 100%; aspect-ratio: 1 / 1; max-height: 210px; margin: 0 auto;
+      background: radial-gradient(circle at 50% 50%, var(--surface-2), var(--bg));
+      border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+    .anmap .axis { position: absolute; background: var(--line); }
+    .anmap .ax { left: 8px; right: 8px; top: 50%; height: 1px; }
+    .anmap .ay { top: 8px; bottom: 8px; left: 50%; width: 1px; }
+    .anmap .lab { position: absolute; font-size: 9px; color: var(--muted); letter-spacing: .03em; }
+    .anmap .lab.top { top: 4px; left: 50%; transform: translateX(-50%); }
+    .anmap .lab.right { right: 5px; top: 50%; transform: translateY(-50%); }
+    .anmap .q { position: absolute; font-size: 9px; color: var(--faint); padding: 4px 6px; letter-spacing: .02em; }
+    .anmap .q.tl { top: 2px; left: 3px; } .anmap .q.tr { top: 2px; right: 3px; }
+    .anmap .q.bl { bottom: 2px; left: 3px; } .anmap .q.br { bottom: 2px; right: 3px; }
+    .anmap .dot { display: none; position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; border-radius: 50%;
+      background: var(--accent); border: 2px solid var(--bg); box-shadow: 0 0 14px 2px var(--accent);
+      transform: translate(-50%, -50%); transition: left .6s cubic-bezier(.22,.61,.36,1), top .6s cubic-bezier(.22,.61,.36,1), background .5s, box-shadow .5s; }
+    .anmeta { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+    .anmeta #anScores { color: var(--text); }
+    .anmeta #anBreath { text-align: right; }
 
-    .state.calm    { border-left-color: #3fb950; } .state.calm .fill    { background: #3fb950; } .state.calm .ind    { background: #3fb950; }
-    .state.recover { border-left-color: #56d364; } .state.recover .fill { background: #56d364; } .state.recover .ind { background: #56d364; }
-    .state.neutral { border-left-color: #58a6ff; } .state.neutral .fill { background: #58a6ff; } .state.neutral .ind { background: #58a6ff; }
-    .state.focus   { border-left-color: #2dd4bf; } .state.focus .fill   { background: #2dd4bf; } .state.focus .ind   { background: #2dd4bf; }
-    .state.tense   { border-left-color: #d29922; } .state.tense .fill   { background: #d29922; } .state.tense .ind   { background: #d29922; }
-    .state.high    { border-left-color: #f85149; } .state.high .fill    { background: #f85149; } .state.high .ind    { background: #f85149; }
-    .state.wait    { border-left-color: #6e7681; } .state.wait .fill    { background: #6e7681; } .state.wait .ind    { background: #6e7681; }
+    .state.calm    { --tone: var(--calm); }
+    .state.recover { --tone: var(--recover); }
+    .state.neutral { --tone: var(--neutral); }
+    .state.focus   { --tone: var(--focus); }
+    .state.tense   { --tone: var(--tense); }
+    .state.high    { --tone: var(--high); }
+    .state.wait    { --tone: var(--wait); }
 
-    .cards { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr) minmax(168px, .82fr); gap: 14px; margin-bottom: 14px; align-items: stretch; }
     .card {
-      background: #161b22; border: 1px solid #21262d; border-radius: 12px;
-      padding: 14px 18px; min-width: 140px;
+      position: relative; background: var(--surface); border: 1px solid var(--line);
+      border-radius: var(--r-sm); padding: 15px 18px; overflow: hidden;
     }
-    .card .label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: .05em; }
-    .card .value { font-size: 36px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
-    .card .unit { font-size: 13px; color: #8b949e; font-weight: 400; margin-left: 4px; }
-    .card .base { font-size: 12px; color: #6e7681; margin-top: 4px; min-height: 16px; }
-    .delta.up { color: #f85149; } .delta.down { color: #3fb950; }
-    .chartbox { position: relative; height: 300px; background: #161b22; border: 1px solid #21262d; border-radius: 12px; padding: 12px; }
+    .card::after { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--c, var(--faint)); }
+    .card.rmssd { --c: var(--hrv); } .card.hr { --c: var(--hr); } .card.resp { --c: var(--resp); }
+    .card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; font-weight: 600; }
+    .card .value { font-family: var(--mono); font-size: 34px; font-weight: 600; margin-top: 7px; font-variant-numeric: tabular-nums; line-height: 1; letter-spacing: -.01em; }
+    .card .unit { font-family: var(--sans); font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 5px; }
+    .card .base { font-size: 11px; color: var(--faint); margin-top: 8px; min-height: 15px; font-variant-numeric: tabular-nums; }
+    .delta.up { color: var(--hr); } .delta.down { color: var(--hrv); }
+    /* secondary metrics (SDNN / RR-in-window) stacked in the 4th column */
+    .mini { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 13px 16px; display: flex; flex-direction: column; justify-content: center; gap: 11px; }
+    .mini .row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .mini .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+    .mini .v { font-family: var(--mono); font-size: 19px; font-variant-numeric: tabular-nums; }
+    .mini .v .unit { font-family: var(--sans); font-size: 11px; color: var(--muted); margin-left: 3px; }
+    .chartbox { position: relative; height: 300px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; box-shadow: var(--shadow); }
     .chartbox.trend { height: 220px; }
     canvas { display: block; }
-    .section { display: flex; align-items: baseline; gap: 12px; margin: 22px 2px 8px; }
-    .section-title { font-size: 14px; font-weight: 600; color: #e6edf3; }
-    .note { font-size: 11px; color: #6e7681; margin-top: 10px; }
+    .section { display: flex; align-items: baseline; gap: 12px; margin: 24px 4px 10px; }
+    .section-title { font-size: 13px; font-weight: 650; color: var(--text); text-transform: uppercase; letter-spacing: .06em; }
+    .note { font-size: 11px; color: var(--faint); margin-top: 12px; line-height: 1.6; }
 
     /* Landscape (phone/tablet held sideways): compress the chrome — the header is
        sticky so its buttons stay reachable — and let the graphs grow with the
        viewport so the chart is the focus. The WebView only renders on-device, so
        plain orientation is enough; there is no desktop layout to mis-trigger. */
     @media (orientation: landscape) {
-      /* Single-line header: drop the title text / "ユーザー" label / hist count,
-         swap buttons to their short labels, and stop wrapping. */
-      header { padding: 7px 12px; gap: 6px; flex-wrap: nowrap; }
-      header h1 { font-size: 14px; white-space: nowrap; }
-      header button { padding: 5px 9px; font-size: 12px; white-space: nowrap; }
-      .users { gap: 4px; }
-      .users button { padding: 5px 8px; min-width: 28px; }
-      .users .lbl { display: none; }
+      header { padding: 8px 14px; gap: 9px; }
+      header h1 { font-size: 14px; }
+      #conn, #calib { font-size: 11px; }
       #histInfo { display: none; }
-      #conn, #calib { font-size: 11px; white-space: nowrap; }
-      .lbl-full { display: none; }
-      .lbl-short { display: inline; }
-      .wrap { padding: 8px 14px; }
-      .state { padding: 6px 14px; margin-bottom: 8px; gap: 10px; }
-      .state .ind { width: 11px; height: 11px; }
-      .state .label { font-size: 15px; }
-      .state .detail { font-size: 11px; margin-top: 1px; }
-      .arousal { margin-top: 4px; }
-      .arousal .track { height: 5px; }
-      .arousal .scale { display: none; } /* hide リラックス/覚醒度/興奮 labels to save height */
-      .cards { gap: 8px; margin-bottom: 8px; }
-      .card { padding: 6px 10px; min-width: 76px; }
-      .card .label { font-size: 10px; }
-      .card .value { font-size: 21px; }
-      .card .unit { font-size: 11px; }
-      .card .base { font-size: 10px; min-height: 0; margin-top: 2px; }
-      .chartbox { height: 60vh; min-height: 240px; }
-      .chartbox.trend { height: 52vh; min-height: 200px; }
-      .section { margin: 14px 2px 6px; }
+      .users button { padding: 4px 9px; min-width: 27px; }
+      .wrap { padding: 12px 16px; }
+      .state { padding: 14px 16px 14px 18px; gap: 16px; margin-bottom: 12px; grid-template-columns: 1fr minmax(140px, 182px); }
+      .state .label { font-size: 19px; }
+      .state .detail { font-size: 11px; margin-top: 3px; }
+      .anmap { max-height: 156px; }
+      .cards { gap: 10px; margin-bottom: 12px; }
+      .card { padding: 11px 13px; }
+      .card .value { font-size: 26px; }
+      .mini { padding: 10px 13px; gap: 8px; }
+      .mini .v { font-size: 16px; }
+      .chartbox { height: 56vh; min-height: 220px; }
+      .chartbox.trend { height: 46vh; min-height: 180px; }
+      .section { margin: 14px 4px 6px; }
       .note { display: none; }
     }
 
     /* Portrait (phone upright): trim the default (desktop-derived) sizing so the
        header / state / cards aren't so tall — short button labels, smaller cards. */
     @media (orientation: portrait) {
-      header { padding: 10px 16px; gap: 8px; }
-      header h1 { font-size: 16px; }
-      header button { padding: 5px 10px; font-size: 12px; }
-      .users button { padding: 5px 9px; min-width: 30px; }
-      .users .lbl { display: none; }
+      header { padding: 10px 14px; gap: 9px; }
+      header h1 { font-size: 14px; }
+      header h1 .lbl-full { display: none; } header h1 .lbl-short { display: inline; }
+      #conn { display: none; } /* connection shown by the brand mark to save width */
       #histInfo { display: none; }
-      .lbl-full { display: none; }
-      .lbl-short { display: inline; }
-      .wrap { padding: 12px; }
-      .state { padding: 10px 16px; margin-bottom: 10px; gap: 12px; }
-      .state .label { font-size: 18px; }
-      .state .detail { font-size: 12px; margin-top: 2px; }
-      .arousal { margin-top: 5px; }
-      .cards { gap: 10px; margin-bottom: 10px; }
-      .card { padding: 9px 13px; min-width: 104px; }
-      .card .label { font-size: 11px; }
-      .card .value { font-size: 25px; }
-      .card .base { font-size: 11px; min-height: 0; margin-top: 3px; }
+      .users button { padding: 5px 9px; min-width: 28px; }
+      .wrap { padding: 13px; }
+      .state { grid-template-columns: 1fr; gap: 14px; padding: 16px 18px; margin-bottom: 12px; }
+      .state .label { font-size: 21px; }
+      .state .detail { font-size: 12px; margin-top: 4px; }
+      .anmap { max-height: 232px; max-width: 280px; }
+      .cards { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+      .card { padding: 12px 15px; }
+      .card .value { font-size: 27px; }
+      .mini { grid-column: 1 / -1; flex-direction: row; justify-content: space-around; }
     }
 
     /* --- activity logging (record bar + chips + picker modal) --- */
-    .actbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-    /* When sitting inside the card row, fill the empty space to the right of the
-       last metric card: right-aligned, stacked (record button + ongoing chips). */
-    .cards .actbar { margin: 0 0 0 auto; flex-direction: column; align-items: stretch;
-      justify-content: center; gap: 8px; min-width: 160px; }
-    .cards .actbar .act-none { font-size: 12px; text-align: center; color: #6e7681; }
-    .cards .actbar .act-chip { justify-content: space-between; }
-    .actbar .start { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; }
-    .actbar .start:hover { background: #388bfd; }
-    .act-chip { display: inline-flex; align-items: center; gap: 8px; background: #161b22;
-      border: 1px solid #21262d; border-left: 4px solid #8b949e; border-radius: 10px; padding: 6px 8px 6px 12px; font-size: 13px; }
+    .actbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px;
+      background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 10px 14px; }
+    .actbar .start { background: var(--accent); border-color: var(--accent); color: #04121c; font-weight: 650; }
+    .actbar .start:hover { background: #5cc9f5; }
+    .act-chip { display: inline-flex; align-items: center; gap: 8px; background: var(--surface-2);
+      border: 1px solid var(--line); border-left: 3px solid var(--faint); border-radius: 9px; padding: 6px 8px 6px 11px; font-size: 13px; }
     .act-chip .nm { font-weight: 600; }
-    .act-chip .el { color: #8b949e; font-variant-numeric: tabular-nums; }
+    .act-chip .el { color: var(--muted); font-variant-numeric: tabular-nums; font-family: var(--mono); }
     .act-chip button { padding: 3px 9px; font-size: 12px; }
-    .act-none { color: #6e7681; font-size: 13px; }
+    .act-none { color: var(--faint); font-size: 13px; }
 
-    .modal-bg { position: fixed; inset: 0; background: rgba(1,4,9,.72); z-index: 50;
-      display: none; align-items: center; justify-content: center; padding: 18px; }
+    .modal-bg { position: fixed; inset: 0; background: rgba(2,5,10,.74); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+      z-index: 50; display: none; align-items: center; justify-content: center; padding: 18px; }
     .modal-bg.open { display: flex; }
-    .modal { background: #0d1117; border: 1px solid #30363d; border-radius: 16px;
-      padding: 18px 20px; width: min(580px, 100%); max-height: 88vh; overflow-y: auto; }
-    .modal h2 { margin: 0; font-size: 17px; }
-    .modal .sub { color: #8b949e; font-size: 12px; margin: 4px 0 6px; }
-    .modal .cat { font-size: 11px; color: #8b949e; text-transform: uppercase; letter-spacing: .05em; margin: 16px 0 8px; }
+    .modal { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r);
+      padding: 20px 22px; width: min(580px, 100%); max-height: 88vh; overflow-y: auto; box-shadow: var(--shadow); }
+    .modal h2 { margin: 0; font-size: 17px; font-weight: 650; }
+    .modal .sub { color: var(--muted); font-size: 12px; margin: 5px 0 6px; line-height: 1.5; }
+    .modal .cat { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 16px 0 8px; }
     .modal .close { float: right; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
-    .grid button { padding: 12px 6px; border-radius: 10px; border-left: 4px solid #8b949e; text-align: center; line-height: 1.3; }
-    .recent-row { display: flex; align-items: center; gap: 10px; padding: 7px 4px; border-bottom: 1px solid #161b22; font-size: 13px; }
+    .grid button { padding: 12px 6px; border-radius: 10px; border-left: 4px solid var(--faint); text-align: center; line-height: 1.3; }
+    .recent-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line-soft); font-size: 13px; }
     .recent-row .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-    .recent-row .meta { color: #6e7681; font-size: 12px; }
+    .recent-row .meta { color: var(--faint); font-size: 12px; font-variant-numeric: tabular-nums; }
     .recent-row .sp { flex: 1; }
     .recent-row button { padding: 3px 9px; font-size: 12px; }
     .recent-row.editing { flex-wrap: wrap; align-items: flex-end; }
-    .recent-row select, .recent-row input { font: inherit; font-size: 12px; color: #e6edf3;
-      background: #161b22; border: 1px solid #30363d; border-radius: 7px; padding: 5px 7px; }
+    .recent-row select, .recent-row input { font: inherit; font-size: 12px; color: var(--text);
+      background: var(--surface-2); border: 1px solid var(--line); border-radius: 7px; padding: 5px 7px; }
     .recent-row input[type="datetime-local"] { color-scheme: dark; }
     .recent-row .fld { display: flex; flex-direction: column; gap: 2px; }
-    .recent-row .fld label { font-size: 10px; color: #6e7681; }
-    .recent-row .start { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+    .recent-row .fld label { font-size: 10px; color: var(--faint); }
+    .recent-row .start { background: var(--accent); border-color: var(--accent); color: #04121c; }
+    .baseform { display: flex; gap: 12px; margin: 14px 0; }
+    .basefld { display: flex; flex-direction: column; gap: 5px; flex: 1; }
+    .basefld label { font-size: 11px; color: var(--muted); }
+    .basefld input { font: inherit; font-family: var(--mono); font-size: 17px; color: var(--text); background: var(--surface-2);
+      border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; color-scheme: dark; }
+    .baseactions { display: flex; gap: 8px; }
+    .baseactions .start { background: var(--accent); border-color: var(--accent); color: #04121c; font-weight: 650; }
+    /* remote (PC) view is read-only: hide control buttons, but keep the settings
+       menu reachable so export (CSV) still works from the browser. */
+    .remote-view #recalibBtn, .remote-view #recalibFullBtn, .remote-view #editBaseBtn,
+    .remote-view #clearBtn, .remote-view #orientBtn, .remote-view #serverBtn,
+    .remote-view #userSel, .remote-view #actStartBtn, .remote-view #settingsMenu .sep { display: none !important; }
     @media (max-width: 520px) { .grid { grid-template-columns: repeat(3, 1fr); } }
     @media (orientation: landscape) { .grid { grid-template-columns: repeat(5, 1fr); } }
   </style>
 </head>
 <body>
   <header>
-    <h1><span class="lbl-full">RMSSD · Polar H10</span><span class="lbl-short">RMSSD</span></h1>
+    <div class="brand" id="brand"><span class="mark"></span><h1><span class="lbl-full">RMSSD · Polar H10</span><span class="lbl-short">RMSSD</span></h1></div>
     <span id="conn">接続待機中…</span>
     <span id="calib"></span>
     <span class="spacer"></span>
     <span class="users" id="userSel" title="計測対象のユーザーを切り替え（基準値・記録は個別）">
       <span class="lbl">ユーザー</span>
     </span>
-    <span id="histInfo" style="font-size:12px;color:#6e7681"></span>
-    <button id="recalibBtn" title="今を安静として基準値を取り直す"><span class="lbl-full">安静で基準を取り直す</span><span class="lbl-short">基準:安静</span></button>
-    <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算"><span class="lbl-full">全期間で基準を取り直す</span><span class="lbl-short">基準:全期間</span></button>
-    <button id="clearBtn" title="保存した履歴を消去"><span class="lbl-full">履歴をクリア</span><span class="lbl-short">クリア</span></button>
-    <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
+    <span id="histInfo" style="display:none"></span>
+    <span class="srv" id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止"><span class="d"></span><span id="serverLabel">サーバー</span></span>
+    <span id="serverUrl" title="クリックでURLをコピー"></span>
+    <div class="menu-wrap">
+      <button id="menuBtn" title="設定・操作">設定</button>
+      <div class="menu" id="settingsMenu">
+        <button id="recalibBtn" title="今を安静として基準値を取り直す">安静で基準を取り直す</button>
+        <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算">全期間で基準を取り直す</button>
+        <button id="editBaseBtn" title="基準値(RMSSD/心拍)を手動で設定">基準を編集</button>
+        <div class="sep"></div>
+        <button id="exportBtn" title="履歴・トレンド・アクティビティ・基準値をCSVで書き出して共有"><span class="lbl-full">エクスポート (CSV)</span></button>
+        <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
+        <div class="sep"></div>
+        <button id="clearBtn" title="保存した履歴を消去">履歴をクリア</button>
+      </div>
+    </div>
   </header>
 
   <div class="wrap">
     <div class="state wait" id="stateCard">
-      <div class="ind" id="stateInd"></div>
+      <span class="ind" id="stateInd"></span>
       <div class="body">
         <div class="label" id="stateLabel">計測待ち</div>
         <div class="detail" id="stateDetail">心拍データを待っています</div>
-        <div class="arousal">
-          <div class="track"><div class="fill" id="arousalFill"></div></div>
-          <div class="scale"><span>リラックス</span><span>覚醒度</span><span>興奮</span></div>
-        </div>
+        <div class="anmeta"><span id="anScores"></span><span id="anBreath"></span></div>
+      </div>
+      <div class="anmap" id="anMap" title="横=迷走神経性HRV（回復）／縦=負荷・覚醒。現在地を点で表示します。">
+        <span class="axis ax"></span><span class="axis ay"></span>
+        <span class="lab top">負荷・覚醒 ↑</span>
+        <span class="lab right">回復 →</span>
+        <span class="q tl">緊張傾向</span>
+        <span class="q tr">高負荷・興奮</span>
+        <span class="q bl">低活動</span>
+        <span class="q br">安定・回復</span>
+        <span class="dot" id="anDot"></span>
       </div>
     </div>
 
     <div class="cards">
-      <div class="card"><div class="label">RMSSD</div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div><div class="base" id="rmssdBase"></div></div>
-      <div class="card"><div class="label">心拍数</div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div><div class="base" id="hrBase"></div></div>
-      <div class="card"><div class="label">呼吸数</div><div class="value"><span id="resp">–</span><span class="unit">br/min</span></div><div class="base" id="respBase"></div></div>
-      <div class="card"><div class="label">SDNN</div><div class="value"><span id="sdnn">–</span><span class="unit">ms</span></div><div class="base"></div></div>
-      <div class="card"><div class="label">RR (窓内)</div><div class="value"><span id="count">–</span></div><div class="base"></div></div>
-      <div class="actbar" id="actbar">
-        <button class="start" id="actStartBtn">アクティビティ管理</button>
-        <span class="act-none" id="actNone">進行中なし</span>
+      <div class="card rmssd"><div class="label">RMSSD</div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div><div class="base" id="rmssdBase"></div></div>
+      <div class="card hr"><div class="label">心拍数</div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div><div class="base" id="hrBase"></div></div>
+      <div class="card resp"><div class="label">呼吸数</div><div class="value"><span id="resp">–</span><span class="unit">br/min</span></div><div class="base" id="respBase"></div></div>
+      <div class="mini">
+        <div class="row"><span class="k">SDNN</span><span class="v"><span id="sdnn">–</span><span class="unit">ms</span></span></div>
+        <div class="row"><span class="k">RR (窓内)</span><span class="v"><span id="count">–</span></span></div>
       </div>
+    </div>
+
+    <div class="actbar" id="actbar">
+      <button class="start" id="actStartBtn">アクティビティ管理</button>
+      <span class="act-none" id="actNone">進行中なし</span>
     </div>
 
     <div class="chartbox"><canvas id="chart"></canvas></div>
@@ -233,6 +314,19 @@
       <div id="actOngoing"></div>
       <div id="actChoices"></div>
       <div id="actRecent"></div>
+    </div>
+  </div>
+
+  <div class="modal-bg" id="baseModal">
+    <div class="modal">
+      <button class="close" id="baseClose">閉じる</button>
+      <h2>基準値を編集</h2>
+      <div class="sub">安静時の RMSSD / 心拍を手動で設定します。過去データから分かっている個人の基準値を直接入れられます。状態判定（回復・負荷の2軸）はこの値を基準に行われます。</div>
+      <div class="baseform">
+        <div class="basefld"><label>RMSSD (ms)</label><input type="number" id="baseRmssdIn" step="0.1" min="0.1" max="300" inputmode="decimal"></div>
+        <div class="basefld"><label>心拍数 (bpm)</label><input type="number" id="baseHrIn" step="1" min="30" max="220" inputmode="numeric"></div>
+      </div>
+      <div class="baseactions"><button id="baseSave" class="start">保存</button><button id="baseCancel">取消</button></div>
     </div>
   </div>
 
@@ -282,8 +376,8 @@
 
     // ---- state band (autonomic state painted behind the lines, over time) ----
     const STATE_COLORS = {
-      calm: '#3fb950', recover: '#56d364', neutral: '#58a6ff',
-      focus: '#2dd4bf', tense: '#d29922', high: '#f85149', wait: '#6e7681',
+      calm: '#34d399', recover: '#4ade80', neutral: '#38bdf8',
+      focus: '#2dd4bf', tense: '#fbbf24', high: '#f87171', wait: '#5b6573',
     };
 
     // Client mirror of analysis.classifyRaw (lnRMSSD + HR deltas), used ONLY to
@@ -528,6 +622,16 @@
       if (liveBucket && acc.has(liveBucket.start)) liveBucket.tones = acc.get(liveBucket.start);
     }
     function refreshBands() {
+      // Recompute PAST tones against the CURRENT baseline so a baseline change
+      // (manual edit / recalibration) repaints all of history & trend
+      // retroactively — not just future points. Each point/bucket keeps its
+      // RMSSD/HR, so the tone can be re-derived from the new baseline.
+      if (curBaseline) {
+        for (const p of history) { const t = toneFromVitals(p.rmssd, p.hr, curBaseline); if (t) p.tone = t; }
+        for (const b of trend) { const t = toneFromVitals(b.rmssd, b.hr, curBaseline); if (t) b.tone = t; }
+        if (liveBucket) liveBucket.tones = {};
+        saveHistory(true);
+      }
       chart.$tones = history.map((p) => toneOf(p, curBaseline));
       chart.update('none');
       recomputeTrendTones();
@@ -552,8 +656,10 @@
       if (s.user != null && s.user !== currentUser) switchLocalUser(s.user);
 
       const conn = document.getElementById('conn');
-      conn.textContent = s.connected ? '接続中 ●' : '未接続';
+      conn.textContent = s.connected ? '接続' : '未接続';
       conn.className = s.connected ? 'on' : '';
+      const brand = document.getElementById('brand');
+      if (brand) brand.classList.toggle('on', !!s.connected);
 
       const calib = document.getElementById('calib');
       // A transient "full-session baseline" message owns the calib slot briefly.
@@ -585,11 +691,40 @@
           ? `信号品質 ${Math.round(s.respirationConfidence * 100)}%${s.respirationPreview ? ' · 暫定' : ''}`
           : '推定待ち';
 
-      const st = s.state || { label: '計測待ち', tone: 'wait', detail: '', arousal: null };
+      const st = s.state || { label: '計測待ち', tone: 'wait', detail: '', recovery: null, load: null };
       document.getElementById('stateCard').className = 'state ' + (st.tone || 'wait');
       document.getElementById('stateLabel').textContent = st.label || '–';
       document.getElementById('stateDetail').textContent = st.detail || '';
-      document.getElementById('arousalFill').style.width = (st.arousal != null ? st.arousal : 0) + '%';
+
+      // Autonomic 2-axis map: x = recovery (vagal HRV), y = load/arousal (both -1..+1).
+      const dot = document.getElementById('anDot');
+      if (st.recovery != null && st.load != null) {
+        dot.style.display = 'block';
+        const clampPct = (v) => Math.max(6, Math.min(94, v)); // keep the dot off the axis labels
+        dot.style.left = clampPct(((st.recovery + 1) / 2) * 100).toFixed(1) + '%';
+        dot.style.top = clampPct((1 - (st.load + 1) / 2) * 100).toFixed(1) + '%'; // load up = higher
+        const col = STATE_COLORS[st.tone] || '#38bdf8';
+        dot.style.background = col;
+        dot.style.boxShadow = '0 0 14px 2px ' + col;
+        const sign = (v) => (v >= 0 ? '+' : '') + v.toFixed(2);
+        document.getElementById('anScores').textContent = `回復 ${sign(st.recovery)} / 負荷 ${sign(st.load)}`;
+      } else {
+        dot.style.display = 'none';
+        document.getElementById('anScores').textContent = '';
+      }
+
+      // Breathing as an interpretation-confidence layer (Shaffer & Ginsberg 2017):
+      // slow/fast breathing changes how much of the HRV is RSA, not autonomic tone.
+      const r = s.respiration;
+      const bEl = document.getElementById('anBreath');
+      if (r != null) {
+        let note = '解釈 通常';
+        if (r < 9) note = 'ゆっくり呼吸でHRV上昇の可能性';
+        else if (r > 24) note = '速い呼吸・会話の影響に注意';
+        bEl.textContent = `呼吸 ${s.respirationPreview ? '暫定 ' : ''}${r} br/min・${note}`;
+      } else {
+        bEl.textContent = '';
+      }
     }
 
     function pushPoint(p) {
@@ -656,6 +791,65 @@
       highlightUser(currentUser);
     })();
 
+    // ---- remote view + reload-from-snapshot (used by the remote bridge) ----
+    // The phone's server pushes a snapshot (history/trend/activities for the
+    // active user) into localStorage; this re-reads it and redraws everything,
+    // mirroring switchLocalUser without the save-out step.
+    window.__reloadFromStorage = (u) => {
+      currentUser = u;
+      STORAGE_KEY = histKeyFor(u); TREND_KEY = trendKeyFor(u); ACT_KEY = actKeyFor(u);
+      history = loadHistory(); trend = loadTrend(); activities = loadActivities();
+      liveBucket = null; lastSaved = 0; lastTrendSaved = 0;
+      curBaseline = null; lastBaselineKey = '';
+      redrawFromHistory(); rebuildTrendFromHistory(); redrawTrend();
+      renderActbar(); highlightUser(u);
+    };
+    if (RmssdBridge.isRemote) document.body.classList.add('remote-view');
+
+    // ---- settings menu (collapses the secondary controls into a dropdown) ----
+    (function () {
+      const btn = document.getElementById('menuBtn');
+      const menu = document.getElementById('settingsMenu');
+      if (!btn || !menu) return;
+      btn.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('open'); });
+      menu.addEventListener('click', (e) => { if (e.target.tagName === 'BUTTON') menu.classList.remove('open'); });
+      document.addEventListener('click', (e) => { if (!menu.contains(e.target) && e.target !== btn) menu.classList.remove('open'); });
+    })();
+
+    // ---- local server toggle (Android host only) ----
+    const serverBtn = document.getElementById('serverBtn');
+    const serverLabel = document.getElementById('serverLabel');
+    const serverUrl = document.getElementById('serverUrl');
+    let snapTimer = null, serverBusy = false;
+    const pushSnapshot = () => {
+      try { RmssdBridge.setSnapshot(JSON.stringify({ user: currentUser, history, trend, activities })); } catch (_) {}
+    };
+    const setServerUi = (info) => {
+      const running = info && info.running;
+      serverBtn.classList.toggle('on', !!running);
+      serverLabel.textContent = running ? 'サーバー ON' : 'サーバー';
+      serverUrl.textContent = running && info.url ? info.url : '';
+      if (running && !snapTimer) { pushSnapshot(); snapTimer = setInterval(pushSnapshot, 4000); }
+      if (!running && snapTimer) { clearInterval(snapTimer); snapTimer = null; }
+    };
+    if (RmssdBridge.canServe) {
+      RmssdBridge.server.info().then(setServerUi).catch(() => {});
+      serverBtn.addEventListener('click', async () => {
+        if (serverBusy) return;
+        serverBusy = true;
+        try {
+          const info = await RmssdBridge.server.info();
+          setServerUi(info && info.running ? await RmssdBridge.server.stop() : await RmssdBridge.server.start(8080));
+        } catch (e) { alert('サーバー操作に失敗: ' + ((e && e.message) || e)); }
+        serverBusy = false;
+      });
+      serverUrl.addEventListener('click', () => {
+        if (serverUrl.textContent && navigator.clipboard) navigator.clipboard.writeText(serverUrl.textContent);
+      });
+    } else {
+      serverBtn.style.display = 'none';
+    }
+
     document.getElementById('clearBtn').addEventListener('click', () => {
       if (!confirm('保存した履歴（詳細・長期トレンド）をすべて消去しますか？')) return;
       history = [];
@@ -664,6 +858,54 @@
       try { localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(TREND_KEY); } catch (_) {}
       redrawFromHistory();
       redrawTrend();
+    });
+
+    // ---- CSV export (detail history / 15-min trend / activities / baseline) ----
+    // Each dataset gets its own CSV (different schemas); RmssdBridge.exportFiles
+    // shares them via the system sheet on Android, or downloads them in a browser.
+    function csvCell(v) {
+      if (v == null) return '';
+      const s = String(v);
+      return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+    const toCsv = (headers, rows) =>
+      [headers.join(','), ...rows.map((r) => r.map(csvCell).join(','))].join('\r\n') + '\r\n';
+    function exportStamp() {
+      const d = new Date(), p = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+    }
+
+    document.getElementById('exportBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('exportBtn');
+      if (!history.length && !trend.length && !activities.length) {
+        alert('エクスポートするデータがまだありません。'); return;
+      }
+      const orig = btn.querySelector('.lbl-full').textContent;
+      btn.disabled = true; btn.querySelector('.lbl-full').textContent = '出力中…';
+      try {
+        const u = currentUser, stamp = exportStamp();
+        const files = [
+          { name: `rmssd-u${u}-detail-${stamp}.csv`, mime: 'text/csv',
+            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'state'],
+              history.map((p) => [p.t, p.rmssd, p.hr, p.resp, toneOf(p, curBaseline) || ''])) },
+          { name: `rmssd-u${u}-trend15m-${stamp}.csv`, mime: 'text/csv',
+            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state'],
+              trend.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || ''])) },
+          { name: `rmssd-u${u}-activities-${stamp}.csv`, mime: 'text/csv',
+            content: toCsv(['type', 'label', 'category', 'start', 'end', 'duration_sec'],
+              activities.map((a) => [a.type, a.label, a.cat, a.start, a.end || '',
+                a.end ? Math.round((new Date(a.end) - new Date(a.start)) / 1000) : ''])) },
+          { name: `rmssd-u${u}-baseline-${stamp}.csv`, mime: 'text/csv',
+            content: toCsv(['rmssd_ms', 'hr_bpm'],
+              curBaseline ? [[curBaseline.rmssd, curBaseline.hr]] : []) },
+        ];
+        const r = await RmssdBridge.exportFiles(files);
+        if (r && r.method === 'download') alert(`${r.count} 件のCSVをダウンロードしました。`);
+      } catch (e) {
+        alert('エクスポートに失敗しました: ' + ((e && e.message) || e));
+      } finally {
+        btn.disabled = false; btn.querySelector('.lbl-full').textContent = orig;
+      }
     });
 
     document.getElementById('recalibBtn').addEventListener('click', async () => {
@@ -688,6 +930,37 @@
           : '全期間の安静データが不足しています。しばらく計測してから再試行してください。';
       } catch (_) {}
       setTimeout(() => { btn.disabled = false; }, 1500);
+    });
+
+    // ---- manual baseline edit (set RMSSD/HR known from prior data) ----
+    const baseModal = document.getElementById('baseModal');
+    const closeBaseModal = () => baseModal.classList.remove('open');
+    document.getElementById('editBaseBtn').addEventListener('click', () => {
+      const b = curBaseline;
+      document.getElementById('baseRmssdIn').value = b ? b.rmssd : '';
+      document.getElementById('baseHrIn').value = b ? Math.round(b.hr) : '';
+      baseModal.classList.add('open');
+    });
+    document.getElementById('baseClose').addEventListener('click', closeBaseModal);
+    document.getElementById('baseCancel').addEventListener('click', closeBaseModal);
+    baseModal.addEventListener('click', (e) => { if (e.target.id === 'baseModal') closeBaseModal(); });
+    document.getElementById('baseSave').addEventListener('click', () => {
+      const rm = parseFloat(document.getElementById('baseRmssdIn').value);
+      const hr = parseFloat(document.getElementById('baseHrIn').value);
+      if (!(rm > 0 && rm <= 300 && hr >= 30 && hr <= 220)) {
+        alert('RMSSD は 0〜300ms、心拍は 30〜220bpm の範囲で入力してください。'); return;
+      }
+      try {
+        const r = RmssdBridge.setBaseline(rm, hr);
+        if (r && r.ok) {
+          curBaseline = { rmssd: r.baseline.rmssd, hr: r.baseline.hr };
+          baselineMsgUntil = Date.now() + 4000;
+          document.getElementById('calib').textContent =
+            `基準値を手動設定（RMSSD ${r.baseline.rmssd}ms / HR ${Math.round(r.baseline.hr)}）`;
+          refreshBands();
+          closeBaseModal();
+        } else { alert('設定に失敗しました。'); }
+      } catch (e) { alert('エラー: ' + ((e && e.message) || e)); }
     });
 
     // ---- screen orientation toggle (auto → portrait → landscape) ----

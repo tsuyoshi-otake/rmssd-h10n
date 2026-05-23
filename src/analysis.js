@@ -199,6 +199,23 @@ class Baseline {
     return this.frozen;
   }
 
+  /**
+   * Override the baseline with user-supplied values (e.g. a personal resting
+   * RMSSD/HR known from prior data). Freezes immediately and clears the
+   * in-progress accumulators; `manual: true` marks it so it is treated as a
+   * settled, deliberate reference rather than an auto-calibrated one.
+   */
+  setManual(rmssd, hr) {
+    if (!(rmssd > 0 && hr > 0)) return null;
+    this.frozen = { rmssd, hr, n: 0, savedAt: Date.now(), manual: true };
+    this.rmssd = [];
+    this.hr = [];
+    this.recentHr = [];
+    this.lastAdaptMs = Date.now(); // defer any adaptive nudge after a manual set
+    this.adaptedAt = null;
+    return this.frozen;
+  }
+
   reset() {
     this.rmssd = [];
     this.hr = [];
@@ -225,7 +242,8 @@ class Baseline {
   /** Restore a previously frozen baseline (e.g. from disk). */
   loadFrozen(obj) {
     if (obj && obj.rmssd != null && obj.hr != null) {
-      this.frozen = { rmssd: obj.rmssd, hr: obj.hr, n: obj.n ?? 0, savedAt: obj.savedAt ?? Date.now() };
+      this.frozen = { rmssd: obj.rmssd, hr: obj.hr, n: obj.n ?? 0, savedAt: obj.savedAt ?? Date.now(),
+        ...(obj.manual ? { manual: true } : {}) };
     }
   }
 }
@@ -242,10 +260,10 @@ const LN = {
 // dead-bands so a couple of bpm of noise does not flip the label.
 function classifyRaw(rmssd, hr, base) {
   if (rmssd == null || hr == null) {
-    return { label: '計測待ち', tone: 'wait', arousal: null, detail: '心拍データ待機中' };
+    return { label: '計測待ち', tone: 'wait', arousal: null, recovery: null, load: null, detail: '心拍データ待機中' };
   }
   if (!base) {
-    return { label: 'キャリブレーション中', tone: 'wait', arousal: null, detail: '基準値を計測中…' };
+    return { label: 'キャリブレーション中', tone: 'wait', arousal: null, recovery: null, load: null, detail: '基準値を計測中…' };
   }
 
   const dLn = base.rmssd > 0 && rmssd > 0 ? Math.log(rmssd / base.rmssd) : 0; // <0 = HRV down
@@ -253,6 +271,16 @@ function classifyRaw(rmssd, hr, base) {
 
   // Arousal score: HR above baseline and HRV below baseline both raise it.
   const arousal = Math.max(0, Math.min(100, Math.round(50 + hrDelta * 2.2 - dLn * 35)));
+
+  // Two near-independent axes for the autonomic map (each clamped to -1..+1):
+  //  - recovery: vagally-mediated HRV vs baseline. RMSSD/SD1 is the established
+  //    time-domain marker of cardiac vagal (parasympathetic) modulation
+  //    (Shaffer & Ginsberg 2017; Laborde et al. 2017). Right = more restored.
+  //  - load: physiological load / arousal, driven by HR vs baseline. There is no
+  //    clean time-domain marker of *sympathetic* activity, so this is framed as
+  //    load/arousal, not "sympathetic tone" (Billman 2013; Goldstein et al. 2011).
+  const recovery = Math.max(-1, Math.min(1, dLn / 0.7)); // ln(2)≈0.69 → RMSSD x2 hits the edge
+  const load = Math.max(-1, Math.min(1, hrDelta / 12)); // +12 bpm = high-load threshold
 
   let label, tone, detail;
   if (hrDelta >= 12 || dLn <= LN.bigDrop) {
@@ -262,7 +290,7 @@ function classifyRaw(rmssd, hr, base) {
   } else if (dLn <= LN.drop && hrDelta >= 5) {
     label = 'ストレス・緊張↑';
     tone = 'tense';
-    detail = '交感神経優位。緊張やプレッシャーがかかっている可能性。';
+    detail = 'HRV低下＋心拍上昇。負荷・緊張がかかっている可能性。';
   } else if (hrDelta >= 4 && dLn <= LN.upSlight) {
     label = '集中';
     tone = 'focus';
@@ -270,7 +298,7 @@ function classifyRaw(rmssd, hr, base) {
   } else if (dLn >= LN.up && hrDelta <= -2) {
     label = 'リラックス・回復';
     tone = 'calm';
-    detail = '副交感神経優位。落ち着いて回復している状態。';
+    detail = 'HRV上昇＋心拍低下。迷走神経（副交感）優位で回復している状態。';
   } else if (dLn >= LN.upSlight && hrDelta <= 2) {
     label = '回復傾向';
     tone = 'recover';
@@ -281,7 +309,7 @@ function classifyRaw(rmssd, hr, base) {
     detail = '基準値の近く。安定した状態。';
   }
 
-  return { label, tone, arousal, detail };
+  return { label, tone, arousal, recovery, load, detail };
 }
 
 /**
@@ -324,8 +352,8 @@ class StateClassifier {
         return this.current;
       }
     }
-    // Hold the current label but keep arousal responsive.
-    return { ...this.current, arousal: raw.arousal };
+    // Hold the current label but keep the live scores (arousal/recovery/load) responsive.
+    return { ...this.current, arousal: raw.arousal, recovery: raw.recovery, load: raw.load };
   }
 }
 

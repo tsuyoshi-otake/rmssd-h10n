@@ -15,7 +15,9 @@
     "@capacitor/android": "^8.3.4",
     "@capacitor/cli": "^8.3.4",
     "@capacitor/core": "^8.3.4",
+    "@capacitor/filesystem": "^8.1.2",
     "@capacitor/screen-orientation": "^8.0.1",
+    "@capacitor/share": "^8.0.1",
     "chart.js": "^4.5.1",
     "esbuild": "^0.28.0"
   }

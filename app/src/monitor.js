@@ -116,6 +116,18 @@ export class Monitor {
     return { ok: true, applied: false, reason: 'insufficient-data' };
   }
 
+  // Manually override the baseline (RMSSD/HR known from prior data). Persists it
+  // like an auto-frozen one so it survives restarts. Returns { ok, baseline? }.
+  setBaseline(rmssd, hr) {
+    const f = this.baseline.setManual(rmssd, hr);
+    if (!f) return { ok: false, reason: 'invalid' };
+    this.respHistory.length = 0;
+    this.baselineSaved = true;
+    this.lastAdaptedAt = this.baseline.adaptedAt;
+    saveBaseline(this.currentUser, this.baseline.toJSON());
+    return { ok: true, baseline: { rmssd: Number(f.rmssd.toFixed(1)), hr: Number(f.hr.toFixed(1)) } };
+  }
+
   switchUser(n) {
     if (!(Number.isInteger(n) && n >= 1 && n <= 5) || n === this.currentUser) return;
     if (this.baseline.get()) saveBaseline(this.currentUser, this.baseline.toJSON());
