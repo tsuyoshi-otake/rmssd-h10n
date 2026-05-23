@@ -13,6 +13,7 @@ import { Baseline, StateClassifier } from '../../src/analysis.js';
 import { estimateRespiration } from '../../src/respiration.js';
 import { PostureTracker } from '../../src/posture.js';
 import { StepCounter } from '../../src/steps.js';
+import { BodyStateEstimator } from '../../src/bodystate.js';
 import { localIso } from '../../src/time.js';
 import { loadBaseline, saveBaseline, loadHistSamples, saveHistSamples,
          loadPostureRef, savePostureRef, loadStepsDay, saveStepsDay } from './store.js';
@@ -75,6 +76,9 @@ export class Monitor {
     const today = dayStartOf(Date.now());
     this.stepsDay = (sd && sd.day === today) ? sd : { day: today, total: 0 };
     this._stepsSavedAt = 0;
+
+    // Contextual body/activity state (sitting / lying / active / asleep).
+    this.bodyState = new BodyStateEstimator();
   }
 
   start() {
@@ -234,6 +238,14 @@ export class Monitor {
     }
     const stepInfo = { today: this.stepsDay.total, cadence: this.steps.cadence(), walking: this.steps.walking() };
 
+    // Contextual body/activity state from posture + steps + autonomic + breathing.
+    const lnDelta = (base && rmssdSmoothed != null && base.rmssd > 0)
+      ? Math.log(rmssdSmoothed / base.rmssd) : null;
+    const body = this.bodyState.update({
+      walking: stepInfo.walking, activity: posture.activity, leanDeg: posture.leanDeg,
+      hr: hrVal, baseHr: base ? base.hr : null, lnDelta, resp: respOut, respConf,
+    }, Date.now());
+
     const status = {
       connected: this.connected,
       user: this.currentUser,
@@ -254,6 +266,7 @@ export class Monitor {
       respirationPreview: respPreview,
       posture,
       steps: stepInfo,
+      body: body.state,
       updatedAt: wall,
     };
     this._lastStatus = status;
@@ -265,7 +278,7 @@ export class Monitor {
     if (hrVal != null || rmssdVal != null) {
       this.onPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone,
         lean: (posture.calibrated && posture.receiving) ? posture.leanDeg : null,
-        posture: posture.state, activity: posture.activity, step: stepDelta });
+        posture: posture.state, activity: posture.activity, step: stepDelta, body: body.state });
     }
 
     // Persist a 1-min downsampled {rmssd, hr} so 全期間 re-baseline survives
