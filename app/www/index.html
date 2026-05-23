@@ -260,7 +260,7 @@
         <button id="recalibBtn" title="今を安静として基準値を取り直す">安静で基準を取り直す</button>
         <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算">全期間で基準を取り直す</button>
         <button id="editBaseBtn" title="基準値(RMSSD/心拍)を手動で設定">基準を編集</button>
-        <button id="recalPostureBtn" title="今のまっすぐな姿勢を「直立」の基準として登録">姿勢の基準を取り直す</button>
+        <button id="recalPostureBtn" title="今のまっすぐな姿勢を基準（傾き0°）として登録">姿勢の基準を取り直す</button>
         <div class="sep"></div>
         <button id="exportBtn" title="履歴・トレンド・アクティビティ・基準値をCSVで書き出して共有"><span class="lbl-full">エクスポート (CSV)</span></button>
         <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
@@ -415,7 +415,7 @@
     };
     // Posture classes from the H10 accelerometer (lean angle vs upright reference).
     const POSTURE = {
-      upright:  { label: '直立',     color: '#34d399' },
+      upright:  { label: 'まっすぐ', color: '#34d399' },
       lean:     { label: '前傾',     color: '#fbbf24' },
       reclined: { label: 'もたれ',   color: '#fb923c' },
       lying:    { label: '横臥',     color: '#38bdf8' },
@@ -1108,7 +1108,7 @@
         const r = RmssdBridge.setPostureRef();
         baselineMsgUntil = Date.now() + 4000;
         calib.textContent = (r && r.ok)
-          ? '今の姿勢を「直立」の基準に設定しました'
+          ? '今の姿勢を基準（傾き0°）に設定しました'
           : 'ACCを受信していません。装着と接続を確認してください。';
       } catch (_) {}
     });
