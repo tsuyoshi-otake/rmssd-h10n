@@ -470,6 +470,7 @@
           { label: 'RMSSD (ms)', data: [], yAxisID: 'y', borderColor: '#58a6ff', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 2 },
           { label: 'HR (bpm)', data: [], yAxisID: 'y1', borderColor: '#f85149', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 1.5 },
           { label: '呼吸 (br/min)', data: [], yAxisID: 'y2', borderColor: '#2dd4bf', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 1.5, borderDash: [4, 3] },
+          { label: '姿勢 傾き (°)', data: [], yAxisID: 'y3', borderColor: '#a78bfa', backgroundColor: 'transparent', tension: .25, pointRadius: 0, borderWidth: 1.5, spanGaps: true },
         ],
       },
       options: {
@@ -480,6 +481,7 @@
           y: { position: 'left', title: { display: true, text: 'RMSSD (ms)', color: '#58a6ff' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
           y1: { position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
           y2: { display: false, min: 5, max: 30 },
+          y3: { display: false, min: 0, max: 90 },
         },
         plugins: { legend: { labels: { color: '#e6edf3' } } },
       },
@@ -494,6 +496,7 @@
           { label: 'RMSSD (ms)', data: [], yAxisID: 'y', borderColor: '#58a6ff', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 2 },
           { label: 'HR (bpm)', data: [], yAxisID: 'y1', borderColor: '#f85149', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 1.5 },
           { label: '呼吸 (br/min)', data: [], yAxisID: 'y2', borderColor: '#2dd4bf', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 1.5, borderDash: [4, 3], spanGaps: true },
+          { label: '姿勢 傾き (°)', data: [], yAxisID: 'y3', borderColor: '#a78bfa', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 1.5, spanGaps: true },
         ],
       },
       options: {
@@ -504,6 +507,7 @@
           y: { position: 'left', title: { display: true, text: 'RMSSD (ms)', color: '#58a6ff' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
           y1: { position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
           y2: { display: false, min: 5, max: 30 },
+          y3: { display: false, min: 0, max: 90 },
         },
         plugins: { legend: { labels: { color: '#e6edf3' } } },
       },
@@ -514,6 +518,7 @@
       chart.data.datasets[0].data = history.map((p) => p.rmssd);
       chart.data.datasets[1].data = history.map((p) => p.hr);
       chart.data.datasets[2].data = history.map((p) => p.resp);
+      chart.data.datasets[3].data = history.map((p) => p.lean ?? null);
       chart.$tones = history.map((p) => toneOf(p, curBaseline));
       chart.$activitySpans = activitySpans();
       chart.update('none');
@@ -542,11 +547,15 @@
       try { localStorage.setItem(TREND_KEY, JSON.stringify(trend)); } catch (_) {}
     }
     const bucketStartOf = (tms) => Math.floor(tms / TREND_BUCKET_MS) * TREND_BUCKET_MS;
-    const newBucket = (start) => ({ start, hrSum: 0, hrN: 0, rmssdSum: 0, rmssdN: 0, respSum: 0, respN: 0, tones: {} });
+    const newBucket = (start) => ({ start, hrSum: 0, hrN: 0, rmssdSum: 0, rmssdN: 0, respSum: 0, respN: 0, leanSum: 0, leanN: 0, postures: {}, tones: {} });
     function accBucket(b, p) {
       if (p.hr != null) { b.hrSum += p.hr; b.hrN++; }
       if (p.rmssd != null) { b.rmssdSum += p.rmssd; b.rmssdN++; }
       if (p.resp != null) { b.respSum += p.resp; b.respN++; }
+      if (p.lean != null) { b.leanSum += p.lean; b.leanN++; }
+      if (p.posture && p.posture !== 'nosignal' && p.posture !== 'uncal') {
+        b.postures[p.posture] = (b.postures[p.posture] || 0) + 1;
+      }
       if (p.tone) b.tones[p.tone] = (b.tones[p.tone] || 0) + 1;
     }
     const dominantTone = (counts) => {
@@ -558,6 +567,8 @@
       hr: b.hrN ? +(b.hrSum / b.hrN).toFixed(1) : null,
       rmssd: b.rmssdN ? +(b.rmssdSum / b.rmssdN).toFixed(1) : null,
       resp: b.respN ? +(b.respSum / b.respN).toFixed(1) : null,
+      lean: b.leanN ? +(b.leanSum / b.leanN).toFixed(0) : null,
+      posture: dominantTone(b.postures),
       tone: dominantTone(b.tones),
       n: b.hrN,
     });
@@ -594,6 +605,7 @@
       trendChart.data.datasets[0].data = s.map((b) => b.rmssd);
       trendChart.data.datasets[1].data = s.map((b) => b.hr);
       trendChart.data.datasets[2].data = s.map((b) => b.resp);
+      trendChart.data.datasets[3].data = s.map((b) => b.lean ?? null);
       trendChart.$tones = s.map((b) => b.tone);
       trendChart.update('none');
       document.getElementById('trendInfo').textContent = s.length ? `${s.length} 区間 / 15分` : '';
@@ -758,13 +770,15 @@
     }
 
     function pushPoint(p) {
-      history.push({ t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone });
+      history.push({ t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone,
+        lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null });
       if (history.length > MAX_POINTS) history.shift();
 
       chart.data.labels.push(new Date(p.t).toLocaleTimeString('ja-JP'));
       chart.data.datasets[0].data.push(p.rmssd);
       chart.data.datasets[1].data.push(p.hr);
       chart.data.datasets[2].data.push(p.resp);
+      chart.data.datasets[3].data.push(p.lean ?? null);
       if (chart.data.labels.length > MAX_POINTS) {
         chart.data.labels.shift();
         chart.data.datasets.forEach((d) => d.data.shift());
@@ -918,11 +932,13 @@
         const u = currentUser, stamp = exportStamp();
         const files = [
           { name: `rmssd-u${u}-detail-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'state'],
-              history.map((p) => [p.t, p.rmssd, p.hr, p.resp, toneOf(p, curBaseline) || ''])) },
+            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'state', 'lean_deg', 'posture', 'activity_mg'],
+              history.map((p) => [p.t, p.rmssd, p.hr, p.resp, toneOf(p, curBaseline) || '',
+                p.lean ?? '', p.posture || '', p.act ?? ''])) },
           { name: `rmssd-u${u}-trend15m-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state'],
-              trend.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || ''])) },
+            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture'],
+              trend.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
+                b.lean ?? '', b.posture || ''])) },
           { name: `rmssd-u${u}-activities-${stamp}.csv`, mime: 'text/csv',
             content: toCsv(['type', 'label', 'category', 'start', 'end', 'duration_sec'],
               activities.map((a) => [a.type, a.label, a.cat, a.start, a.end || '',

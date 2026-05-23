@@ -233,7 +233,9 @@ export class Monitor {
     // flattens the lines — a long unconnected stretch would otherwise dominate
     // the time axis and bury the real data.
     if (hrVal != null || rmssdVal != null) {
-      this.onPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone });
+      this.onPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone,
+        lean: (posture.calibrated && posture.receiving) ? posture.leanDeg : null,
+        posture: posture.state, activity: posture.activity });
     }
 
     // Persist a 1-min downsampled {rmssd, hr} so 全期間 re-baseline survives
