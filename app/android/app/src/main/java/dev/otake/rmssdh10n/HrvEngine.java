@@ -36,6 +36,11 @@ import dev.otake.rmssdh10n.hrv.Steps;
 public final class HrvEngine {
     private static final String TAG = "HrvEngine";
     private static final long RESP_WINDOW_MS = 120000;
+    // Respiration is a ~1–2 min average, so a single failed 3 s recompute must not
+    // blank the readout. Hold the last good estimate and decay its confidence to 0
+    // over RESP_HOLD_MS of staleness; only then drop to null. (Schäfer & Kratky
+    // 2008: RSA-derived rate is stable over >1 min windows.)
+    private static final long RESP_HOLD_MS = 120000;
 
     public interface Emitter {
         void status(String json);
@@ -74,6 +79,8 @@ public final class HrvEngine {
     private final List<double[]> respHistory = new ArrayList<>(); // {brpm, conf}
     private int respEvery = 3;
     private boolean respPreview = false;
+    private long respLastGoodMs = 0;       // wall-clock of the most recent accepted estimate
+    private long respLastLogMs = 0;        // throttle for dropout-reason logging
 
     // daily steps {day, total}
     private long stepDay = 0;
@@ -233,14 +240,26 @@ public final class HrvEngine {
                     respHistory.add(new double[]{ rr.breathsPerMin, rr.confidence });
                     if (respHistory.size() > 5) respHistory.remove(0);
                     respPreview = rr.preview;
-                } else { respHistory.clear(); respPreview = false; }
+                    respLastGoodMs = now;
+                } else if (now - respLastLogMs > 30000) {
+                    // Throttled dropout diagnostics (P4): see why estimates are missing.
+                    Log.i(TAG, "[resp] miss reason=" + rr.reason + " snr=" + rr.snr
+                            + " f=" + rr.freqHz + " buf=" + m);
+                    respLastLogMs = now;
+                }
+                // NOTE: a failed recompute does NOT clear history — see hold below.
             }
+            // Last-good hold: keep the smoothed value alive and fade its confidence
+            // with staleness; only drop to null once the estimate is too old.
+            long staleAge = respLastGoodMs > 0 ? (now - respLastGoodMs) : Long.MAX_VALUE;
+            if (staleAge > RESP_HOLD_MS) { respHistory.clear(); respPreview = false; }
             previewOut = respPreview;
             if (!respHistory.isEmpty()) {
                 List<Double> brs = new ArrayList<>(), cfs = new ArrayList<>();
                 for (double[] e : respHistory) { brs.add(e[0]); cfs.add(e[1]); }
+                double decay = Math.max(0, 1 - (double) staleAge / RESP_HOLD_MS);
                 respOut = round1(medianOf(brs));
-                respConf = round2(medianOf(cfs));
+                respConf = round2(medianOf(cfs) * decay);
             } else { previewOut = false; }
 
             double lnDelta0 = (base != null && rmssdSmInner != null && base.rmssd > 0)
