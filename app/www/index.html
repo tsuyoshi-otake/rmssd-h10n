@@ -275,6 +275,8 @@
         <button id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止">PC共有サーバー: <span id="serverLabel">OFF</span></button>
         <div id="serverUrl" class="srvurl" title="クリックでURLをコピー" style="display:none"></div>
         <div class="sep"></div>
+        <button id="engineBtn" title="計測エンジン。ネイティブは画面OFF・バックグラウンドでも止まらず計測を継続します（夜間記録向け）">計測エンジン: <span id="engineLabel">JS</span></button>
+        <div class="sep"></div>
         <button id="clearBtn" title="保存した履歴を消去">履歴をクリア</button>
       </div>
     </div>
@@ -1115,6 +1117,49 @@
       serverBtn.style.display = 'none';
       serverUrl.style.display = 'none';
     }
+
+    // ---- measurement engine toggle (Android only) ----
+    // 'native' runs BLE + the 1 Hz loop in the foreground service so it keeps
+    // measuring with the screen off (the JS engine pauses when hidden). Bulk
+    // catch-up on resume is handled in app.js (window.__pushPointsBulk below).
+    const engineBtn = document.getElementById('engineBtn');
+    const engineLabel = document.getElementById('engineLabel');
+    if (engineBtn && RmssdBridge.canServe && RmssdBridge.setEngine) {
+      const paintEngine = () => {
+        const m = (RmssdBridge.getEngine && RmssdBridge.getEngine()) || 'js';
+        engineLabel.textContent = m === 'native' ? 'ネイティブ' : 'JS';
+        engineBtn.classList.toggle('on', m === 'native');
+      };
+      paintEngine();
+      let engineBusy = false;
+      engineBtn.addEventListener('click', async () => {
+        if (engineBusy) return;
+        engineBusy = true;
+        try {
+          const cur = (RmssdBridge.getEngine && RmssdBridge.getEngine()) || 'js';
+          await RmssdBridge.setEngine(cur === 'native' ? 'js' : 'native');
+        } catch (e) { alert('エンジン切替に失敗: ' + ((e && e.message) || e)); }
+        paintEngine();
+        engineBusy = false;
+      });
+    } else if (engineBtn) {
+      engineBtn.style.display = 'none';
+    }
+
+    // Bulk-replay points the native engine recorded while the page was hidden:
+    // append to history + trend without per-point redraw, then one repaint.
+    window.__pushPointsBulk = function (pts) {
+      if (!pts || !pts.length) return;
+      for (const p of pts) {
+        history.push({ t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone,
+          lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null,
+          step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
+        trend5.feed(p); trend15.feed(p);
+      }
+      while (history.length > MAX_POINTS) history.shift();
+      saveHistory(true); saveTrendAll(true);
+      redrawFromHistory(); redrawTrend();
+    };
 
     document.getElementById('clearBtn').addEventListener('click', () => {
       if (!confirm('保存した履歴（詳細・長期トレンド）をすべて消去しますか？')) return;

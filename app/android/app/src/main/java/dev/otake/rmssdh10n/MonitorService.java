@@ -10,24 +10,59 @@ import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
 /**
- * Foreground service that keeps the app's process (WebView monitor loop, BLE
- * connection and the local server) alive while the screen is off or the app is
- * in the background. Android aggressively suspends background processes; a
- * foreground service with an ongoing notification + a partial wake lock is the
- * supported way to keep continuous sensor work running.
+ * Foreground service that owns the native HRV engine (BLE + 1 Hz compute) so
+ * monitoring keeps running with the screen off / app backgrounded — the WebView
+ * JS timer is throttled/stopped by the OS, the native loop is not. The engine
+ * writes every frame to {@link HrvDb} (source of truth); the {@link
+ * HrvNativePlugin} pushes live frames to the WebView when one is attached and
+ * serves catch-up reads on resume.
+ *
+ * The service also still backs the legacy "keepAlive" use (foreground + wake
+ * lock) for the JS engine, so switching engines is non-destructive.
  */
 public class MonitorService extends Service {
+    private static final String TAG = "MonitorService";
     private static final String CHANNEL = "rmssd_monitor";
     private static final int NOTIF_ID = 1;
+    public static final String DEFAULT_MAC = "24:AC:AC:1B:54:C8"; // the user's H10
+
+    public static final String ACTION_START_ENGINE = "dev.otake.rmssdh10n.START_ENGINE";
+    public static final String ACTION_STOP_ENGINE  = "dev.otake.rmssdh10n.STOP_ENGINE";
+    public static final String EXTRA_MAC  = "mac";
+    public static final String EXTRA_ACC  = "acc";
+    public static final String EXTRA_USER = "user";
+
+    public static volatile MonitorService INSTANCE;
+    private static HrvEngine.Emitter sEmitter; // set by the plugin (WebView lifecycle)
+
     private PowerManager.WakeLock wakeLock;
+    private HrvDb db;
+    private HrvEngine engine;
+
+    /** Register the WebView-side emitter; applied to a running engine immediately. */
+    public static void registerEmitter(HrvEngine.Emitter e) {
+        sEmitter = e;
+        MonitorService i = INSTANCE;
+        if (i != null && i.engine != null) i.engine.setEmitter(e);
+    }
+
+    public HrvDb db() {
+        if (db == null) db = new HrvDb(this);
+        return db;
+    }
+
+    public boolean engineRunning() { return engine != null; }
 
     @Override
     public void onCreate() {
         super.onCreate();
+        INSTANCE = this;
+        db = new HrvDb(this);
         NotificationManager nm = getSystemService(NotificationManager.class);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && nm != null) {
             NotificationChannel ch = new NotificationChannel(
@@ -68,13 +103,63 @@ public class MonitorService extends Service {
                 wakeLock.acquire();
             }
         }
+
+        handleIntent(intent);
         return START_STICKY; // restart if the OS kills us
+    }
+
+    private void handleIntent(Intent intent) {
+        String action = intent != null ? intent.getAction() : null;
+        if (ACTION_STOP_ENGINE.equals(action)) {
+            stopEngine();
+            return;
+        }
+        if (ACTION_START_ENGINE.equals(action)) {
+            String mac = intent.getStringExtra(EXTRA_MAC);
+            boolean acc = intent.getBooleanExtra(EXTRA_ACC, false);
+            int user = intent.getIntExtra(EXTRA_USER, 1);
+            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user);
+            return;
+        }
+        // Null/empty intent = START_STICKY restart. Restore the native engine if
+        // it was the active one (kv flag), so monitoring resumes after a kill.
+        if ("native".equals(db().kvGet("engine"))) {
+            String mac = db().kvGet("deviceMac");
+            boolean acc = "1".equals(db().kvGet("acc"));
+            int user = parseInt(db().kvGet("user"), 1);
+            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user);
+        }
+    }
+
+    private void startEngine(String mac, boolean acc, int user) {
+        if (engine != null) engine.stop();
+        engine = new HrvEngine(this, db(), acc);
+        engine.setUser(user);
+        engine.setEmitter(sEmitter);
+        engine.start(mac);
+        db().kvPut("engine", "native");
+        db().kvPut("deviceMac", mac);
+        db().kvPut("acc", acc ? "1" : "0");
+        db().kvPut("user", String.valueOf(user));
+        Log.i(TAG, "native engine started mac=" + mac + " acc=" + acc + " user=" + user);
+    }
+
+    private void stopEngine() {
+        if (engine != null) { engine.stop(); engine = null; }
+        db().kvPut("engine", "js");
+        Log.i(TAG, "native engine stopped (engine=js)");
+    }
+
+    private static int parseInt(String s, int def) {
+        try { return s == null ? def : Integer.parseInt(s); } catch (Exception e) { return def; }
     }
 
     @Override
     public void onDestroy() {
+        if (engine != null) { engine.stop(); engine = null; }
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         wakeLock = null;
+        if (INSTANCE == this) INSTANCE = null;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(Service.STOP_FOREGROUND_REMOVE);
         } else {
@@ -84,7 +169,5 @@ public class MonitorService extends Service {
     }
 
     @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
+    public IBinder onBind(Intent intent) { return null; }
 }

@@ -16,6 +16,7 @@ import { BleHr } from './ble-hr.js';
 import { localIso } from '../../src/time.js';
 
 const LocalServer = registerPlugin('LocalServer');
+const HrvNative = registerPlugin('HrvNative');
 
 const platform = Capacitor.getPlatform();
 const isAndroid = platform === 'android';
@@ -93,6 +94,79 @@ function makeAlertEngine() {
 if (isAndroid) statusListeners.push(makeAlertEngine());
 
 let ble = null;
+
+// ---- native engine (Android foreground service) --------------------------
+// The native HrvNative plugin runs BLE + the 1 Hz HRV loop inside MonitorService
+// so monitoring survives screen-off (the WebView JS timer does not). It writes
+// every frame to a DB and pushes live frames here via plugin events; on resume
+// we pull the points accumulated while hidden and bulk-replay them.
+const ENGINE_KEY = 'rmssd-h10n.engine.v1';
+let engineMode = 'js';
+let nativeSubs = [];
+let lastNativeT = '0'; // watermark (epoch ms as string) for DB catch-up
+function loadEngine() {
+  try { return localStorage.getItem(ENGINE_KEY) === 'native' ? 'native' : 'js'; } catch (_) { return 'js'; }
+}
+
+async function startNativeEngine() {
+  // Hand off cleanly: the H10 is single-connection, so the JS engine must fully
+  // release BLE before the native service connects.
+  try { if (ble) { await ble.stop(); ble = null; } } catch (_) {}
+  monitor.stop();
+  for (const s of nativeSubs) { try { (await s).remove(); } catch (_) {} }
+  nativeSubs = [];
+  const sStatus = HrvNative.addListener('hrvStatus', (s) => {
+    for (const cb of statusListeners) cb(s); hostBroadcast('status', s);
+  });
+  const sPoint = HrvNative.addListener('hrvPoint', (p) => {
+    if (p && p.t) { const e = Date.parse(p.t); if (e) lastNativeT = String(e); }
+    for (const cb of pointListeners) cb(p); hostBroadcast('point', p);
+  });
+  nativeSubs = [sStatus, sPoint];
+  try { await HrvNative.start({ acc: false, user: monitor.currentUser || 1 }); }
+  catch (e) { console.error('[native] start failed', e); }
+  engineMode = 'native';
+}
+
+async function stopNativeEngine() {
+  for (const s of nativeSubs) { try { (await s).remove(); } catch (_) {} }
+  nativeSubs = [];
+  try { await HrvNative.stop(); } catch (_) {}
+  engineMode = 'js';
+}
+
+// Replay points the native engine recorded while the dashboard was hidden.
+async function nativeCatchUp() {
+  if (engineMode !== 'native') return;
+  let since = lastNativeT;
+  for (let guard = 0; guard < 50; guard++) {
+    let r;
+    try { r = await HrvNative.getPointsSince({ since, limit: 2000 }); } catch (_) { break; }
+    let arr = [];
+    try { arr = JSON.parse(r.points || '[]'); } catch (_) {}
+    if (arr.length && window.__pushPointsBulk) window.__pushPointsBulk(arr);
+    if (r.lastT) { since = r.lastT; lastNativeT = r.lastT; }
+    if (!r || !r.hasMore) break;
+  }
+}
+
+async function switchEngine(mode) {
+  if (mode === engineMode) return { ok: true, engine: engineMode };
+  try { localStorage.setItem(ENGINE_KEY, mode); } catch (_) {}
+  if (mode === 'native') {
+    try { LocalServer.keepAlive({ enabled: true }); } catch (_) {}
+    await startNativeEngine();
+  } else {
+    await stopNativeEngine();
+    monitor.start();
+    startBle();
+  }
+  return { ok: true, engine: engineMode };
+}
+
+if (isAndroid && typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) nativeCatchUp(); });
+}
 
 // Synthetic RR generator for the browser — mirrors index.js --simulate.
 function startSimulate() {
@@ -199,7 +273,17 @@ const hostBridge = {
   setSnapshot: (json) => { try { return LocalServer.setSnapshot({ data: json }); } catch (_) {} },
   // Start/stop the foreground service that keeps monitoring + server alive in the background.
   keepAlive: (enabled) => { try { return LocalServer.keepAlive({ enabled }); } catch (_) {} },
+  // Switch the measurement engine: 'js' (WebView 1 Hz, pauses with screen off) or
+  // 'native' (foreground-service BLE + 1 Hz, survives screen off). -> { ok, engine }
+  setEngine: (mode) => switchEngine(mode),
+  getEngine: () => engineMode,
   start: () => {
+    // Android with the native engine selected: BLE + compute run in the service.
+    if (isAndroid && loadEngine() === 'native') {
+      try { LocalServer.keepAlive({ enabled: true }); } catch (_) {}
+      startNativeEngine();
+      return;
+    }
     monitor.start();
     const s = monitor.getStatus();
     if (s) for (const cb of statusListeners) cb(s);
@@ -256,6 +340,8 @@ function makeRemoteBridge() {
     setSupineRef: () => ({ ok: false }),
     toggleSleepLR: () => ({ ok: false }),
     setOrientation: noop,
+    setEngine: () => ({ ok: false, engine: 'js' }),
+    getEngine: () => 'js',
     exportFiles: (files) => exportFiles(files), // browser download
     getRrLog: () => [], // raw RR is host-only (not streamed to remote)
     now: () => localIso(),
