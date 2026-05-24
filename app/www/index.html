@@ -577,6 +577,7 @@
           { label: 'HR (bpm)', data: [], yAxisID: 'y1', borderColor: '#f85149', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 1.5 },
           { label: '呼吸 (br/min)', data: [], yAxisID: 'y2', borderColor: '#2dd4bf', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 1.5, borderDash: [4, 3], spanGaps: true },
           { label: '姿勢 傾き (°)', data: [], yAxisID: 'y3', borderColor: '#a78bfa', backgroundColor: 'transparent', tension: .3, pointRadius: 2, borderWidth: 1.5, spanGaps: true },
+          { type: 'bar', label: '歩数', data: [], yAxisID: 'y4', backgroundColor: 'rgba(245,158,11,0.35)', borderWidth: 0, order: 10 },
         ],
       },
       options: {
@@ -588,6 +589,7 @@
           y1: { position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
           y2: { display: false, min: 5, max: 30 },
           y3: { display: false, min: 0, max: 90 },
+          y4: { display: false, min: 0, beginAtZero: true }, // steps/bucket (bars, scaled to fit lower band)
         },
         plugins: { legend: { labels: { color: '#e6edf3' } } },
       },
@@ -719,6 +721,12 @@
         chart.data.datasets[1].data = s.map((b) => b.hr);
         chart.data.datasets[2].data = s.map((b) => b.resp);
         chart.data.datasets[3].data = s.map((b) => b.lean ?? null);
+        const stepVals = s.map((b) => b.steps || 0);
+        chart.data.datasets[4].data = stepVals;
+        // Keep step bars confined to the lower ~third of the plot so they read as
+        // a context band under the HRV/HR lines rather than dominating the chart.
+        const maxSteps = Math.max(1, ...stepVals);
+        chart.options.scales.y4.max = maxSteps * 3;
         chart.$tones = s.map((b) => b.tone);
         chart.$bodies = s.map((b) => b.body || null);
         chart.update('none');
@@ -1268,6 +1276,7 @@
       { id: 'nap',     label: '仮眠',         cat: 'rest',     color: '#3fb950' },
       { id: 'bath',    label: '入浴',         cat: 'rest',     color: '#3fb950' },
       { id: 'rest',    label: '休憩',         cat: 'rest',     color: '#3fb950' },
+      { id: 'toilet',  label: 'トイレ',       cat: 'rest',     color: '#3fb950' },
       { id: 'breath',  label: '瞑想・深呼吸', cat: 'rest',     color: '#3fb950' },
       { id: 'music',   label: '音楽・リラックス', cat: 'rest', color: '#3fb950' },
       { id: 'video',   label: '動画視聴',     cat: 'rest',     color: '#3fb950' },
