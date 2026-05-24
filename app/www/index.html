@@ -949,7 +949,7 @@
       if (s.user != null && s.user !== currentUser) switchLocalUser(s.user);
 
       const conn = document.getElementById('conn');
-      conn.textContent = s.connected ? (s.recording ? '接続 · 記録' : '接続') : '未接続';
+      conn.textContent = s.connected ? (s.externalRecording ? '接続 · 外部録音あり' : (s.recording ? '接続 · 記録' : '接続')) : '未接続';
       conn.className = s.connected ? 'on' : '';
       const brand = document.getElementById('brand');
       if (brand) brand.classList.toggle('on', !!s.connected);
@@ -1241,7 +1241,12 @@
       try {
         const mins = Math.max(1, Math.round((Date.parse(pts[pts.length - 1].t) - Date.parse(pts[0].t)) / 60000));
         const calib = document.getElementById('calib');
-        if (calib) { calib.textContent = `離席分を復元しました（約 ${mins} 分）`; baselineMsgUntil = Date.now() + 6000; }
+        if (calib) {
+          calib.textContent = (opts && opts.truncated)
+            ? `離席分を復元しました（約 ${mins} 分・一部欠落）`
+            : `離席分を復元しました（約 ${mins} 分）`;
+          baselineMsgUntil = Date.now() + 6000;
+        }
       } catch (_) {}
     };
 

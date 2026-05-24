@@ -165,7 +165,10 @@ public class MonitorService extends Service {
     public void nativeForegroundEntered() { if (engine != null) engine.foregroundEntered(); }
 
     private void stopEngine() {
-        if (engine != null) { engine.stop(); engine = null; }
+        // Explicit (user) stop: mark the recording discarded BEFORE teardown so the next
+        // launch does NOT auto-recover it. An OS kill goes through onDestroy without this,
+        // leaving the recording 'active' so its gap IS recovered on restart.
+        if (engine != null) { engine.markUserStopped(); engine.stop(); engine = null; }
         db().kvPut("engine", "js");
         Log.i(TAG, "native engine stopped (engine=js)");
     }

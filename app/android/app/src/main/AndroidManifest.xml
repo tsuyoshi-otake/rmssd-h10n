@@ -39,6 +39,19 @@
             android:name=".MonitorService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Restart monitoring after a reboot / app update so the H10 records a gap and we
+             recover it on next connect. Only acts if the native engine was active (kv). -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 
     <!-- Permissions -->
@@ -51,6 +64,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Resume monitoring after a device reboot so the H10 gap is recovered (BootReceiver). -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Bluetooth LE (Polar H10). On Android 12+ (API 31) scanning needs
          BLUETOOTH_SCAN — declared neverForLocation since we never derive

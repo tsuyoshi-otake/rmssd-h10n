@@ -114,13 +114,11 @@ async function startNativeEngine() {
     if (p && p.t) { const e = Date.parse(p.t); if (e) lastNativeT = String(e); }
     for (const cb of pointListeners) cb(p); hostBroadcast('point', p);
   });
-  const sBackfill = HrvNative.addListener('hrvBackfill', (b) => {
-    // A gap recovered from H10 memory was written to the DB with PAST timestamps.
-    // The forward-only watermark catch-up would miss them, so re-fetch + recompute
-    // exactly the trend buckets the gap touches.
-    const from = b && b.fromMs != null ? Number(b.fromMs) : null;
-    const to = b && b.toMs != null ? Number(b.toMs) : null;
-    if (from != null && to != null) nativeBackfillMerge(from, to);
+  const sBackfill = HrvNative.addListener('hrvBackfill', () => {
+    // A gap recovered from H10 memory was written to the DB with PAST timestamps. The
+    // live event is only a low-latency nudge — drain the durable import ledger so a
+    // restore that landed while no WebView was attached is merged too (idempotent).
+    drainBackfillImports();
   });
   nativeSubs = [sStatus, sPoint, sBackfill];
   try { await HrvNative.start({ acc: true, user: currentUser, seed: buildNativeSeed(currentUser) }); }
@@ -172,6 +170,7 @@ async function nativeCatchUp() {
     if (!r || !r.hasMore) break;
   }
   if (all.length && window.__pushPointsBulk) window.__pushPointsBulk(all);
+  await drainBackfillImports(); // merge any service-only gap restore (past timestamps)
 }
 
 // A backfilled gap has PAST timestamps, so it can't ride the forward-only watermark
@@ -179,7 +178,7 @@ async function nativeCatchUp() {
 // gap points plus any live boundary points — and merge: history is rebuilt
 // sorted+deduped and only the touched buckets are recomputed from source, which is
 // correct even though they arrive after newer live data.
-async function nativeBackfillMerge(fromMs, toMs) {
+async function nativeBackfillMerge(fromMs, toMs, truncated) {
   if (!useNative) return;
   const WIDE = 15 * 60 * 1000; // widest trend bucket — covers both 5- and 15-min stores
   const lo = Math.floor(fromMs / WIDE) * WIDE;
@@ -196,7 +195,27 @@ async function nativeBackfillMerge(fromMs, toMs) {
     if (r && r.lastT) since = r.lastT;
     if (stop || !r || !r.hasMore) break;
   }
-  if (pts.length && window.__mergeBackfill) window.__mergeBackfill(pts);
+  if (pts.length && window.__mergeBackfill) window.__mergeBackfill(pts, { truncated: !!truncated });
+}
+
+// WebView-independent backfill catch-up: drain the native import ledger (gap ranges
+// restored from H10 memory — possibly while NO WebView was attached, e.g. after an
+// app/OS restart) and merge each touched trend-bucket range. The live hrvBackfill
+// event is just a nudge to run this; it is idempotent and guarded until the chart
+// hooks exist, so it is safe to call on load, on resume, and on the event.
+async function drainBackfillImports() {
+  if (!useNative || !HrvNative.getUnmergedImports || !window.__mergeBackfill) return;
+  let imports = [];
+  try { const r = await HrvNative.getUnmergedImports(); imports = JSON.parse((r && r.imports) || '[]'); }
+  catch (_) { return; }
+  if (!imports.length) return;
+  const ids = [];
+  for (const im of imports) {
+    const from = Number(im.fromMs), to = Number(im.toMs);
+    if (Number.isFinite(from) && Number.isFinite(to)) await nativeBackfillMerge(from, to, !!Number(im.truncated));
+    ids.push(im.id);
+  }
+  try { await HrvNative.markImportsMerged({ ids: ids.join(',') }); } catch (_) {}
 }
 
 if (isAndroid && typeof document !== 'undefined') {
@@ -297,6 +316,10 @@ const hostBridge = {
       // BLE + compute run in the foreground service (survives screen-off).
       try { LocalServer.keepAlive({ enabled: true }); } catch (_) {}
       startNativeEngine();
+      // Cold start: visibilitychange doesn't fire for the initial 'visible' state, so
+      // trigger catch-up once the chart hooks exist — pulls forward points AND drains a
+      // gap restored while no WebView was attached (service-only restore after a restart).
+      setTimeout(() => { try { nativeCatchUp(); } catch (_) {} }, 1500);
       return;
     }
     // ?sim=1: the in-WebView Monitor driven by a synthetic RR stream.

@@ -155,4 +155,24 @@ public class HrvNativePlugin extends Plugin {
         ret.put("lastT", String.valueOf(page.lastT));
         call.resolve(ret);
     }
+
+    /** Unmerged backfill import ranges (JSON array string of {id,fromMs,toMs,restored,
+     *  truncated}). The WebView drains these on load/resume and re-fetches each range from
+     *  the DB — so a gap restored while no WebView was attached is still surfaced. This is
+     *  the reliable catch-up path; the live hrvBackfill event is just a low-latency nudge. */
+    @PluginMethod
+    public void getUnmergedImports(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("imports", db().unmergedImportsJson());
+        call.resolve(ret);
+    }
+
+    /** Flag import ids (CSV of integers) as merged so they are not merged again. */
+    @PluginMethod
+    public void markImportsMerged(PluginCall call) {
+        db().markImportsMerged(call.getString("ids", ""));
+        JSObject ret = new JSObject();
+        ret.put("ok", true);
+        call.resolve(ret);
+    }
 }

@@ -83,6 +83,42 @@ pwsh -NoProfile -Command "Get-NetTCPConnection -State Listen | Where-Object {$_.
 - **状態カラー帯**: WS `point` に `tone` を乗せ、Chart.jsプラグイン（`stateBandPlugin`）で両グラフ背景を状態色で塗る。トレンドはバケット最多トーン。過去データ（tone未記録）は `toneFromVitals()`（クライアント版classifyRaw）でRMSSD/HRから遡って再計算（現baseline適用・ヒステリシス無し）。`refreshBands()`はbaseline確定時に発火。
 - **UI規約**: 絵文字は使わない（色インジケータ＋テキストで表現）。ダッシュボードの詳細履歴は **localStorage** に保存（`rmssd-h10n.history.v1`、最大約3600点）、「履歴をクリア」で詳細・長期トレンド両方を消去。
 
+## Android アプリ（Capacitor）＋ H10オフライン穴埋め
+
+`app/` が Capacitor アプリ。ネイティブ常駐で計測し、離席/圏外/アプリkill/端末再起動で BLE 切断中も **H10本体メモリの RR 記録**から復元して時間連続にする。
+
+```
+app/android/.../MonitorService.java   前面サービス（エンジン所有・START_STICKY・user-stop⇔OS-kill区別）
+                HrvEngine.java         1Hz計算ループ（RMSSD/姿勢/呼吸/baseline/state）＋RecordingStore実装＋穴埋め永続化
+                PolarBle.java          Polar BLE SDK 6.16.1(Java/RxJava3) 駆動。ライブHR/RR/ACC＋録音状態機械
+                HrvDb.java             SQLite=真実の源。points/status_latest/kv/recordings/backfill_imports
+                HrvNativePlugin.java   WebViewブリッジ（live push＋getPointsSince/getUnmergedImports catch-up）
+                BootReceiver.java      BOOT_COMPLETEDで監視を再開（kv engine==native時）
+app/src/app.js + app/www/index.html    ダッシュボード（esbuild: src→www/app.js、index.htmlはwww直）
+```
+
+### ビルド／配信
+- `cd app && npm run build`（esbuild: `src/app.js`→`www/app.js`）→ `npx cap copy android` → `cd app/android && ./gradlew :app:assembleDebug`。
+- ユニット: `./gradlew :app:testDebugUnitTest`。コンパイルのみ: `:app:compileDebugJavaWithJavac`。
+- WiFi越しadb: USB接続中に `adb tcpip 5555` → IP取得 → `adb connect <phone-ip>:5555`（USB抜いてもWiFi維持）。
+
+### Polar BLE SDK の前提（重要）
+1. **`FEATURE_POLAR_DEVICE_TIME_SETUP` は有効化しない**。H10は時刻READ非対応で、SDKの feature-check probe が10sハング→**全ストリーム(HR含む)が落ちる**。穴埋めは自前クロックの start-anchor なのでデバイス時刻は不要。有効feature= HR / ONLINE_STREAMING / H10_EXERCISE_RECORDING / DEVICE_INFO。
+2. **H10はOSボンディング必須**（PFTP=録音転送は暗号化リンク必須）。SDK接続前に `ensureBonded()` で `createBond()`。ライブHR/ACCはボンディング不要だが録音取得はPFTP=要ボンド。
+3. **PFTP 106 (OPERATION_NOT_PERMITTED)**: 接続直後に録音操作を走らせるとストリーム確立と競合して106。対策=**接続後8秒ディレイ＋リトライ**、かつ **start前に必ずスロットを空ける**（stop→ours削除）。**録音中/非空スロットへ startRecording すると106**。
+4. **ACCは `requestStreamSettings` で実機が出す組合せから選ぶ**（25Hz/16bit/2G優先）。ハードコードは拒否され姿勢が取れない。
+5. **再接続/teardownは自前監督**＋force-kill厳禁。`am force-stop` を**スキャン中に繰り返す**とAndroid BLEスキャナがwedge→端末再起動で解消。接続中の単発force-stopは比較的安全。
+
+### オフライン穴埋め（再起動を跨ぐ復元）
+- H10本体= **単一スロット**。RR記録で **約95,000拍 ≒ 約20時間**、満杯で自動停止（上書きせず）。BLE切断中も記録継続。`PolarExerciseEntry.date`は信用不可(issue#168)→**自前クロックの start-anchor**で逆算せず前進再生。
+- **録音状態機械**（`recordings`テーブルに永続化）: `starting`→`active`→`fetching`→`persisted`→`removed` / `discarded_by_user`。**メタがDBに残るのでアプリ/OS再起動を跨いで復元**（在メモリだけに持たない）。`startRecording` 発行**前**に `starting`＋start-anchor を commit。
+- **接続時フロー**: `getOpenRecording`(DB) → 一致する on-device exercise を **exId↔identifier** で照合 → stop → fetch → `Backfill.replay`(start-anchor前進再生) → **`backfillCommit`（1トランザクションで `INSERT OR IGNORE` points ＋ `backfill_imports` ledger）** → 永続確認後に remove → 新規 start。**fetch失敗時は新規 startしない**（単一スロット上書きで未取得ギャップを失うため）→リトライ。
+- **dedup/冪等**: 既存秒は `pointTimesIn` でスキップ＋`INSERT OR IGNORE`（liveの境界秒をnull姿勢で壊さない）。同一anchorは同一秒を再構築するので remove失敗→再取得しても二重化しない。
+- **user-stop ⇔ OS-kill**: 明示停止(`stopEngine`)は `markUserStopped()`→`discarded_by_user`で**復元しない**。OS-kill(`onDestroy`でengine!=null)は `active`のまま→次回起動で復元。
+- **UIへの反映はイベント非依存**: `backfill_imports` ledger を起動/復帰/イベントで drain（`getUnmergedImports`→`nativeBackfillMerge`→`__mergeBackfill`＝history再構築＋trend `replaceBuckets`）。WebView未アタッチ中のサービス単独復元も次回ロードで反映。「**離席分を復元しました（約N分・一部欠落）**」。
+- **満杯(truncated)**: 録音が今より大きく前に自動停止＋RR上限/~18h で検知→復元範囲を `[start,start+duration]` に限定し `truncated` をledger/UIに明示。
+- DBは **schema v2**。`onUpgrade` は**追加のみ（pointsを消さない）**。
+
 ## トレンド分析
 
 `data/rmssd-u<N>-*.csv`（列: `user,wallClock,tMs,rr_ms,rmssd_ms,sdnn_ms,hr_bpm,rrCount,resp_brpm,resp_conf,corrected,state`）を解析。`corrected`はアーティファクト除去拍の累積。HR/RMSSDの min/avg/max と直近窓 vs 過去の差分で傾向を見る。安静時RMSSDの目安は20–50ms（高HR時は低下＝交感神経優位）。

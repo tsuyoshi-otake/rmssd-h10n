@@ -48,6 +48,11 @@ public final class HrvEngine {
     // wall-time), so writing then would fill the gap with a flat fake line AND block
     // the offline backfill (its "skip seconds already present" would skip the gap).
     private static final long POINT_FRESH_MS = 5000;
+    // GATT can report 'connected' while the streams never deliver (an abrupt OS kill can
+    // orphan the H10's side, leaving a half-open link). If no RR arrives within this window
+    // after a connection begins, the stream watchdog forces a reconnect to re-establish
+    // streams + the recording recovery on a fresh GATT.
+    private static final long STALE_STREAM_MS = 35000;
 
     public interface Emitter {
         void status(String json);
@@ -75,10 +80,14 @@ public final class HrvEngine {
     private final BodyState bodyState = new BodyState();
 
     private int user = 1;
+    private volatile String deviceMac;          // mac of the H10 we record (for recording meta)
+    private int baselineVersion = 0;            // bumped on re-baseline; stamped into restored ranges
     private final boolean withAcc;
     private volatile boolean connected = false;
     private volatile Integer deviceHr = null;
     private volatile long lastRrAt = 0;          // wall-clock of the last RR received (point-freshness gate)
+    private volatile long connectedSince = 0;    // wall-clock the current BLE connection began (0 = disconnected)
+    private long lastReconnectNudge = 0;         // stream-watchdog throttle (tick thread only)
     private volatile int lastBackfillRestored = 0; // points restored by the most recent gap backfill
     private double lastPeakMs = 0;
     private long beats = 0;
@@ -127,6 +136,7 @@ public final class HrvEngine {
         // restore daily steps + a persisted baseline so a restart resumes calibrated
         loadStepsDay();
         loadBaselineKv();
+        try { baselineVersion = Integer.parseInt(db.kvGet("baselineVersion")); } catch (Exception ignored) {}
     }
 
     public void setEmitter(Emitter e) { this.emitter = e; }
@@ -176,7 +186,7 @@ public final class HrvEngine {
 
     /** Re-calibrate: drop the frozen baseline so it re-measures over the next ~60s. */
     public void resetBaseline() {
-        synchronized (gate) { baseline.reset(); db.kvPut("baseline", ""); }
+        synchronized (gate) { baseline.reset(); db.kvPut("baseline", ""); bumpBaselineVersion(); }
     }
 
     /** Manual baseline override (and persist so a restart keeps it). */
@@ -186,8 +196,16 @@ public final class HrvEngine {
             baseline.loadFrozen(r, h);
             try { db.kvPut("baseline", new JSONObject().put("rmssd", r).put("hr", h).toString()); }
             catch (Exception ignored) {}
+            bumpBaselineVersion();
             return true;
         }
+    }
+
+    /** Bump + persist the baseline version so a restored range records which baseline
+     *  produced its tone (the WebView can recompute past tone after a re-baseline). */
+    private void bumpBaselineVersion() {
+        baselineVersion++;
+        db.kvPut("baselineVersion", String.valueOf(baselineVersion));
     }
 
     /** Recent raw RR beats as a JSON array of {wall (JST ISO), rr, accepted}, for
@@ -208,6 +226,7 @@ public final class HrvEngine {
 
     public void start(String mac) {
         battWindowStart = System.currentTimeMillis();
+        deviceMac = mac;
         ble = new PolarBle(ctx, mac, withAcc, new PolarBle.Sink() {
             @Override public void onHr(int hr) { deviceHr = hr; }
             @Override public void onRr(double rrMs) {
@@ -229,10 +248,14 @@ public final class HrvEngine {
             @Override public void onAcc(int x, int y, int z) {
                 synchronized (gate) { accSamples++; posture.add(x, y, z); steps.add(x, y, z); }
             }
-            @Override public void onConnected(boolean c) { connected = c; if (!c) deviceHr = null; }
+            @Override public void onConnected(boolean c) {
+                connected = c;
+                connectedSince = c ? System.currentTimeMillis() : 0;
+                if (!c) deviceHr = null;
+            }
             @Override public void log(String m) { Log.i(TAG, "[ble] " + m); }
         });
-        ble.setRecordingHandler(this::onGapRecording);
+        ble.setRecordingStore(recStore);
         ble.start();
         ticker = Executors.newSingleThreadScheduledExecutor();
         ticker.scheduleAtFixedRate(this::tickSafe, 1000, 1000, TimeUnit.MILLISECONDS);
@@ -247,44 +270,94 @@ public final class HrvEngine {
         Log.i(TAG, "engine stopped");
     }
 
+    /** Explicit (user) stop: mark the H10 recording discarded so the next launch does
+     *  NOT auto-recover it. Distinct from an OS kill, which leaves it 'active'. */
+    public void markUserStopped() {
+        try { db.recordingMarkDiscardedByUser(); } catch (Throwable t) { Log.w(TAG, "markUserStopped", t); }
+    }
+
     /** App returned to foreground — let the BLE driver restart its scan if needed. */
     public void foregroundEntered() {
         PolarBle b = ble;
         if (b != null) b.foregroundEntered();
     }
 
+    // --- recording store: DB-backed lifecycle so the H10 recording survives an app/OS
+    //     restart (the start-anchor + state live in HrvDb, not just process memory) -----
+    private static final String REC_OWNER = "rmssd-h10n";
+    private static final int REC_SCHEMA = 2;
+
+    private final PolarBle.RecordingStore recStore = new PolarBle.RecordingStore() {
+        @Override public PolarBle.RecordingStore.OpenRec getOpenRecording() {
+            HrvDb.Rec r = db.recordingGetOpen();
+            return (r == null) ? null
+                    : new PolarBle.RecordingStore.OpenRec(r.exId, r.anchorStartMs, r.state);
+        }
+        @Override public void recStarting(String exId, long startRequestMs) {
+            db.recordingStarting(exId, deviceMac, user, REC_OWNER, REC_SCHEMA, startRequestMs);
+        }
+        @Override public void recActive(String exId, long startAckMs) { db.recordingActive(exId, startAckMs); }
+        @Override public void recFetching(String exId, long rrCount, long durationMs, boolean truncated) {
+            db.recordingSetFetched(exId, rrCount, durationMs, truncated ? 1 : 0);
+        }
+        @Override public boolean recPersistGap(double[] rrMs, long anchorStartMs, String exId, boolean truncated) {
+            boolean ok = replayAndPersistGap(rrMs, anchorStartMs, exId, truncated);
+            if (ok) db.recordingSetState(exId, "persisted");
+            return ok;
+        }
+        @Override public void recRemoved(String exId) { db.recordingMarkRemoved(exId); }
+    };
+
     /** Replay RR fetched from the H10's gap recording into 1 Hz points at their
-     *  start-anchored timestamps and persist them durably, skipping seconds already
-     *  present (live points). Returns true once written so {@link PolarBle} may remove
-     *  the device-side exercise. Runs on PolarBle's worker thread. */
-    public boolean onGapRecording(double[] rrMs, long anchorStartMs) {
+     *  start-anchored timestamps and persist them durably + atomically with a ledger row
+     *  (so a service-only restore the WebView never saw is still merged on next load).
+     *  INSERT OR IGNORE so a live boundary second is never overwritten by a null-posture
+     *  backfill point. Returns true once durable so {@link PolarBle} may remove the
+     *  device-side exercise. Idempotent on a re-import (same anchor → same seconds). Runs
+     *  on PolarBle's worker thread. */
+    private boolean replayAndPersistGap(double[] rrMs, long anchorStartMs, String exId, boolean truncated) {
         try {
+            long now = System.currentTimeMillis();
+            // Clock sanity: a future / absurd anchor (e.g. an NTP jump) would misplace the
+            // whole gap. Treat as nothing-to-do (return true so the device exercise is still
+            // removed) rather than writing wrong-timestamped points.
+            if (anchorStartMs <= 0 || anchorStartMs > now + 60_000L) {
+                Log.w(TAG, "backfill: implausible anchor " + anchorStartMs + " (now=" + now + ") — skipping");
+                lastBackfillRestored = 0;
+                return true;
+            }
             double baseR = 0, baseH = 0;
+            int blv;
             synchronized (gate) {
                 Analysis.Base b = baseline.get();
                 if (b != null) { baseR = b.rmssd; baseH = b.hr; }
+                blv = baselineVersion;
             }
             List<Backfill.Pt> pts = Backfill.replay(rrMs, anchorStartMs, baseR, baseH);
             if (pts.isEmpty()) { lastBackfillRestored = 0; return true; }
             long from = pts.get(0).tMs, to = pts.get(pts.size() - 1).tMs;
             Set<Long> existing = db.pointTimesIn(from, to);
-            int inserted = 0;
+            List<Object[]> rows = new ArrayList<>();
             for (Backfill.Pt pt : pts) {
+                if (pt.tMs > now + 60_000L) continue;  // clock-skew guard: never write future points
                 if (existing.contains(pt.tMs)) continue;
                 String json = buildPointJson(localIso(pt.tMs), pt.rmssd,
                         pt.hr != null ? (double) pt.hr : null, pt.resp, pt.tone,
                         null, null, null, null, 0, null, null);
-                db.addPoint(pt.tMs, json);
-                inserted++;
+                rows.add(new Object[]{ pt.tMs, json });
             }
-            db.flush(); // durable BEFORE PolarBle removes the device-side exercise
+            int inserted = rows.size();
+            // One transaction: INSERT OR IGNORE points + ledger row — crash-atomic and
+            // idempotent so a removeExercise failure can be retried without double-counting.
+            db.backfillCommit(rows, from, to, inserted, anchorStartMs, exId, truncated ? 1 : 0, blv);
             lastBackfillRestored = inserted;
-            Log.i(TAG, "[backfill] restored " + inserted + " pts over " + ((to - from) / 1000) + "s");
+            Log.i(TAG, "[backfill] restored " + inserted + " pts over " + ((to - from) / 1000) + "s"
+                    + (truncated ? " (truncated)" : ""));
             Emitter e = emitter;
             if (e != null) {
                 try {
                     e.backfill(new JSONObject().put("restored", inserted)
-                            .put("fromMs", from).put("toMs", to).toString());
+                            .put("fromMs", from).put("toMs", to).put("truncated", truncated).toString());
                 } catch (Exception ignored) {}
             }
             return true;
@@ -302,6 +375,18 @@ public final class HrvEngine {
         lastTickAt = now;
         tickCount++;
         battTicks++;
+
+        // Stream watchdog: GATT 'connected' but NO RR since this connection began (≥35 s) is a
+        // stalled link (a stream subscription errored). Re-subscribe the streams (throttled
+        // 60 s). Gentle — no disconnect; a true orphan (after a force-stop) needs a BT toggle.
+        long cs = connectedSince;
+        if (connected && cs > 0 && now - cs > STALE_STREAM_MS && lastRrAt < cs
+                && now - lastReconnectNudge > 60000) {
+            lastReconnectNudge = now;
+            Log.w(TAG, "[ble] stream watchdog: no RR " + ((now - cs) / 1000) + "s after connect — re-subscribing");
+            PolarBle b = ble;
+            if (b != null) b.nudgeStreams();
+        }
 
         Rmssd.Result r, r5;
         Posture.Result p;
@@ -413,6 +498,7 @@ public final class HrvEngine {
             status.put("body", body.state);
             status.put("engine", "native");
             status.put("recording", ble != null && ble.isRecording());
+            status.put("externalRecording", ble != null && ble.isExternalBlocking());
             status.put("restored", lastBackfillRestored);
             status.put("updatedAt", wall);
 
