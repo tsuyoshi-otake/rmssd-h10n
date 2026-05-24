@@ -31,6 +31,26 @@ public class PostureTest {
     }
 
     @Test
+    public void leanDirectionForwardVsBack() {
+        // upright = toward feet (0,-1,0); supine/posterior = toward back (0,0,-1).
+        final double c = Math.cos(30 / RAD2DEG) * 1000, t30 = Math.sin(30 / RAD2DEG) * 1000;
+
+        // Reclining back: gravity tilts toward the posterior axis.
+        Posture back = new Posture(new Posture.Vec(0, -1000, 0), new Posture.Vec(0, 0, -1000), 1, 25);
+        for (int i = 0; i < 300; i++) back.add(0, -c, -t30);
+        Posture.Result rb = back.compute();
+        assertEquals("lean", rb.state);
+        assertEquals("back", rb.leanDir);
+
+        // Slouching forward: gravity tilts toward the anterior axis (opposite sign).
+        Posture fwd = new Posture(new Posture.Vec(0, -1000, 0), new Posture.Vec(0, 0, -1000), 1, 25);
+        for (int i = 0; i < 300; i++) fwd.add(0, -c, t30);
+        Posture.Result rf = fwd.compute();
+        assertEquals("lean", rf.state);
+        assertEquals("forward", rf.leanDir);
+    }
+
+    @Test
     public void sleepPositionResolution() {
         Posture sp = new Posture(null, null, 1, 25);
         sp.ref = new Posture.Vec(0, -1000, 0);       // upright -> toward feet

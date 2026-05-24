@@ -436,6 +436,19 @@
       uncal:    { label: '基準待ち', color: '#8b95a3' },
       nosignal: { label: '受信なし', color: '#5b6573' },
     };
+    // Pick the posture label by DIRECTION (前傾 vs もたれ), not just lean angle: a
+    // chest accelerometer reads the same angle for slouching forward and reclining
+    // back, so we use leanDir (from the supine reference) to tell them apart. When
+    // the supine reference isn't set yet, leanDir is null and we fall back to the
+    // old angle-magnitude bins.
+    function postureInfo(p) {
+      if (!p) return POSTURE.upright;
+      if (p.state === 'lean' || p.state === 'reclined') {
+        if (p.leanDir === 'forward') return POSTURE.lean;     // 前傾
+        if (p.leanDir === 'back') return POSTURE.reclined;    // もたれ
+      }
+      return POSTURE[p.state] || POSTURE.upright;
+    }
     // Sleep position (when lying), from the supine reference + upright reference.
     const SLEEPPOS = { supine: 'あおむけ', prone: 'うつぶせ', left: '左向き', right: '右向き' };
     // Contextual body/activity state (posture + steps + autonomic + breathing).
@@ -981,7 +994,7 @@
       const unitEl = document.getElementById('postureUnit');
       const pBase = document.getElementById('postureBase');
       if (p && p.receiving && p.calibrated && p.leanDeg != null) {
-        const info = POSTURE[p.state] || POSTURE.upright;
+        const info = postureInfo(p);
         degEl.textContent = p.leanDeg;
         degEl.style.color = info.color;
         unitEl.style.display = '';

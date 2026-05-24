@@ -369,6 +369,7 @@ public final class HrvEngine {
                 point.put("tone", state != null && state.tone != null ? state.tone : JSONObject.NULL);
                 point.put("lean", (p.calibrated && p.receiving && p.leanDeg != null) ? p.leanDeg : JSONObject.NULL);
                 point.put("posture", p.state);
+                point.put("leanDir", p.leanDir != null ? p.leanDir : JSONObject.NULL);
                 point.put("activity", p.activity != null ? p.activity : JSONObject.NULL);
                 point.put("step", stepDelta);
                 point.put("body", body.state);
@@ -414,6 +415,7 @@ public final class HrvEngine {
         o.put("activity", p.activity != null ? p.activity : JSONObject.NULL);
         o.put("moving", p.moving);
         o.put("sleepPos", p.sleepPos != null ? p.sleepPos : JSONObject.NULL);
+        o.put("leanDir", p.leanDir != null ? p.leanDir : JSONObject.NULL);
         return o;
     }
 
