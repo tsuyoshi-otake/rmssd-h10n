@@ -136,18 +136,28 @@ async function switchUserNative(n) {
 }
 
 // Replay points the native engine recorded while the dashboard was hidden.
+// Show the current value first (instant), then backfill the gap in ONE batch so
+// a long backlog doesn't render the chart in visible chunks or delay "now".
 async function nativeCatchUp() {
   if (!useNative) return;
+  // 1) Apply the latest snapshot immediately so the cards jump to current.
+  try {
+    const st = await HrvNative.getStatus();
+    if (st && st.value) { const s = JSON.parse(st.value); for (const cb of statusListeners) cb(s); }
+  } catch (_) {}
+  // 2) Accumulate every page, then a single bulk insert + one repaint.
   let since = lastNativeT;
+  const all = [];
   for (let guard = 0; guard < 50; guard++) {
     let r;
-    try { r = await HrvNative.getPointsSince({ since, limit: 2000 }); } catch (_) { break; }
+    try { r = await HrvNative.getPointsSince({ since, limit: 5000 }); } catch (_) { break; }
     let arr = [];
     try { arr = JSON.parse(r.points || '[]'); } catch (_) {}
-    if (arr.length && window.__pushPointsBulk) window.__pushPointsBulk(arr);
+    if (arr.length) for (const p of arr) all.push(p);
     if (r.lastT) { since = r.lastT; lastNativeT = r.lastT; }
     if (!r || !r.hasMore) break;
   }
+  if (all.length && window.__pushPointsBulk) window.__pushPointsBulk(all);
 }
 
 if (isAndroid && typeof document !== 'undefined') {

@@ -805,7 +805,6 @@
     // ---- wrappers that drive both granularities at once ----------------------
     function rebuildTrendFromHistory() { trend5.rebuild(); trend15.rebuild(); }
     function redrawTrend() { trend5.redraw(); trend15.redraw(); refreshDaySelector(); }
-    function feedTrend(p) { trend5.feed(p); trend15.feed(p); if (!pageHidden) redrawTrend(); }
     function saveTrendAll(force) { trend5.save(force); trend15.save(force); }
 
     // ---- visibility-driven battery saving ------------------------------------
@@ -818,6 +817,10 @@
         if (pageHidden) {
           SAVE_EVERY_MS = 30000;            // write at most ~every 30 s in the background
           saveHistory(true); saveTrendAll(true); // flush current state before going quiet
+          // Drop any coalesced paints scheduled before we went hidden so their
+          // flags can't get stuck and block the fresh schedule on resume.
+          if (_statusRaf) { cancelAnimationFrame(_statusRaf); _statusRaf = 0; }
+          if (_liveRaf) { cancelAnimationFrame(_liveRaf); _liveRaf = 0; }
         } else {
           SAVE_EVERY_MS = 3000;
           redrawFromHistory();              // rebuild the detail chart from accumulated points
@@ -888,10 +891,27 @@
       return `基準 ${fmt(base)}${unit} <span class="delta ${cls}">${arrow} ${sign}${fmt(d)}</span>`;
     }
 
+    // On resume the native engine's per-second status events that were buffered
+    // while backgrounded arrive as a burst; rendering each in turn made the cards
+    // walk through the whole backlog before reaching "now". Coalesce: keep only
+    // the latest and paint once per animation frame, so the current value shows
+    // immediately and the stale intermediates are dropped.
+    let _statusRaf = 0;
+    let _latestStatus = null;
     function applyStatus(s) {
       // Hidden (screen off / backgrounded): stash the latest status and skip the
       // DOM work; it is applied in full when the page becomes visible again.
       if (pageHidden) { pendingStatus = s; return; }
+      _latestStatus = s;
+      if (_statusRaf) return; // a paint is already scheduled — latest wins
+      _statusRaf = requestAnimationFrame(() => {
+        _statusRaf = 0;
+        const st = _latestStatus; _latestStatus = null;
+        if (st && !pageHidden) renderStatus(st);
+      });
+    }
+
+    function renderStatus(s) {
       // The server is authoritative for the active user: when it reports a
       // different one, swap to that user's stored history and redraw.
       if (s.user != null && s.user !== currentUser) switchLocalUser(s.user);
@@ -1005,32 +1025,29 @@
       }
     }
 
+    // Coalesce chart/trend repaints across a frame: a burst of buffered point
+    // events on resume folds into ONE redraw instead of repainting per point
+    // (which made the chart fill in visibly and lag the latest value).
+    let _liveRaf = 0;
+    function scheduleLiveRedraw() {
+      if (_liveRaf) return;
+      _liveRaf = requestAnimationFrame(() => {
+        _liveRaf = 0;
+        if (pageHidden) return;
+        redrawFromHistory();
+        redrawTrend();
+      });
+    }
+
     function pushPoint(p) {
       history.push({ t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone,
         lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null, step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
       if (history.length > MAX_POINTS) history.shift();
-
-      // Drawing is skipped while hidden — the chart is rebuilt from `history`
-      // (redrawFromHistory) on return, so the live arrays don't need updating.
-      if (!pageHidden) {
-        chart.data.labels.push(new Date(p.t).toLocaleTimeString('ja-JP'));
-        chart.data.datasets[0].data.push(p.rmssd);
-        chart.data.datasets[1].data.push(p.hr);
-        chart.data.datasets[2].data.push(p.resp);
-        chart.data.datasets[3].data.push(p.lean ?? null);
-        if (chart.data.labels.length > MAX_POINTS) {
-          chart.data.labels.shift();
-          chart.data.datasets.forEach((d) => d.data.shift());
-        }
-        chart.$tones = history.map((q) => toneOf(q, curBaseline));
-        chart.$bodies = history.map((q) => q.body || null);
-        chart.$activitySpans = activitySpans();
-        chart.update('none');
-        updateHistInfo();
-      }
+      trend5.feed(p); trend15.feed(p); // fold into the trend buckets (data only)
       saveHistory(false);
-
-      feedTrend(p);
+      // Drawing is skipped while hidden — the chart is rebuilt from `history` on
+      // return; while visible we coalesce repaints to one per frame.
+      if (!pageHidden) scheduleLiveRedraw();
     }
 
     // ---- user switching (client side: swap stored history, redraw) ----
