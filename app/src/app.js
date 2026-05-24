@@ -114,7 +114,15 @@ async function startNativeEngine() {
     if (p && p.t) { const e = Date.parse(p.t); if (e) lastNativeT = String(e); }
     for (const cb of pointListeners) cb(p); hostBroadcast('point', p);
   });
-  nativeSubs = [sStatus, sPoint];
+  const sBackfill = HrvNative.addListener('hrvBackfill', (b) => {
+    // A gap recovered from H10 memory was written to the DB with PAST timestamps.
+    // The forward-only watermark catch-up would miss them, so re-fetch + recompute
+    // exactly the trend buckets the gap touches.
+    const from = b && b.fromMs != null ? Number(b.fromMs) : null;
+    const to = b && b.toMs != null ? Number(b.toMs) : null;
+    if (from != null && to != null) nativeBackfillMerge(from, to);
+  });
+  nativeSubs = [sStatus, sPoint, sBackfill];
   try { await HrvNative.start({ acc: true, user: currentUser, seed: buildNativeSeed(currentUser) }); }
   catch (e) { console.error('[native] start failed', e); }
 }
@@ -140,6 +148,12 @@ async function switchUserNative(n) {
 // a long backlog doesn't render the chart in visible chunks or delay "now".
 async function nativeCatchUp() {
   if (!useNative) return;
+  // After a page reload lastNativeT is "0"; seed it from the newest point the
+  // dashboard already holds so we don't re-fetch (and double-count into the trend
+  // buckets) the entire DB. Live points then advance it forward as usual.
+  if (lastNativeT === '0') {
+    try { const lt = window.__latestPointT && window.__latestPointT(); if (lt) lastNativeT = String(lt); } catch (_) {}
+  }
   // 1) Apply the latest snapshot immediately so the cards jump to current.
   try {
     const st = await HrvNative.getStatus();
@@ -158,6 +172,31 @@ async function nativeCatchUp() {
     if (!r || !r.hasMore) break;
   }
   if (all.length && window.__pushPointsBulk) window.__pushPointsBulk(all);
+}
+
+// A backfilled gap has PAST timestamps, so it can't ride the forward-only watermark
+// catch-up. Re-fetch every DB point in the (widest) trend buckets the gap touches —
+// gap points plus any live boundary points — and merge: history is rebuilt
+// sorted+deduped and only the touched buckets are recomputed from source, which is
+// correct even though they arrive after newer live data.
+async function nativeBackfillMerge(fromMs, toMs) {
+  if (!useNative) return;
+  const WIDE = 15 * 60 * 1000; // widest trend bucket — covers both 5- and 15-min stores
+  const lo = Math.floor(fromMs / WIDE) * WIDE;
+  const hi = Math.floor(toMs / WIDE) * WIDE + WIDE;
+  const pts = [];
+  let since = String(lo - 1);
+  for (let guard = 0; guard < 50; guard++) {
+    let r;
+    try { r = await HrvNative.getPointsSince({ since, limit: 5000 }); } catch (_) { break; }
+    let arr = [];
+    try { arr = JSON.parse(r.points || '[]'); } catch (_) {}
+    let stop = false;
+    for (const p of arr) { const e = Date.parse(p.t); if (e >= hi) { stop = true; break; } pts.push(p); }
+    if (r && r.lastT) since = r.lastT;
+    if (stop || !r || !r.hasMore) break;
+  }
+  if (pts.length && window.__mergeBackfill) window.__mergeBackfill(pts);
 }
 
 if (isAndroid && typeof document !== 'undefined') {

@@ -11,12 +11,14 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.TimeZone;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import dev.otake.rmssdh10n.hrv.Analysis;
+import dev.otake.rmssdh10n.hrv.Backfill;
 import dev.otake.rmssdh10n.hrv.BodyState;
 import dev.otake.rmssdh10n.hrv.Posture;
 import dev.otake.rmssdh10n.hrv.Respiration;
@@ -41,10 +43,16 @@ public final class HrvEngine {
     // over RESP_HOLD_MS of staleness; only then drop to null. (Schäfer & Kratky
     // 2008: RSA-derived rate is stable over >1 min windows.)
     private static final long RESP_HOLD_MS = 120000;
+    // Only persist a chart point when a live RR arrived this recently. While
+    // disconnected the RMSSD window keeps stale values (it evicts by beat-time, not
+    // wall-time), so writing then would fill the gap with a flat fake line AND block
+    // the offline backfill (its "skip seconds already present" would skip the gap).
+    private static final long POINT_FRESH_MS = 5000;
 
     public interface Emitter {
         void status(String json);
         void point(String json);
+        void backfill(String json);
     }
 
     private static final SimpleDateFormat ISO;
@@ -70,6 +78,8 @@ public final class HrvEngine {
     private final boolean withAcc;
     private volatile boolean connected = false;
     private volatile Integer deviceHr = null;
+    private volatile long lastRrAt = 0;          // wall-clock of the last RR received (point-freshness gate)
+    private volatile int lastBackfillRestored = 0; // points restored by the most recent gap backfill
     private double lastPeakMs = 0;
     private long beats = 0;
     private int lastStepCount = 0;
@@ -90,7 +100,7 @@ public final class HrvEngine {
     private long lastStepsSavedAt = 0;
     private Long lastPostureSavedAt = null;
 
-    private BleNative ble;
+    private PolarBle ble;
     private ScheduledExecutorService ticker;
     private volatile Emitter emitter;
 
@@ -198,9 +208,10 @@ public final class HrvEngine {
 
     public void start(String mac) {
         battWindowStart = System.currentTimeMillis();
-        ble = new BleNative(ctx, mac, withAcc, new BleNative.Sink() {
+        ble = new PolarBle(ctx, mac, withAcc, new PolarBle.Sink() {
             @Override public void onHr(int hr) { deviceHr = hr; }
             @Override public void onRr(double rrMs) {
+                lastRrAt = System.currentTimeMillis();
                 synchronized (gate) {
                     lastPeakMs += rrMs;
                     beats++;
@@ -221,6 +232,7 @@ public final class HrvEngine {
             @Override public void onConnected(boolean c) { connected = c; if (!c) deviceHr = null; }
             @Override public void log(String m) { Log.i(TAG, "[ble] " + m); }
         });
+        ble.setRecordingHandler(this::onGapRecording);
         ble.start();
         ticker = Executors.newSingleThreadScheduledExecutor();
         ticker.scheduleAtFixedRate(this::tickSafe, 1000, 1000, TimeUnit.MILLISECONDS);
@@ -233,6 +245,53 @@ public final class HrvEngine {
         saveStepsDay();
         db.flush();
         Log.i(TAG, "engine stopped");
+    }
+
+    /** App returned to foreground — let the BLE driver restart its scan if needed. */
+    public void foregroundEntered() {
+        PolarBle b = ble;
+        if (b != null) b.foregroundEntered();
+    }
+
+    /** Replay RR fetched from the H10's gap recording into 1 Hz points at their
+     *  start-anchored timestamps and persist them durably, skipping seconds already
+     *  present (live points). Returns true once written so {@link PolarBle} may remove
+     *  the device-side exercise. Runs on PolarBle's worker thread. */
+    public boolean onGapRecording(double[] rrMs, long anchorStartMs) {
+        try {
+            double baseR = 0, baseH = 0;
+            synchronized (gate) {
+                Analysis.Base b = baseline.get();
+                if (b != null) { baseR = b.rmssd; baseH = b.hr; }
+            }
+            List<Backfill.Pt> pts = Backfill.replay(rrMs, anchorStartMs, baseR, baseH);
+            if (pts.isEmpty()) { lastBackfillRestored = 0; return true; }
+            long from = pts.get(0).tMs, to = pts.get(pts.size() - 1).tMs;
+            Set<Long> existing = db.pointTimesIn(from, to);
+            int inserted = 0;
+            for (Backfill.Pt pt : pts) {
+                if (existing.contains(pt.tMs)) continue;
+                String json = buildPointJson(localIso(pt.tMs), pt.rmssd,
+                        pt.hr != null ? (double) pt.hr : null, pt.resp, pt.tone,
+                        null, null, null, null, 0, null, null);
+                db.addPoint(pt.tMs, json);
+                inserted++;
+            }
+            db.flush(); // durable BEFORE PolarBle removes the device-side exercise
+            lastBackfillRestored = inserted;
+            Log.i(TAG, "[backfill] restored " + inserted + " pts over " + ((to - from) / 1000) + "s");
+            Emitter e = emitter;
+            if (e != null) {
+                try {
+                    e.backfill(new JSONObject().put("restored", inserted)
+                            .put("fromMs", from).put("toMs", to).toString());
+                } catch (Exception ignored) {}
+            }
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "backfill failed", t);
+            return false;
+        }
     }
 
     private void tickSafe() { try { tick(); } catch (Throwable t) { Log.e(TAG, "tick error", t); } }
@@ -353,6 +412,8 @@ public final class HrvEngine {
             status.put("steps", new JSONObject().put("today", stepTotal).put("cadence", steps.cadence()).put("walking", steps.walking()));
             status.put("body", body.state);
             status.put("engine", "native");
+            status.put("recording", ble != null && ble.isRecording());
+            status.put("restored", lastBackfillRestored);
             status.put("updatedAt", wall);
 
             String statusStr = status.toString();
@@ -360,22 +421,17 @@ public final class HrvEngine {
             Emitter e = emitter;
             if (e != null) e.status(statusStr);
 
-            if (hrVal != null || rmssd != null) {
-                JSONObject point = new JSONObject();
-                point.put("t", wall);
-                point.put("rmssd", jn(rmssd));
-                point.put("hr", jn(hrVal));
-                point.put("resp", jn(respOut));
-                point.put("tone", state != null && state.tone != null ? state.tone : JSONObject.NULL);
-                point.put("lean", (p.calibrated && p.receiving && p.leanDeg != null) ? p.leanDeg : JSONObject.NULL);
-                point.put("posture", p.state);
-                point.put("leanDir", p.leanDir != null ? p.leanDir : JSONObject.NULL);
-                point.put("activity", p.activity != null ? p.activity : JSONObject.NULL);
-                point.put("step", stepDelta);
-                point.put("body", body.state);
-                point.put("sleepPos", p.sleepPos != null ? p.sleepPos : JSONObject.NULL);
-                String pointStr = point.toString();
-                db.addPoint(now, pointStr);
+            // Persist a chart point only with a FRESH live reading (connected + an RR
+            // arrived within POINT_FRESH_MS). t is floored to the whole second so a
+            // backfilled point for the same second shares the primary key (dedup).
+            boolean fresh = connected && lastRrAt > 0 && (now - lastRrAt) < POINT_FRESH_MS;
+            if (fresh && (hrVal != null || rmssd != null)) {
+                long tSec = (now / 1000L) * 1000L;
+                Integer leanOut = (p.calibrated && p.receiving && p.leanDeg != null) ? p.leanDeg : null;
+                String pointStr = buildPointJson(localIso(tSec), rmssd, hrVal, respOut,
+                        state != null ? state.tone : null,
+                        leanOut, p.state, p.leanDir, p.activity, stepDelta, body.state, p.sleepPos);
+                db.addPoint(tSec, pointStr);
                 if (e != null) e.point(pointStr);
             }
         } catch (Exception ex) { Log.e(TAG, "json", ex); }
@@ -394,6 +450,27 @@ public final class HrvEngine {
     }
 
     // --- helpers -----------------------------------------------------------
+    /** Build the point JSON shared by the live tick and the offline backfill, so the
+     *  key set never drifts between the two. Backfilled points pass null posture/steps. */
+    static String buildPointJson(String wall, Double rmssd, Double hr, Double resp, String tone,
+            Integer lean, String posture, String leanDir, Integer activity, int step,
+            String body, String sleepPos) throws Exception {
+        JSONObject point = new JSONObject();
+        point.put("t", wall);
+        point.put("rmssd", jn(rmssd));
+        point.put("hr", jn(hr));
+        point.put("resp", jn(resp));
+        point.put("tone", tone != null ? tone : JSONObject.NULL);
+        point.put("lean", lean != null ? lean : JSONObject.NULL);
+        point.put("posture", posture != null ? posture : JSONObject.NULL);
+        point.put("leanDir", leanDir != null ? leanDir : JSONObject.NULL);
+        point.put("activity", activity != null ? activity : JSONObject.NULL);
+        point.put("step", step);
+        point.put("body", body != null ? body : JSONObject.NULL);
+        point.put("sleepPos", sleepPos != null ? sleepPos : JSONObject.NULL);
+        return point.toString();
+    }
+
     private static JSONObject stateJson(Analysis.State s) throws Exception {
         if (s == null) return null;
         JSONObject o = new JSONObject();

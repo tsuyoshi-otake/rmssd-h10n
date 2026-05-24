@@ -36,6 +36,7 @@ public class HrvNativePlugin extends Plugin {
         MonitorService.registerEmitter(new HrvEngine.Emitter() {
             @Override public void status(String json) { emit("hrvStatus", json); }
             @Override public void point(String json) { emit("hrvPoint", json); }
+            @Override public void backfill(String json) { emit("hrvBackfill", json); }
         });
     }
 

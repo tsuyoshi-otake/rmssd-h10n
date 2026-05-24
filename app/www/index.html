@@ -771,8 +771,27 @@
         recomputeMissingTones();
         save(true);
       }
+      // Recompute exactly the buckets a set of points touches, from those points
+      // (the caller fetched them complete from the source DB for the affected bucket
+      // range). For offline backfill, whose points predate the open live bucket and
+      // so cannot go through the forward-only feed(). Idempotent.
+      function replaceBuckets(pts) {
+        const groups = new Map();
+        for (const p of pts) {
+          const bs = bucketStartOf(new Date(p.t).getTime(), bucketMs);
+          if (!groups.has(bs)) groups.set(bs, newBucket(bs));
+          accBucket(groups.get(bs), p);
+        }
+        const byT = new Map(data.map((b) => [b.t, b]));
+        for (const [bs, raw] of groups) {
+          if (live && bs === live.start) continue; // open live bucket stays owned by feed()
+          if (raw.hrN || raw.rmssdN) byT.set(bs, finalizeBucket(raw));
+        }
+        data = [...byT.values()].sort((a, b) => a.t - b.t).slice(-max);
+        save(true);
+      }
       return {
-        feed, redraw, rebuild, save, refreshTones,
+        feed, redraw, rebuild, save, refreshTones, replaceBuckets,
         setUser(u, persist = true) { if (persist) save(true); key = keyFor(u); data = load(); live = null; },
         clear() { data = []; live = null; try { localStorage.removeItem(key); } catch (_) {} },
         get data() { return data; },
@@ -930,7 +949,7 @@
       if (s.user != null && s.user !== currentUser) switchLocalUser(s.user);
 
       const conn = document.getElementById('conn');
-      conn.textContent = s.connected ? '接続' : '未接続';
+      conn.textContent = s.connected ? (s.recording ? '接続 · 記録' : '接続') : '未接続';
       conn.className = s.connected ? 'on' : '';
       const brand = document.getElementById('brand');
       if (brand) brand.classList.toggle('on', !!s.connected);
@@ -1182,6 +1201,10 @@
       serverUrl.style.display = 'none';
     }
 
+    // Newest point timestamp the dashboard already holds — lets the native catch-up
+    // seed its watermark after a reload so it doesn't re-fetch the whole DB.
+    window.__latestPointT = () => history.reduce((m, p) => { const e = Date.parse(p.t); return e > m ? e : m; }, 0);
+
     // Bulk-replay points the native engine recorded while the page was hidden:
     // append to history + trend without per-point redraw, then one repaint.
     window.__pushPointsBulk = function (pts) {
@@ -1195,6 +1218,31 @@
       while (history.length > MAX_POINTS) history.shift();
       saveHistory(true); saveTrendAll(true);
       redrawFromHistory(); redrawTrend();
+    };
+
+    // Merge backfill points (a gap recovered from H10 onboard memory) that carry
+    // PAST timestamps. history is rebuilt sorted + deduped by t (the detail line
+    // stays monotonic); the touched trend buckets are recomputed from these points.
+    // Idempotent, so it is safe to run alongside the resume catch-up.
+    window.__mergeBackfill = function (pts) {
+      if (!pts || !pts.length) return;
+      const byT = new Map(history.map((h) => [Date.parse(h.t), h]));
+      for (const p of pts) {
+        byT.set(Date.parse(p.t), { t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone,
+          lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null,
+          step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
+      }
+      history = [...byT.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).slice(-MAX_POINTS);
+      saveHistory(true);
+      trend5.replaceBuckets(pts); trend15.replaceBuckets(pts);
+      saveTrendAll(true);
+      if (!pageHidden) { redrawFromHistory(); redrawTrend(); }
+      // Brief, unobtrusive confirmation in the calibration message slot.
+      try {
+        const mins = Math.max(1, Math.round((Date.parse(pts[pts.length - 1].t) - Date.parse(pts[0].t)) / 60000));
+        const calib = document.getElementById('calib');
+        if (calib) { calib.textContent = `離席分を復元しました（約 ${mins} 分）`; baselineMsgUntil = Date.now() + 6000; }
+      } catch (_) {}
     };
 
     document.getElementById('clearBtn').addEventListener('click', () => {

@@ -21,12 +21,17 @@ public class MainActivity extends BridgeActivity {
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1001);
         }
-        // Android 12+ requires BLUETOOTH_CONNECT at runtime; the native engine
-        // connects the H10 by address from inside the service, so this must be
+        // Android 12+ requires BLUETOOTH_CONNECT (and BLUETOOTH_SCAN — the Polar SDK
+        // may scan to (re)establish the link, esp. on foreground re-entry) at runtime;
+        // the native engine connects the H10 from inside the service, so both must be
         // granted before switching to the native engine.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
-                && checkSelfPermission("android.permission.BLUETOOTH_CONNECT") != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{"android.permission.BLUETOOTH_CONNECT"}, 1002);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            java.util.List<String> need = new java.util.ArrayList<>();
+            if (checkSelfPermission("android.permission.BLUETOOTH_CONNECT") != PackageManager.PERMISSION_GRANTED)
+                need.add("android.permission.BLUETOOTH_CONNECT");
+            if (checkSelfPermission("android.permission.BLUETOOTH_SCAN") != PackageManager.PERMISSION_GRANTED)
+                need.add("android.permission.BLUETOOTH_SCAN");
+            if (!need.isEmpty()) requestPermissions(need.toArray(new String[0]), 1002);
         }
     }
 
@@ -57,6 +62,10 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         kickRepaint();
+        // Nudge the BLE driver to restart its scan (BLE scan can't start with the
+        // screen off), so a connection lost in the background re-establishes on wake.
+        MonitorService s = MonitorService.INSTANCE;
+        if (s != null) s.nativeForegroundEntered();
     }
 
     @Override

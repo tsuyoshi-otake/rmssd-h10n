@@ -154,6 +154,7 @@ public class MonitorService extends Service {
     public boolean nativeResetBaseline() { if (engine == null) return false; engine.resetBaseline(); return true; }
     public boolean nativeSetBaseline(double r, double h) { return engine != null && engine.setBaseline(r, h); }
     public String nativeRrLog() { return engine != null ? engine.rrLogJson() : "[]"; }
+    public void nativeForegroundEntered() { if (engine != null) engine.foregroundEntered(); }
 
     private void stopEngine() {
         if (engine != null) { engine.stop(); engine = null; }

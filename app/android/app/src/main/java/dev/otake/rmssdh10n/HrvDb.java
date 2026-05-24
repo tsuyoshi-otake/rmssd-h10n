@@ -123,6 +123,19 @@ public final class HrvDb extends SQLiteOpenHelper {
         }
     }
 
+    /** Whole-second t_ms values present in [fromMs, toMs] inclusive — used by the
+     *  offline backfill to skip seconds already covered by live points. */
+    public synchronized java.util.Set<Long> pointTimesIn(long fromMs, long toMs) {
+        flush(); // make any pending writes visible to this read
+        java.util.Set<Long> s = new java.util.HashSet<>();
+        try (Cursor c = getReadableDatabase().rawQuery(
+                "SELECT t_ms FROM points WHERE t_ms>=? AND t_ms<=?",
+                new String[]{ String.valueOf(fromMs), String.valueOf(toMs) })) {
+            while (c.moveToNext()) s.add(c.getLong(0));
+        }
+        return s;
+    }
+
     /** Drop points older than the cutoff (keeps the DB bounded ~14 days). */
     public void prune(long cutoffMs) {
         getWritableDatabase().delete("points", "t_ms<?", new String[]{ String.valueOf(cutoffMs) });
