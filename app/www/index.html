@@ -311,7 +311,7 @@
 
     <div class="actbar" id="actbar">
       <button class="start" id="actStartBtn">アクティビティ管理</button>
-      <span class="act-none" id="actNone">進行中なし</span>
+      <span class="act-none" id="actNone">タップで記録</span>
     </div>
 
     <div class="section">
@@ -346,7 +346,7 @@
     <div class="modal">
       <button class="close" id="actClose">閉じる</button>
       <h2>アクティビティ管理</h2>
-      <div class="sub">種類を選んで開始。進行中の終了、記録の編集・削除もここから。グラフ上部に期間バーで表示されます。</div>
+      <div class="sub">種類をタップするとその時刻に記録します（終了操作は不要）。記録の時刻編集・削除もここから。グラフ上部に縦ピンで表示されます。</div>
       <div id="actOngoing"></div>
       <div id="actChoices"></div>
       <div id="actRecent"></div>
@@ -479,28 +479,30 @@
       },
     };
 
-    // Activity bands: thin colored bars (with a start marker line + label) along
-    // the top of the detail chart, showing when logged activities ran. Lanes are
-    // pre-assigned in activitySpans() so overlapping activities stack vertically.
+    // Activity markers: a thin vertical pin (dot at top) at the moment each event
+    // was logged, with its label. Lanes (from activitySpans) stagger labels of
+    // events that are close in time so they don't overprint.
     const activityBandPlugin = {
       id: 'activityBand',
       afterDatasetsDraw(chart) {
-        const spans = chart.$activitySpans;
-        if (!spans || !spans.length) return;
+        const marks = chart.$activitySpans;
+        if (!marks || !marks.length) return;
         const { ctx, chartArea: area, scales: { x } } = chart;
         ctx.save();
-        const barH = 5, gap = 12; // gap leaves room for the label under each bar
-        for (const sp of spans) {
-          const xl = x.getPixelForValue(sp.s);
-          const xr = Math.max(xl + 3, x.getPixelForValue(sp.e));
-          const y = area.top + 2 + sp.lane * (barH + gap);
-          ctx.globalAlpha = 0.32; ctx.strokeStyle = sp.color; ctx.lineWidth = 1;
-          ctx.beginPath(); ctx.moveTo(xl + 0.5, area.top); ctx.lineTo(xl + 0.5, area.bottom); ctx.stroke();
-          ctx.globalAlpha = sp.ongoing ? 0.95 : 0.8; ctx.fillStyle = sp.color;
-          ctx.fillRect(xl, y, xr - xl, barH);
+        ctx.font = '10px system-ui, sans-serif'; ctx.textBaseline = 'top';
+        const laneH = 13;
+        for (const mk of marks) {
+          const px = x.getPixelForValue(mk.i);
+          // vertical guide line down the plot
+          ctx.globalAlpha = 0.28; ctx.strokeStyle = mk.color; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(px + 0.5, area.top); ctx.lineTo(px + 0.5, area.bottom); ctx.stroke();
+          // pin head
+          const y = area.top + 2 + mk.lane * laneH;
+          ctx.globalAlpha = 0.95; ctx.fillStyle = mk.color;
+          ctx.beginPath(); ctx.arc(px + 0.5, y + 4, 3, 0, Math.PI * 2); ctx.fill();
+          // label to the right of the pin
           ctx.globalAlpha = 0.92; ctx.fillStyle = '#e6edf3';
-          ctx.font = '10px system-ui, sans-serif'; ctx.textBaseline = 'top';
-          ctx.fillText(sp.label + (sp.ongoing ? ' …' : ''), xl + 3, y + barH + 1);
+          ctx.fillText(mk.label, px + 5, y);
         }
         ctx.restore();
       },
@@ -1294,107 +1296,86 @@
       try { localStorage.setItem(ACT_KEY, JSON.stringify(activities.slice(-500))); } catch (_) {}
     }
     const nowIso = () => { try { return RmssdBridge.now(); } catch (_) { return new Date().toISOString(); } };
-    const ongoingActs = () => activities.filter((a) => !a.end);
-    function fmtElapsed(ms) {
-      const s = Math.max(0, Math.floor(ms / 1000));
-      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
-      const p = (n) => String(n).padStart(2, '0');
-      return h ? `${h}:${p(m)}:${p(ss)}` : `${m}:${p(ss)}`;
-    }
     const fmtClock = (iso) => new Date(iso).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
 
-    // Map each activity's start/end onto detail-history indices (the chart x-axis
-    // is categorical), clamped to the visible window, assigning vertical lanes so
-    // overlapping activities don't draw on top of each other.
+    // Map each event onto a detail-history index (the chart x-axis is
+    // categorical) within the visible window, stacking labels into lanes so
+    // events close in time don't overprint.
     function activitySpans() {
       if (!history.length || !activities.length) return [];
       const t0 = new Date(history[0].t).getTime();
       const t1 = new Date(history[history.length - 1].t).getTime();
-      const nowMs = Date.now();
       const idxOf = (ms) => { // first index with history[i].t >= ms (binary search)
         let lo = 0, hi = history.length;
         while (lo < hi) { const mid = (lo + hi) >> 1; if (new Date(history[mid].t).getTime() >= ms) hi = mid; else lo = mid + 1; }
         return lo;
       };
-      const spans = [];
+      const marks = [];
       for (const a of activities) {
-        const sMs = new Date(a.start).getTime();
-        const eMs = a.end ? new Date(a.end).getTime() : nowMs;
-        if (eMs < t0 || sMs > t1) continue; // entirely outside the visible detail window
-        let s = idxOf(Math.max(sMs, t0)); if (s >= history.length) s = history.length - 1;
-        let e = a.end ? idxOf(Math.min(eMs, t1)) : history.length - 1;
-        if (e >= history.length) e = history.length - 1;
-        if (e < s) e = s;
-        spans.push({ s, e, label: a.label, color: a.color, ongoing: !a.end });
+        const ms = new Date(actTime(a)).getTime();
+        if (ms < t0 || ms > t1) continue; // outside the visible detail window
+        let i = idxOf(ms); if (i >= history.length) i = history.length - 1;
+        marks.push({ i, label: a.label, color: a.color });
       }
-      spans.sort((p, q) => p.s - q.s);
-      const laneEnd = [];
-      for (const sp of spans) {
+      marks.sort((p, q) => p.i - q.i);
+      // Stagger labels of near-neighbours into vertical lanes (by index distance).
+      const laneLastIdx = [];
+      for (const mk of marks) {
         let lane = 0;
-        while (lane < laneEnd.length && laneEnd[lane] >= sp.s) lane++;
-        laneEnd[lane] = sp.e; sp.lane = lane;
+        while (lane < laneLastIdx.length && mk.i - laneLastIdx[lane] < 12) lane++;
+        laneLastIdx[lane] = mk.i; mk.lane = lane;
       }
-      return spans;
+      return marks;
     }
     function refreshActivityBands() { chart.$activitySpans = activitySpans(); chart.update('none'); }
 
+    // One-tap point event: just the moment it happened (no start/end pair).
     function startActivity(typeId) {
       const t = TYPE_BY_ID[typeId]; if (!t) return;
       activities.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-        type: t.id, label: t.label, color: t.color, cat: t.cat, start: nowIso(), end: null });
+        type: t.id, label: t.label, color: t.color, cat: t.cat, start: nowIso(), kind: 'point' });
       saveActivities(); renderActbar(); refreshActivityBands();
-    }
-    function endActivity(id) {
-      const a = activities.find((x) => x.id === id && !x.end); if (!a) return;
-      a.end = nowIso(); saveActivities(); renderActbar(); renderModal(); refreshActivityBands();
     }
     function deleteActivity(id) {
       activities = activities.filter((x) => x.id !== id);
       saveActivities(); renderActbar(); renderModal(); refreshActivityBands();
     }
+    // The time of an event (new records use `start`; legacy interval records too).
+    const actTime = (a) => a.start;
 
     function renderActbar() {
       const bar = document.getElementById('actbar');
       bar.querySelectorAll('.act-chip').forEach((e) => e.remove());
-      const ong = ongoingActs();
-      document.getElementById('actNone').style.display = ong.length ? 'none' : '';
-      for (const a of ong) {
+      // Show the most recent event as a read-only confirmation chip.
+      const last = activities.length ? activities[activities.length - 1] : null;
+      const none = document.getElementById('actNone');
+      if (last) {
+        none.style.display = 'none';
         const chip = document.createElement('span');
-        chip.className = 'act-chip'; chip.style.borderLeftColor = a.color;
-        const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = a.label;
-        const el = document.createElement('span'); el.className = 'el'; el.dataset.start = a.start;
-        const btn = document.createElement('button'); btn.textContent = '終了';
-        btn.addEventListener('click', () => endActivity(a.id));
-        chip.append(nm, el, btn); bar.appendChild(chip);
-      }
-      tickElapsed();
-    }
-    function tickElapsed() {
-      const now = Date.now();
-      for (const el of document.querySelectorAll('.el[data-start]')) {
-        el.textContent = fmtElapsed(now - new Date(el.dataset.start).getTime());
+        chip.className = 'act-chip'; chip.style.borderLeftColor = last.color;
+        const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = last.label;
+        const tm = document.createElement('span'); tm.className = 'el'; tm.textContent = fmtClock(actTime(last));
+        chip.append(nm, tm); bar.appendChild(chip);
+      } else {
+        none.style.display = ''; none.textContent = 'タップで記録';
       }
     }
-    setInterval(() => { tickElapsed(); if (ongoingActs().length) refreshActivityBands(); }, 1000);
 
     let editingId = null;
     const mkBtn = (label, fn) => { const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', fn); return b; };
 
-    // One record row: read-only (with 編集 / 終了 or 削除), or — when it is the row
-    // being edited — an inline form: type select + start/end datetime-local pickers
-    // (empty end = still ongoing) + 保存 / 取消 / 削除.
+    // One record row: read-only (時刻 + 編集 / 削除), or — when edited — an inline
+    // form: type select + a single datetime-local (the event time) + 保存/取消/削除.
     function actRow(a) {
       const row = document.createElement('div'); row.className = 'recent-row';
       if (a.id !== editingId) {
         const dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = a.color;
         const nm = document.createElement('span'); nm.textContent = a.label;
-        const meta = document.createElement('span'); meta.className = 'meta';
-        if (a.end) meta.textContent = `${fmtClock(a.start)}–${fmtClock(a.end)}`;
-        else { meta.classList.add('el'); meta.dataset.start = a.start; } // live elapsed via tickElapsed
+        const meta = document.createElement('span'); meta.className = 'meta'; meta.textContent = fmtClock(actTime(a));
         const sp = document.createElement('span'); sp.className = 'sp';
         const edit = mkBtn('編集', () => { editingId = a.id; renderModal(); });
-        const last = a.end ? mkBtn('削除', () => deleteActivity(a.id)) : mkBtn('終了', () => endActivity(a.id));
-        row.append(dot, nm, meta, sp, edit, last);
+        const del = mkBtn('削除', () => deleteActivity(a.id));
+        row.append(dot, nm, meta, sp, edit, del);
       } else {
         row.classList.add('editing');
         const sel = document.createElement('select');
@@ -1408,35 +1389,26 @@
         sel.value = a.type;
         const fld = (text, input) => { const w = document.createElement('span'); w.className = 'fld';
           const l = document.createElement('label'); l.textContent = text; w.append(l, input); return w; };
-        const si = document.createElement('input'); si.type = 'datetime-local'; si.step = 60; si.value = a.start.slice(0, 16);
-        const ei = document.createElement('input'); ei.type = 'datetime-local'; ei.step = 60; ei.value = a.end ? a.end.slice(0, 16) : '';
-        const save = mkBtn('保存', () => applyEdit(a.id, sel.value, si.value, ei.value)); save.className = 'start';
+        const si = document.createElement('input'); si.type = 'datetime-local'; si.step = 60; si.value = actTime(a).slice(0, 16);
+        const save = mkBtn('保存', () => applyEdit(a.id, sel.value, si.value)); save.className = 'start';
         const cancel = mkBtn('取消', () => { editingId = null; renderModal(); });
         const del = mkBtn('削除', () => deleteActivity(a.id));
-        row.append(sel, fld('開始', si), fld('終了 (空=進行中)', ei), save, cancel, del);
+        row.append(sel, fld('時刻', si), save, cancel, del);
       }
       return row;
     }
 
-    function applyEdit(id, typeId, startVal, endVal) {
+    function applyEdit(id, typeId, startVal) {
       const a = activities.find((x) => x.id === id); if (!a) return;
       const t = TYPE_BY_ID[typeId];
       if (t) { a.type = t.id; a.label = t.label; a.color = t.color; a.cat = t.cat; }
       if (startVal) a.start = RmssdBridge.iso(new Date(startVal).getTime());
-      a.end = endVal ? RmssdBridge.iso(new Date(endVal).getTime()) : null;
-      if (a.end && new Date(a.end).getTime() < new Date(a.start).getTime()) a.end = a.start; // guard inverted range
       editingId = null;
       saveActivities(); renderActbar(); renderModal(); refreshActivityBands();
     }
 
     function renderModal() {
-      const ong = ongoingActs();
-      const oc = document.getElementById('actOngoing');
-      oc.innerHTML = '';
-      if (ong.length) {
-        const h = document.createElement('div'); h.className = 'cat'; h.textContent = '進行中'; oc.appendChild(h);
-        for (const a of ong) oc.appendChild(actRow(a));
-      }
+      document.getElementById('actOngoing').innerHTML = '';
       const ch = document.getElementById('actChoices');
       ch.innerHTML = '';
       for (const cat of ACTIVITY_CATS) {
@@ -1449,14 +1421,13 @@
         }
         ch.appendChild(g);
       }
-      const recent = activities.filter((a) => a.end).slice(-8).reverse();
+      const recent = activities.slice(-8).reverse();
       const rc = document.getElementById('actRecent');
       rc.innerHTML = '';
       if (recent.length) {
         const h = document.createElement('div'); h.className = 'cat'; h.textContent = '最近の記録'; rc.appendChild(h);
         for (const a of recent) rc.appendChild(actRow(a));
       }
-      tickElapsed();
     }
     function openModal() { renderModal(); document.getElementById('actModal').classList.add('open'); }
     function closeModal() { document.getElementById('actModal').classList.remove('open'); }
