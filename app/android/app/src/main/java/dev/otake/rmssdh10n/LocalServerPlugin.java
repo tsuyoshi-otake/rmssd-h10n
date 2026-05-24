@@ -73,6 +73,7 @@ public class LocalServerPlugin extends Plugin {
         ret.put("running", running);
         ret.put("port", port);
         ret.put("url", running ? urlFor(port) : "");
+        ret.put("clients", clients.size()); // connected WS viewers; lets JS skip work when 0
         call.resolve(ret);
     }
 

@@ -39,6 +39,10 @@ export class BleHr {
     try { saved = localStorage.getItem(DEVICE_KEY); } catch (_) {}
     this.savedDeviceId = saved || preferredId || null;
     this.stopping = false;
+    // ACC throughput telemetry (logged ~every 60 s; see [batt] in monitor.js).
+    this._accNotify = 0;
+    this._accSamp = 0;
+    this._accLogAt = Date.now();
   }
 
   async start() {
@@ -62,6 +66,7 @@ export class BleHr {
   }
 
   async _connectLoop() {
+    let failures = 0;
     while (!this.stopping) {
       try {
         let id = this.savedDeviceId;
@@ -80,9 +85,15 @@ export class BleHr {
         return; // connected; disconnect handler re-enters connectLoop on drop
       } catch (e) {
         if (this.stopping) return;
-        this.log(`connect failed (${e.message}); retrying in 5s...`);
-        this.savedDeviceId = null; // a dead saved id falls back to the picker
-        await delay(5000);
+        // KEEP the saved id and retry it directly. Dropping to the picker is
+        // useless while the screen is off / app backgrounded (no one to tap it),
+        // and spinning the picker just drains battery; the H10's address is
+        // stable, so a direct reconnect is the reliable path. Use forget() to
+        // deliberately return to the picker. Back off 5→10→20→30 s.
+        failures++;
+        const wait = Math.min(30000, 5000 * 2 ** (failures - 1));
+        this.log(`connect failed (${e.message}); retrying${this.savedDeviceId ? ' saved device' : ' via picker'} in ${wait / 1000}s...`);
+        await delay(wait);
       }
     }
   }
@@ -110,6 +121,15 @@ export class BleHr {
       BleClient.startNotifications(deviceId, PMD_SERVICE, PMD_DATA, (value) => {
         const f = parseAcc(value); // value is a DataView
         if (f && f.samples.length) for (const s of f.samples) this.onAcc(s);
+        // ACC throughput telemetry — driven by notify arrival (no extra timer).
+        this._accNotify++;
+        this._accSamp += (f && f.samples.length) || 0;
+        const t = Date.now();
+        if (t - this._accLogAt >= 60000) {
+          const secs = Math.max(1, Math.round((t - this._accLogAt) / 1000));
+          this.log(`[batt-acc] notify=${this._accNotify} samples=${this._accSamp} in ${secs}s (${Math.round(this._accSamp / secs)}/s)`);
+          this._accNotify = 0; this._accSamp = 0; this._accLogAt = t;
+        }
       }), 8000, 'PMD data subscribe');
     // The control point answers START over indications; enable them (some stacks
     // require the CCCD before they accept the write) and ignore the payload.

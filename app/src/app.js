@@ -26,8 +26,21 @@ const statusListeners = [];
 const pointListeners = [];
 
 // Relay a live frame to any connected remote browsers (Android host only).
+// Skip the per-second JSON.stringify + bridge call entirely when no PC is
+// actually viewing: poll the connected-client count from the native server at
+// most every 5 s and broadcast only while at least one viewer is attached.
+let wsClients = 0;
+let lastClientPoll = 0;
+function pollClients() {
+  const now = Date.now();
+  if (now - lastClientPoll < 5000) return;
+  lastClientPoll = now;
+  try { LocalServer.getInfo().then((i) => { wsClients = (i && i.clients) || 0; }).catch(() => {}); } catch (_) {}
+}
 function hostBroadcast(type, data) {
   if (!isAndroid) return;
+  pollClients();
+  if (wsClients <= 0) return; // no remote viewers — don't serialize every second
   try { LocalServer.broadcast({ data: JSON.stringify({ type, data }) }); } catch (_) {}
 }
 

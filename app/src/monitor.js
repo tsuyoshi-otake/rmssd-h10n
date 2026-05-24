@@ -35,6 +35,23 @@ export class Monitor {
     this.currentUser = user;
     this._lastStatus = null;
     this._timer = null;
+
+    // Respiration recompute throttle: the Welch PSD is the heaviest per-tick
+    // computation, and breathing changes slowly, so run it every few ticks and
+    // reuse the last estimate in between (battery). State that must survive a
+    // user switch lives here (not in _initUserState).
+    this._respEvery = 3;
+    this._respPreview = false;
+
+    // Battery/health telemetry: tick-timing + RR/ACC throughput, summarised to
+    // the console (`[batt]`) every ~60 s so logcat can reveal whether the 1 Hz
+    // loop is being throttled (e.g. screen-off WebView timer throttling) and how
+    // often ACC samples actually arrive. Survives user switches.
+    this._tickCount = 0;
+    this._lastTickAt = null;
+    this._accSamples = 0;
+    this._batt = { ticks: 0, deltas: [], rr0: 0, acc0: 0, windowStart: Date.now() };
+
     this._initUserState();
   }
 
@@ -109,7 +126,22 @@ export class Monitor {
   onHr(hr) { this.deviceHr = hr; }
 
   // Accelerometer sample {x,y,z} in mg from the H10 (via the BLE adapter).
-  onAcc(s) { this.posture.add(s); this.steps.add(s); }
+  onAcc(s) { this._accSamples++; this.posture.add(s); this.steps.add(s); }
+
+  // Emit a one-line battery/health summary and reset the window.
+  _emitBattLog(now) {
+    const b = this._batt;
+    const ds = b.deltas.slice().sort((a, z) => a - z);
+    const p95 = ds.length ? ds[Math.min(ds.length - 1, Math.floor(ds.length * 0.95))] : 0;
+    const maxGap = ds.length ? ds[ds.length - 1] : 0;
+    const rr = this.beats - b.rr0;
+    const acc = this._accSamples - b.acc0;
+    const secs = Math.max(1, Math.round((now - b.windowStart) / 1000));
+    const vis = (typeof document !== 'undefined' && document.visibilityState) || 'n/a';
+    console.log(`[batt] ${secs}s ticks=${b.ticks} p95=${p95}ms maxGap=${maxGap}ms vis=${vis} `
+      + `rr=${rr} accSamples=${acc} (${Math.round(acc / secs)}/s)`);
+    this._batt = { ticks: 0, deltas: [], rr0: this.beats, acc0: this._accSamples, windowStart: now };
+  }
 
   onRr(rr) {
     this.lastPeakMs = (this.lastPeakMs ?? 0) + rr;
@@ -212,6 +244,15 @@ export class Monitor {
 
   // --- 1 Hz reporting loop (mirrors index.js) -------------------------------
   _tick() {
+    // Battery/health telemetry: record the real interval since the last tick so
+    // a throttled (or stalled) loop shows up in the [batt] summary.
+    const tnow = Date.now();
+    if (this._lastTickAt != null) this._batt.deltas.push(tnow - this._lastTickAt);
+    this._lastTickAt = tnow;
+    this._tickCount++;
+    this._batt.ticks++;
+    if (tnow - this._batt.windowStart >= 60000) this._emitBattLog(tnow);
+
     const { rmssd, rmssdEma, hr, sdnn, count, corrected } = this.rmssdWin.compute(this.lastPeakMs ?? undefined);
     const r5 = this.rmssdWin5.compute(this.lastPeakMs ?? undefined);
     const rmssd5 = r5.rmssd != null ? Number(r5.rmssd.toFixed(1)) : null;
@@ -238,17 +279,28 @@ export class Monitor {
     const base = this.baseline.get();
     const state = this.classifier.update(rmssdSmoothed, hrVal, base, Date.now());
 
-    // Respiration via RSA, median-smoothed across recent estimates.
-    const resp = estimateRespiration(this.respBuffer);
-    let respOut = null, respConf = null, respPreview = false;
-    if (resp && (resp.valid || resp.preview)) {
-      this.respHistory.push({ brpm: resp.breathsPerMin, conf: resp.confidence });
-      if (this.respHistory.length > 5) this.respHistory.shift();
+    // Respiration via RSA, median-smoothed across recent estimates. The Welch
+    // PSD is the heaviest per-tick step; breathing changes slowly, so recompute
+    // it only every `_respEvery` ticks and reuse the smoothed history in between
+    // (battery). respHistory advances only on a recompute.
+    let respOut = null, respConf = null;
+    if (this._tickCount % this._respEvery === 0) {
+      const resp = estimateRespiration(this.respBuffer);
+      if (resp && (resp.valid || resp.preview)) {
+        this.respHistory.push({ brpm: resp.breathsPerMin, conf: resp.confidence });
+        if (this.respHistory.length > 5) this.respHistory.shift();
+        this._respPreview = resp.preview;
+      } else {
+        this.respHistory.length = 0;
+        this._respPreview = false;
+      }
+    }
+    let respPreview = this._respPreview;
+    if (this.respHistory.length) {
       respOut = Number(median(this.respHistory.map((e) => e.brpm)).toFixed(1));
       respConf = Number(median(this.respHistory.map((e) => e.conf)).toFixed(2));
-      respPreview = resp.preview;
     } else {
-      this.respHistory.length = 0;
+      respPreview = false;
     }
 
     // Posture from the accelerometer. Persist the reference when the tracker

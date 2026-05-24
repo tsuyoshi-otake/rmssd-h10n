@@ -390,7 +390,13 @@
     })();
     let STORAGE_KEY = histKeyFor(currentUser);
     const MAX_POINTS = 900;           // ~15 min at 1 Hz (recent detail chart)
-    const SAVE_EVERY_MS = 3000;       // throttle localStorage writes
+    let SAVE_EVERY_MS = 3000;         // throttle localStorage writes (extended while hidden)
+
+    // When the screen is off / app backgrounded the dashboard is not visible, so
+    // skip all chart drawing and DOM updates (data still accumulates) and write
+    // to localStorage less often. The 1 Hz monitor loop itself keeps running.
+    let pageHidden = (typeof document !== 'undefined' && document.hidden) || false;
+    let pendingStatus = null;         // last status received while hidden
 
     // ---- history persistence (localStorage) ----
     let history = loadHistory();      // [{ t, rmssd, hr, resp }]
@@ -799,8 +805,29 @@
     // ---- wrappers that drive both granularities at once ----------------------
     function rebuildTrendFromHistory() { trend5.rebuild(); trend15.rebuild(); }
     function redrawTrend() { trend5.redraw(); trend15.redraw(); refreshDaySelector(); }
-    function feedTrend(p) { trend5.feed(p); trend15.feed(p); redrawTrend(); }
+    function feedTrend(p) { trend5.feed(p); trend15.feed(p); if (!pageHidden) redrawTrend(); }
     function saveTrendAll(force) { trend5.save(force); trend15.save(force); }
+
+    // ---- visibility-driven battery saving ------------------------------------
+    // While the page is hidden (screen off / app backgrounded) the monitor keeps
+    // running and data keeps accumulating, but we stop drawing and slow down
+    // localStorage writes. On return we flush nothing-pending and repaint fully.
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        pageHidden = document.hidden;
+        if (pageHidden) {
+          SAVE_EVERY_MS = 30000;            // write at most ~every 30 s in the background
+          saveHistory(true); saveTrendAll(true); // flush current state before going quiet
+        } else {
+          SAVE_EVERY_MS = 3000;
+          redrawFromHistory();              // rebuild the detail chart from accumulated points
+          redrawTrend();                    // and both trend charts
+          if (pendingStatus) { applyStatus(pendingStatus); pendingStatus = null; }
+        }
+      });
+      // Last chance to persist when the OS is about to freeze/kill the page.
+      window.addEventListener('pagehide', () => { saveHistory(true); saveTrendAll(true); });
+    }
     function refreshBands() {
       // Recompute PAST tones against the CURRENT baseline so a baseline change
       // repaints all of history & both trend stores retroactively.
@@ -826,6 +853,9 @@
     }
 
     function applyStatus(s) {
+      // Hidden (screen off / backgrounded): stash the latest status and skip the
+      // DOM work; it is applied in full when the page becomes visible again.
+      if (pageHidden) { pendingStatus = s; return; }
       // The server is authoritative for the active user: when it reports a
       // different one, swap to that user's stored history and redraw.
       if (s.user != null && s.user !== currentUser) switchLocalUser(s.user);
@@ -944,21 +974,25 @@
         lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null, step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
       if (history.length > MAX_POINTS) history.shift();
 
-      chart.data.labels.push(new Date(p.t).toLocaleTimeString('ja-JP'));
-      chart.data.datasets[0].data.push(p.rmssd);
-      chart.data.datasets[1].data.push(p.hr);
-      chart.data.datasets[2].data.push(p.resp);
-      chart.data.datasets[3].data.push(p.lean ?? null);
-      if (chart.data.labels.length > MAX_POINTS) {
-        chart.data.labels.shift();
-        chart.data.datasets.forEach((d) => d.data.shift());
+      // Drawing is skipped while hidden — the chart is rebuilt from `history`
+      // (redrawFromHistory) on return, so the live arrays don't need updating.
+      if (!pageHidden) {
+        chart.data.labels.push(new Date(p.t).toLocaleTimeString('ja-JP'));
+        chart.data.datasets[0].data.push(p.rmssd);
+        chart.data.datasets[1].data.push(p.hr);
+        chart.data.datasets[2].data.push(p.resp);
+        chart.data.datasets[3].data.push(p.lean ?? null);
+        if (chart.data.labels.length > MAX_POINTS) {
+          chart.data.labels.shift();
+          chart.data.datasets.forEach((d) => d.data.shift());
+        }
+        chart.$tones = history.map((q) => toneOf(q, curBaseline));
+        chart.$bodies = history.map((q) => q.body || null);
+        chart.$activitySpans = activitySpans();
+        chart.update('none');
+        updateHistInfo();
       }
-      chart.$tones = history.map((q) => toneOf(q, curBaseline));
-      chart.$bodies = history.map((q) => q.body || null);
-      chart.$activitySpans = activitySpans();
-      chart.update('none');
       saveHistory(false);
-      updateHistInfo();
 
       feedTrend(p);
     }
@@ -1039,6 +1073,7 @@
     const serverBtn = document.getElementById('serverBtn');
     const serverLabel = document.getElementById('serverLabel');
     const serverUrl = document.getElementById('serverUrl');
+    const SERVER_KEY = 'rmssd-h10n.server.v1'; // persisted ON/OFF (device-wide)
     let snapTimer = null, serverBusy = false;
     const pushSnapshot = () => {
       try { RmssdBridge.setSnapshot(JSON.stringify({ user: currentUser, history, trend: trend15.data, trend5: trend5.data, activities })); } catch (_) {}
@@ -1051,9 +1086,19 @@
       serverUrl.style.display = (running && info.url) ? 'block' : 'none';
       if (running && !snapTimer) { pushSnapshot(); snapTimer = setInterval(pushSnapshot, 4000); }
       if (!running && snapTimer) { clearInterval(snapTimer); snapTimer = null; }
+      // Remember the desired state so the server comes back up on next launch.
+      try { localStorage.setItem(SERVER_KEY, running ? '1' : '0'); } catch (_) {}
     };
     if (RmssdBridge.canServe) {
-      RmssdBridge.server.info().then(setServerUi).catch(() => {});
+      RmssdBridge.server.info().then((info) => {
+        setServerUi(info);
+        // Auto-restart if it was ON last session but isn't running yet.
+        if (!(info && info.running)) {
+          let want = '0';
+          try { want = localStorage.getItem(SERVER_KEY) || '0'; } catch (_) {}
+          if (want === '1') RmssdBridge.server.start(8080).then(setServerUi).catch(() => {});
+        }
+      }).catch(() => {});
       serverBtn.addEventListener('click', async () => {
         if (serverBusy) return;
         serverBusy = true;
