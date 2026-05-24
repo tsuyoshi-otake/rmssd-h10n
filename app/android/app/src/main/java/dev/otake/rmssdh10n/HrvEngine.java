@@ -6,31 +6,36 @@ import android.util.Log;
 import org.json.JSONObject;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import dev.otake.rmssdh10n.hrv.Analysis;
+import dev.otake.rmssdh10n.hrv.BodyState;
 import dev.otake.rmssdh10n.hrv.Posture;
+import dev.otake.rmssdh10n.hrv.Respiration;
 import dev.otake.rmssdh10n.hrv.Rmssd;
 import dev.otake.rmssdh10n.hrv.Steps;
 
 /**
  * The native 1 Hz HRV reporting loop — the service-side counterpart of
- * app/src/monitor.js's _tick(). Runs on a {@link ScheduledExecutorService} that
- * does NOT depend on a WebView/JS timer, so it keeps ticking with the screen off
- * (the whole point of the native port). Receives RR/HR/ACC from {@link BleNative},
- * computes RMSSD/SDNN/HR (+ posture/steps when ACC is on), writes every frame to
- * {@link HrvDb} (the source of truth), and pushes live frames to the WebView via
- * the {@link Emitter} when one is attached.
- *
- * Stage 1a: RMSSD/HR + idle posture/steps. State/baseline/body/respiration are
- * filled by the WebView (merged) until they are ported in a later stage.
+ * app/src/monitor.js's _tick(). Runs on a {@link ScheduledExecutorService} (no
+ * WebView/JS timer), so it keeps ticking with the screen off. Receives RR/HR/ACC
+ * from {@link BleNative}; computes RMSSD/SDNN/HR, posture+sleep-position, steps,
+ * respiration (RSA/Welch), the resting baseline and the autonomic/body state;
+ * writes every frame to {@link HrvDb} (source of truth) and pushes live frames to
+ * the WebView via the {@link Emitter}. Produces the same status/point keys the
+ * WebView pipeline does, so the dashboard renders native data unchanged.
  */
 public final class HrvEngine {
     private static final String TAG = "HrvEngine";
+    private static final long RESP_WINDOW_MS = 120000;
 
     public interface Emitter {
         void status(String json);
@@ -40,7 +45,7 @@ public final class HrvEngine {
     private static final SimpleDateFormat ISO;
     static {
         ISO = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'+09:00'", Locale.US);
-        ISO.setTimeZone(TimeZone.getTimeZone("GMT+09:00")); // JST, matching src/time.js localIso
+        ISO.setTimeZone(TimeZone.getTimeZone("GMT+09:00")); // JST, matching src/time.js
     }
     private static synchronized String localIso(long epochMs) { return ISO.format(new Date(epochMs)); }
 
@@ -52,6 +57,9 @@ public final class HrvEngine {
     private final Rmssd win5 = new Rmssd(300000);
     private final Posture posture;
     private final Steps steps = new Steps();
+    private final Analysis.Baseline baseline = new Analysis.Baseline();
+    private final Analysis.Classifier classifier = new Analysis.Classifier(45000);
+    private final BodyState bodyState = new BodyState();
 
     private int user = 1;
     private final boolean withAcc;
@@ -61,10 +69,21 @@ public final class HrvEngine {
     private long beats = 0;
     private int lastStepCount = 0;
 
+    // respiration buffer (accepted NN beats) + smoothing history + throttle
+    private final List<double[]> respBuffer = new ArrayList<>(); // {tMs, rr}
+    private final List<double[]> respHistory = new ArrayList<>(); // {brpm, conf}
+    private int respEvery = 3;
+    private boolean respPreview = false;
+
+    // daily steps {day, total}
+    private long stepDay = 0;
+    private int stepTotal = 0;
+    private long lastStepsSavedAt = 0;
+    private Long lastPostureSavedAt = null;
+
     private BleNative ble;
     private ScheduledExecutorService ticker;
     private volatile Emitter emitter;
-    private String deviceMac;
 
     // [batt-native] telemetry
     private int tickCount = 0;
@@ -82,17 +101,61 @@ public final class HrvEngine {
         this.ctx = ctx.getApplicationContext();
         this.db = db;
         this.withAcc = withAcc;
-        Posture.Vec ref = null, sup = null;
-        int latSign = 1;
-        // (refs are seeded from kv in a later stage; idle until then)
+        Posture.Vec ref = vecFromKv("postureRef");
+        Posture.Vec sup = vecFromKv("supineRef");
+        int latSign = "-1".equals(db.kvGet("latSign")) ? -1 : 1;
         this.posture = new Posture(ref, sup, latSign, 25);
+        // restore daily steps + a persisted baseline so a restart resumes calibrated
+        loadStepsDay();
+        loadBaselineKv();
     }
 
     public void setEmitter(Emitter e) { this.emitter = e; }
     public void setUser(int u) { this.user = u; }
 
+    /** Seed posture refs + baseline from the WebView's persisted values (JSON). */
+    public void seed(String json) {
+        if (json == null) return;
+        try {
+            JSONObject o = new JSONObject(json);
+            Posture.Vec ref = vecFromObj(o.optJSONObject("ref"));
+            Posture.Vec sup = vecFromObj(o.optJSONObject("supine"));
+            if (ref != null) { posture.ref = ref; db.kvPut("postureRef", vecJson(ref)); }
+            if (sup != null) { posture.supineRef = sup; db.kvPut("supineRef", vecJson(sup)); }
+            if (o.has("latSign")) { posture.latSign = o.optInt("latSign", 1) == -1 ? -1 : 1; db.kvPut("latSign", String.valueOf(posture.latSign)); }
+            JSONObject b = o.optJSONObject("baseline");
+            if (b != null && b.has("rmssd") && b.has("hr")) baseline.loadFrozen(b.optDouble("rmssd"), b.optDouble("hr"));
+        } catch (Exception e) { Log.w(TAG, "seed", e); }
+    }
+
+    public boolean setPostureRef() {
+        synchronized (gate) {
+            Posture.Vec v = posture.setReference();
+            if (v == null) return false;
+            db.kvPut("postureRef", vecJson(v));
+            lastPostureSavedAt = posture.calibratedAt;
+            return true;
+        }
+    }
+
+    public boolean setSupineRef() {
+        synchronized (gate) {
+            Posture.Vec v = posture.setSupineReference();
+            if (v == null) return false;
+            db.kvPut("supineRef", vecJson(v));
+            return true;
+        }
+    }
+
+    public boolean toggleSleepLR() {
+        synchronized (gate) {
+            posture.latSign = posture.latSign == 1 ? -1 : 1;
+            db.kvPut("latSign", String.valueOf(posture.latSign));
+            return posture.latSign == -1;
+        }
+    }
+
     public void start(String mac) {
-        this.deviceMac = mac;
         battWindowStart = System.currentTimeMillis();
         ble = new BleNative(ctx, mac, withAcc, new BleNative.Sink() {
             @Override public void onHr(int hr) { deviceHr = hr; }
@@ -100,8 +163,13 @@ public final class HrvEngine {
                 synchronized (gate) {
                     lastPeakMs += rrMs;
                     beats++;
-                    win.add(lastPeakMs, rrMs);
+                    boolean accepted = win.add(lastPeakMs, rrMs);
                     win5.add(lastPeakMs, rrMs);
+                    if (accepted) {
+                        respBuffer.add(new double[]{ lastPeakMs, rrMs });
+                        double cutoff = lastPeakMs - RESP_WINDOW_MS;
+                        while (!respBuffer.isEmpty() && respBuffer.get(0)[0] < cutoff) respBuffer.remove(0);
+                    }
                 }
             }
             @Override public void onAcc(int x, int y, int z) {
@@ -119,13 +187,12 @@ public final class HrvEngine {
     public void stop() {
         if (ticker != null) { ticker.shutdownNow(); ticker = null; }
         if (ble != null) { ble.stop(); ble = null; }
+        saveStepsDay();
         db.flush();
         Log.i(TAG, "engine stopped");
     }
 
-    private void tickSafe() {
-        try { tick(); } catch (Throwable t) { Log.e(TAG, "tick error", t); }
-    }
+    private void tickSafe() { try { tick(); } catch (Throwable t) { Log.e(TAG, "tick error", t); } }
 
     private void tick() {
         long now = System.currentTimeMillis();
@@ -136,10 +203,57 @@ public final class HrvEngine {
 
         Rmssd.Result r, r5;
         Posture.Result p;
+        Double respOut = null, respConf = null;
+        boolean previewOut;
+        int stepNow;
+        Analysis.State state;
+        BodyState.Result body;
+        Analysis.Base base;
         synchronized (gate) {
             r = win.compute(lastPeakMs);
             r5 = win5.compute(lastPeakMs);
             p = posture.compute(now);
+            stepNow = steps.steps;
+
+            Double rmssdSmInner = r.rmssdEma != null ? round1(r.rmssdEma) : null;
+            Integer effHrInner = deviceHr != null ? deviceHr : (r.hr != null ? (int) Math.round(r.hr) : null);
+            Double hrInner = effHrInner != null ? (double) effHrInner : null;
+
+            if (connected) baseline.add(rmssdSmInner, hrInner);
+            base = baseline.get();
+            state = classifier.update(rmssdSmInner, hrInner, base, now);
+
+            // Respiration: recompute the heavy Welch PSD only every few ticks.
+            if (tickCount % respEvery == 0) {
+                int m = respBuffer.size();
+                double[] xs = new double[m], ys = new double[m];
+                for (int i = 0; i < m; i++) { xs[i] = respBuffer.get(i)[0]; ys[i] = respBuffer.get(i)[1]; }
+                Respiration.Result rr = Respiration.estimate(xs, ys);
+                if (rr.breathsPerMin != null && (rr.valid || rr.preview)) {
+                    respHistory.add(new double[]{ rr.breathsPerMin, rr.confidence });
+                    if (respHistory.size() > 5) respHistory.remove(0);
+                    respPreview = rr.preview;
+                } else { respHistory.clear(); respPreview = false; }
+            }
+            previewOut = respPreview;
+            if (!respHistory.isEmpty()) {
+                List<Double> brs = new ArrayList<>(), cfs = new ArrayList<>();
+                for (double[] e : respHistory) { brs.add(e[0]); cfs.add(e[1]); }
+                respOut = round1(medianOf(brs));
+                respConf = round2(medianOf(cfs));
+            } else { previewOut = false; }
+
+            double lnDelta0 = (base != null && rmssdSmInner != null && base.rmssd > 0)
+                ? Math.log(rmssdSmInner / base.rmssd) : Double.NaN;
+            Double lnDelta = Double.isNaN(lnDelta0) ? null : lnDelta0;
+            body = bodyState.update(steps.walking(), p.activity, p.leanDeg,
+                hrInner, base != null ? base.hr : null, lnDelta, respOut, respConf, now);
+        }
+
+        // Persist an auto-calibrated posture reference (like monitor.js).
+        if (posture.calibratedAt != null && !posture.calibratedAt.equals(lastPostureSavedAt)) {
+            lastPostureSavedAt = posture.calibratedAt;
+            if (posture.ref != null) db.kvPut("postureRef", vecJson(posture.ref));
         }
 
         Integer effHr = deviceHr != null ? deviceHr : (r.hr != null ? (int) Math.round(r.hr) : null);
@@ -150,15 +264,17 @@ public final class HrvEngine {
         Double hrVal = effHr != null ? (double) effHr : null;
         String wall = localIso(now);
 
-        int stepNow = steps.steps;
+        // daily steps rollover + persist
         int stepDelta = Math.max(0, stepNow - lastStepCount);
         lastStepCount = stepNow;
+        long today = jstMidnight(now);
+        if (stepDay != today) { stepDay = today; stepTotal = 0; }
+        if (stepDelta > 0) {
+            stepTotal += stepDelta;
+            if (now - lastStepsSavedAt > 5000) { lastStepsSavedAt = now; saveStepsDay(); }
+        }
 
         try {
-            JSONObject pj = postureJson(p);
-            JSONObject stepsJson = new JSONObject()
-                .put("today", stepNow).put("cadence", steps.cadence()).put("walking", steps.walking());
-
             JSONObject status = new JSONObject();
             status.put("connected", connected);
             status.put("user", user);
@@ -172,15 +288,15 @@ public final class HrvEngine {
             status.put("beatsTotal", beats);
             status.put("rejected", r.corrected);
             status.put("corrected", r.corrected);
-            status.put("baseline", JSONObject.NULL);     // WebView-owned (stage 1a)
-            status.put("calibration", 0);
-            status.put("state", JSONObject.NULL);         // WebView-merged
-            status.put("respiration", JSONObject.NULL);
-            status.put("respirationConfidence", JSONObject.NULL);
-            status.put("respirationPreview", false);
-            status.put("posture", pj);
-            status.put("steps", stepsJson);
-            status.put("body", JSONObject.NULL);
+            status.put("baseline", base != null ? new JSONObject().put("rmssd", round1(base.rmssd)).put("hr", round1(base.hr)) : JSONObject.NULL);
+            status.put("calibration", round2(baseline.progress()));
+            status.put("state", stateJson(state));
+            status.put("respiration", jn(respOut));
+            status.put("respirationConfidence", jn(respConf));
+            status.put("respirationPreview", previewOut);
+            status.put("posture", postureJson(p));
+            status.put("steps", new JSONObject().put("today", stepTotal).put("cadence", steps.cadence()).put("walking", steps.walking()));
+            status.put("body", body.state);
             status.put("engine", "native");
             status.put("updatedAt", wall);
 
@@ -194,21 +310,19 @@ public final class HrvEngine {
                 point.put("t", wall);
                 point.put("rmssd", jn(rmssd));
                 point.put("hr", jn(hrVal));
-                point.put("resp", JSONObject.NULL);
-                point.put("tone", JSONObject.NULL);
+                point.put("resp", jn(respOut));
+                point.put("tone", state != null && state.tone != null ? state.tone : JSONObject.NULL);
                 point.put("lean", (p.calibrated && p.receiving && p.leanDeg != null) ? p.leanDeg : JSONObject.NULL);
                 point.put("posture", p.state);
                 point.put("activity", p.activity != null ? p.activity : JSONObject.NULL);
                 point.put("step", stepDelta);
-                point.put("body", JSONObject.NULL);
+                point.put("body", body.state);
                 point.put("sleepPos", p.sleepPos != null ? p.sleepPos : JSONObject.NULL);
                 String pointStr = point.toString();
                 db.addPoint(now, pointStr);
                 if (e != null) e.point(pointStr);
             }
-        } catch (Exception ex) {
-            Log.e(TAG, "json", ex);
-        }
+        } catch (Exception ex) { Log.e(TAG, "json", ex); }
 
         if (++sinceFlush >= 5) { sinceFlush = 0; db.flush(); }
         if (++sincePrune >= 3600) { sincePrune = 0; db.prune(now - 14L * 24 * 3600 * 1000); }
@@ -223,6 +337,19 @@ public final class HrvEngine {
         }
     }
 
+    // --- helpers -----------------------------------------------------------
+    private static JSONObject stateJson(Analysis.State s) throws Exception {
+        if (s == null) return null;
+        JSONObject o = new JSONObject();
+        o.put("label", s.label);
+        o.put("tone", s.tone);
+        o.put("detail", s.detail);
+        o.put("arousal", s.arousal != null ? s.arousal : JSONObject.NULL);
+        o.put("recovery", s.recovery != null ? s.recovery : JSONObject.NULL);
+        o.put("load", s.load != null ? s.load : JSONObject.NULL);
+        return o;
+    }
+
     private static JSONObject postureJson(Posture.Result p) throws Exception {
         JSONObject o = new JSONObject();
         o.put("receiving", p.receiving);
@@ -235,6 +362,51 @@ public final class HrvEngine {
         return o;
     }
 
+    private Posture.Vec vecFromKv(String key) { return vecFromJson(db.kvGet(key)); }
+    private static Posture.Vec vecFromJson(String json) {
+        if (json == null) return null;
+        try { return vecFromObj(new JSONObject(json)); } catch (Exception e) { return null; }
+    }
+    private static Posture.Vec vecFromObj(JSONObject o) {
+        if (o == null || !o.has("x")) return null;
+        return new Posture.Vec(o.optDouble("x"), o.optDouble("y"), o.optDouble("z"));
+    }
+    private static String vecJson(Posture.Vec v) {
+        try { return new JSONObject().put("x", v.x).put("y", v.y).put("z", v.z).toString(); }
+        catch (Exception e) { return "{}"; }
+    }
+
+    private void loadStepsDay() {
+        try {
+            String s = db.kvGet("stepsDay");
+            if (s != null) { JSONObject o = new JSONObject(s); stepDay = o.optLong("day"); stepTotal = o.optInt("total"); }
+        } catch (Exception ignored) {}
+    }
+    private void saveStepsDay() {
+        try { db.kvPut("stepsDay", new JSONObject().put("day", stepDay).put("total", stepTotal).toString()); }
+        catch (Exception ignored) {}
+    }
+    private void loadBaselineKv() {
+        try {
+            String s = db.kvGet("baseline");
+            if (s != null) { JSONObject o = new JSONObject(s); if (o.has("rmssd") && o.has("hr")) baseline.loadFrozen(o.optDouble("rmssd"), o.optDouble("hr")); }
+        } catch (Exception ignored) {}
+    }
+
+    private static long jstMidnight(long now) {
+        long jst = now + 9L * 3600 * 1000;
+        long dayIdx = Math.floorDiv(jst, 86400000L);
+        return dayIdx * 86400000L - 9L * 3600 * 1000;
+    }
+
+    private static double medianOf(List<Double> a) {
+        if (a.isEmpty()) return 0;
+        List<Double> s = new ArrayList<>(a);
+        Collections.sort(s);
+        int m = s.size() >> 1;
+        return (s.size() % 2 == 1) ? s.get(m) : (s.get(m - 1) + s.get(m)) / 2.0;
+    }
     private static Object jn(Double v) { return v == null ? JSONObject.NULL : v; }
     private static double round1(double v) { return Math.round(v * 10.0) / 10.0; }
+    private static double round2(double v) { return Math.round(v * 100.0) / 100.0; }
 }

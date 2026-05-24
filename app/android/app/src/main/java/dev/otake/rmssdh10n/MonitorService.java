@@ -36,6 +36,7 @@ public class MonitorService extends Service {
     public static final String EXTRA_MAC  = "mac";
     public static final String EXTRA_ACC  = "acc";
     public static final String EXTRA_USER = "user";
+    public static final String EXTRA_SEED = "seed"; // JSON: posture/supine refs + baseline
 
     public static volatile MonitorService INSTANCE;
     private static HrvEngine.Emitter sEmitter; // set by the plugin (WebView lifecycle)
@@ -118,7 +119,7 @@ public class MonitorService extends Service {
             String mac = intent.getStringExtra(EXTRA_MAC);
             boolean acc = intent.getBooleanExtra(EXTRA_ACC, false);
             int user = intent.getIntExtra(EXTRA_USER, 1);
-            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user);
+            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user, intent.getStringExtra(EXTRA_SEED));
             return;
         }
         // Null/empty intent = START_STICKY restart. Restore the native engine if
@@ -127,14 +128,15 @@ public class MonitorService extends Service {
             String mac = db().kvGet("deviceMac");
             boolean acc = "1".equals(db().kvGet("acc"));
             int user = parseInt(db().kvGet("user"), 1);
-            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user);
+            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user, null); // refs/baseline restored from kv
         }
     }
 
-    private void startEngine(String mac, boolean acc, int user) {
+    private void startEngine(String mac, boolean acc, int user, String seed) {
         if (engine != null) engine.stop();
         engine = new HrvEngine(this, db(), acc);
         engine.setUser(user);
+        if (seed != null) engine.seed(seed);
         engine.setEmitter(sEmitter);
         engine.start(mac);
         db().kvPut("engine", "native");
@@ -143,6 +145,11 @@ public class MonitorService extends Service {
         db().kvPut("user", String.valueOf(user));
         Log.i(TAG, "native engine started mac=" + mac + " acc=" + acc + " user=" + user);
     }
+
+    // Posture-reference controls routed from the plugin (no-op if engine off).
+    public boolean nativeSetPostureRef() { return engine != null && engine.setPostureRef(); }
+    public boolean nativeSetSupineRef() { return engine != null && engine.setSupineRef(); }
+    public Boolean nativeToggleSleepLR() { return engine != null ? engine.toggleSleepLR() : null; }
 
     private void stopEngine() {
         if (engine != null) { engine.stop(); engine = null; }

@@ -1272,10 +1272,10 @@
       });
     })();
 
-    document.getElementById('recalPostureBtn').addEventListener('click', () => {
+    document.getElementById('recalPostureBtn').addEventListener('click', async () => {
       const calib = document.getElementById('calib');
       try {
-        const r = RmssdBridge.setPostureRef();
+        const r = await Promise.resolve(RmssdBridge.setPostureRef());
         baselineMsgUntil = Date.now() + 4000;
         calib.textContent = (r && r.ok)
           ? '今の姿勢を基準（傾き0°）に設定しました'
@@ -1283,10 +1283,10 @@
       } catch (_) {}
     });
 
-    document.getElementById('supineBtn').addEventListener('click', () => {
+    document.getElementById('supineBtn').addEventListener('click', async () => {
       const calib = document.getElementById('calib');
       try {
-        const r = RmssdBridge.setSupineRef();
+        const r = await Promise.resolve(RmssdBridge.setSupineRef());
         baselineMsgUntil = Date.now() + 4000;
         calib.textContent = (r && r.ok)
           ? 'あおむけの基準を登録しました（寝姿勢を判定します）'
@@ -1294,10 +1294,10 @@
       } catch (_) {}
     });
 
-    document.getElementById('sleepLRBtn').addEventListener('click', () => {
+    document.getElementById('sleepLRBtn').addEventListener('click', async () => {
       const calib = document.getElementById('calib');
       try {
-        const r = RmssdBridge.toggleSleepLR();
+        const r = await Promise.resolve(RmssdBridge.toggleSleepLR());
         baselineMsgUntil = Date.now() + 4000;
         calib.textContent = (r && r.ok)
           ? '寝姿勢の左右を反転しました（' + (r.swap ? '反転ON' : '通常') + '）'

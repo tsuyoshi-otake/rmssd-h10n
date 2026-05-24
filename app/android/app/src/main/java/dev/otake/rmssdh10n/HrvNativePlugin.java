@@ -49,16 +49,44 @@ public class HrvNativePlugin extends Plugin {
         String mac = call.getString("mac", MonitorService.DEFAULT_MAC);
         boolean acc = Boolean.TRUE.equals(call.getBoolean("acc", false));
         int user = call.getInt("user", 1);
+        String seed = call.getString("seed", null); // posture/supine refs + baseline
         Intent svc = new Intent(getContext(), MonitorService.class);
         svc.setAction(MonitorService.ACTION_START_ENGINE);
         svc.putExtra(MonitorService.EXTRA_MAC, mac);
         svc.putExtra(MonitorService.EXTRA_ACC, acc);
         svc.putExtra(MonitorService.EXTRA_USER, user);
+        if (seed != null) svc.putExtra(MonitorService.EXTRA_SEED, seed);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) getContext().startForegroundService(svc);
         else getContext().startService(svc);
         JSObject ret = new JSObject();
         ret.put("ok", true);
         ret.put("engine", "native");
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void setPostureRef(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        JSObject ret = new JSObject();
+        ret.put("ok", s != null && s.nativeSetPostureRef());
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void setSupineRef(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        JSObject ret = new JSObject();
+        ret.put("ok", s != null && s.nativeSetSupineRef());
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void toggleSleepLR(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        Boolean swap = s != null ? s.nativeToggleSleepLR() : null;
+        JSObject ret = new JSObject();
+        ret.put("ok", swap != null);
+        ret.put("swap", swap != null && swap);
         call.resolve(ret);
     }
 

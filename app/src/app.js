@@ -123,9 +123,19 @@ async function startNativeEngine() {
     for (const cb of pointListeners) cb(p); hostBroadcast('point', p);
   });
   nativeSubs = [sStatus, sPoint];
-  try { await HrvNative.start({ acc: false, user: monitor.currentUser || 1 }); }
+  const u = monitor.currentUser || 1;
+  try { await HrvNative.start({ acc: true, user: u, seed: buildNativeSeed(u) }); }
   catch (e) { console.error('[native] start failed', e); }
   engineMode = 'native';
+}
+
+// Seed the native engine with this user's persisted posture/supine refs, sleep
+// L/R and baseline so it starts calibrated (no re-calibration on switch).
+function buildNativeSeed(u) {
+  const get = (k) => { try { return JSON.parse(localStorage.getItem(`rmssd-h10n.${k}.v1.u${u}`) || 'null'); } catch (_) { return null; } };
+  let swap = false;
+  try { swap = localStorage.getItem(`rmssd-h10n.sleeplr.v1.u${u}`) === '1'; } catch (_) {}
+  return JSON.stringify({ ref: get('posture'), supine: get('supine'), latSign: swap ? -1 : 1, baseline: get('baseline') });
 }
 
 async function stopNativeEngine() {
@@ -252,9 +262,9 @@ const hostBridge = {
   resetBaseline: () => monitor.resetBaseline(),
   refreezeBaseline: () => monitor.refreezeFromHistory(), // { applied, baseline? }
   setBaseline: (rmssd, hr) => monitor.setBaseline(rmssd, hr), // manual override -> { ok, baseline? }
-  setPostureRef: () => monitor.setPostureReference(), // capture upright posture -> { ok }
-  setSupineRef: () => monitor.setSupineReference(), // capture supine reference (sleep position) -> { ok }
-  toggleSleepLR: () => monitor.toggleSleepLR(), // flip sleep-position left/right -> { ok, swap }
+  setPostureRef: () => engineMode === 'native' ? HrvNative.setPostureRef() : monitor.setPostureReference(), // -> { ok }
+  setSupineRef: () => engineMode === 'native' ? HrvNative.setSupineRef() : monitor.setSupineReference(), // -> { ok }
+  toggleSleepLR: () => engineMode === 'native' ? HrvNative.toggleSleepLR() : monitor.toggleSleepLR(), // -> { ok, swap }
   setOrientation: (mode) => applyOrientation(mode), // 'auto' | 'portrait' | 'landscape'
   exportFiles: (files) => exportFiles(files), // share/download CSVs -> { method, count }
   getRrLog: () => monitor.getRrLog(), // recent raw RR beats for the Kubios export
