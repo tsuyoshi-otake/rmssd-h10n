@@ -825,11 +825,47 @@
           redrawFromHistory();              // rebuild the detail chart from accumulated points
           redrawTrend();                    // and both trend charts
           if (pendingStatus) { applyStatus(pendingStatus); pendingStatus = null; }
+          forceRepaint();                   // WebView sometimes resumes without painting; nudge it
         }
       });
       // Last chance to persist when the OS is about to freeze/kill the page.
       window.addEventListener('pagehide', () => { saveHistory(true); saveTrendAll(true); });
+      // visibilitychange can be missed on WebView resume; focus/pageshow back it up.
+      window.addEventListener('focus', () => { if (!document.hidden) forceRepaint(); });
+      window.addEventListener('pageshow', () => { if (!document.hidden) forceRepaint(); });
     }
+
+    // Android WebView occasionally resumes from screen-off with the compositor
+    // suspended: the DOM/Chart data are correct but no paint reaches the screen
+    // until something invalidates it (a tap used to "fix" it). Force a paint by
+    // flushing layout, then nudging the compositor across two frames. We retry a
+    // few times because the renderer can take a beat to come back after Doze.
+    let _repaintTimer = null;
+    function forceRepaint() {
+      // A compositor-only nudge (transform/opacity) is ignored while the GPU is
+      // suspended. Toggling display forces a full main-thread relayout + raster
+      // invalidation, which DOES push a fresh frame on resume. Synchronous on
+      // purpose: requestAnimationFrame callbacks don't fire while paint is frozen.
+      const flush = () => {
+        const b = document.body;
+        b.style.display = 'none';
+        void b.offsetHeight;            // force reflow so the toggle isn't coalesced away
+        b.style.display = '';
+        void b.offsetHeight;
+        if (chart) chart.update('none');
+        trend5.redraw(); trend15.redraw();
+      };
+      flush();
+      // The renderer can take a beat to come back after Doze; retry a few times.
+      clearTimeout(_repaintTimer);
+      let n = 0;
+      const tick = () => { if (n++ >= 4) return; flush(); _repaintTimer = setTimeout(tick, 250); };
+      _repaintTimer = setTimeout(tick, 200);
+    }
+    // Exposed so the native MainActivity.onResume / onWindowFocusChanged can force
+    // a paint: the WebView's own visibilitychange/focus events are unreliable on
+    // screen-wake, but the Android activity lifecycle callbacks always fire.
+    window.__forceRepaint = forceRepaint;
     function refreshBands() {
       // Recompute PAST tones against the CURRENT baseline so a baseline change
       // repaints all of history & both trend stores retroactively.

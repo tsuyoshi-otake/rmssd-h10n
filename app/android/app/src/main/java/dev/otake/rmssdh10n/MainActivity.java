@@ -3,6 +3,8 @@ package dev.otake.rmssdh10n;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.util.Log;
+import android.webkit.WebView;
 
 import com.getcapacitor.BridgeActivity;
 
@@ -26,5 +28,40 @@ public class MainActivity extends BridgeActivity {
                 && checkSelfPermission("android.permission.BLUETOOTH_CONNECT") != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{"android.permission.BLUETOOTH_CONNECT"}, 1002);
         }
+    }
+
+    // On some devices the WebView returns to the foreground after screen-off
+    // showing a stale frame (only the page background paints; the dashboard
+    // content is missing) until something invalidates it — a tap used to "fix"
+    // it. The activity lifecycle callbacks always fire on return, so we resume the
+    // WebView and drive the JS-side forceRepaint (a display toggle that forces a
+    // full relayout + raster), which is proven to push the real content frame.
+    private void kickRepaint() {
+        try {
+            final WebView wv = (this.bridge != null) ? this.bridge.getWebView() : null;
+            Log.i("RepaintKick", "kickRepaint wv=" + (wv != null));
+            if (wv == null) return;
+            wv.onResume();
+            wv.resumeTimers();
+            wv.invalidate();
+            wv.evaluateJavascript("window.__forceRepaint && window.__forceRepaint()", null);
+            // The renderer can be a beat behind on wake; repaint once more shortly.
+            wv.postDelayed(() -> {
+                wv.invalidate();
+                wv.evaluateJavascript("window.__forceRepaint && window.__forceRepaint()", null);
+            }, 250);
+        } catch (Throwable ignored) {}
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        kickRepaint();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) kickRepaint();
     }
 }
