@@ -74,6 +74,8 @@ public final class HrvEngine {
     private long beats = 0;
     private int lastStepCount = 0;
 
+    // raw RR log for the Kubios/Elite-HRV export: {wallMs, rr, accepted}
+    private final List<double[]> rrLog = new ArrayList<>();
     // respiration buffer (accepted NN beats) + smoothing history + throttle
     private final List<double[]> respBuffer = new ArrayList<>(); // {tMs, rr}
     private final List<double[]> respHistory = new ArrayList<>(); // {brpm, conf}
@@ -162,6 +164,38 @@ public final class HrvEngine {
         }
     }
 
+    /** Re-calibrate: drop the frozen baseline so it re-measures over the next ~60s. */
+    public void resetBaseline() {
+        synchronized (gate) { baseline.reset(); db.kvPut("baseline", ""); }
+    }
+
+    /** Manual baseline override (and persist so a restart keeps it). */
+    public boolean setBaseline(double r, double h) {
+        synchronized (gate) {
+            if (!(r > 0) || !(h > 0)) return false;
+            baseline.loadFrozen(r, h);
+            try { db.kvPut("baseline", new JSONObject().put("rmssd", r).put("hr", h).toString()); }
+            catch (Exception ignored) {}
+            return true;
+        }
+    }
+
+    /** Recent raw RR beats as a JSON array of {wall (JST ISO), rr, accepted}, for
+     *  the dashboard's Kubios/Elite-HRV CSV export (mirrors Monitor.getRrLog). */
+    public String rrLogJson() {
+        synchronized (gate) {
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < rrLog.size(); i++) {
+                double[] e = rrLog.get(i);
+                if (i > 0) sb.append(',');
+                sb.append("{\"wall\":\"").append(localIso((long) e[0]))
+                  .append("\",\"rr\":").append(round1(e[1]))
+                  .append(",\"accepted\":").append((int) e[2]).append('}');
+            }
+            return sb.append(']').toString();
+        }
+    }
+
     public void start(String mac) {
         battWindowStart = System.currentTimeMillis();
         ble = new BleNative(ctx, mac, withAcc, new BleNative.Sink() {
@@ -172,6 +206,8 @@ public final class HrvEngine {
                     beats++;
                     boolean accepted = win.add(lastPeakMs, rrMs);
                     win5.add(lastPeakMs, rrMs);
+                    rrLog.add(new double[]{ System.currentTimeMillis(), rrMs, accepted ? 1 : 0 });
+                    if (rrLog.size() > 2500) rrLog.remove(0);
                     if (accepted) {
                         respBuffer.add(new double[]{ lastPeakMs, rrMs });
                         double cutoff = lastPeakMs - RESP_WINDOW_MS;

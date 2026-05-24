@@ -275,8 +275,6 @@
         <button id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止">PC共有サーバー: <span id="serverLabel">OFF</span></button>
         <div id="serverUrl" class="srvurl" title="クリックでURLをコピー" style="display:none"></div>
         <div class="sep"></div>
-        <button id="engineBtn" title="計測エンジン。ネイティブは画面OFF・バックグラウンドでも止まらず計測を継続します（夜間記録向け）">計測エンジン: <span id="engineLabel">JS</span></button>
-        <div class="sep"></div>
         <button id="clearBtn" title="保存した履歴を消去">履歴をクリア</button>
       </div>
     </div>
@@ -1154,34 +1152,6 @@
       serverUrl.style.display = 'none';
     }
 
-    // ---- measurement engine toggle (Android only) ----
-    // 'native' runs BLE + the 1 Hz loop in the foreground service so it keeps
-    // measuring with the screen off (the JS engine pauses when hidden). Bulk
-    // catch-up on resume is handled in app.js (window.__pushPointsBulk below).
-    const engineBtn = document.getElementById('engineBtn');
-    const engineLabel = document.getElementById('engineLabel');
-    if (engineBtn && RmssdBridge.canServe && RmssdBridge.setEngine) {
-      const paintEngine = () => {
-        const m = (RmssdBridge.getEngine && RmssdBridge.getEngine()) || 'js';
-        engineLabel.textContent = m === 'native' ? 'ネイティブ' : 'JS';
-        engineBtn.classList.toggle('on', m === 'native');
-      };
-      paintEngine();
-      let engineBusy = false;
-      engineBtn.addEventListener('click', async () => {
-        if (engineBusy) return;
-        engineBusy = true;
-        try {
-          const cur = (RmssdBridge.getEngine && RmssdBridge.getEngine()) || 'js';
-          await RmssdBridge.setEngine(cur === 'native' ? 'js' : 'native');
-        } catch (e) { alert('エンジン切替に失敗: ' + ((e && e.message) || e)); }
-        paintEngine();
-        engineBusy = false;
-      });
-    } else if (engineBtn) {
-      engineBtn.style.display = 'none';
-    }
-
     // Bulk-replay points the native engine recorded while the page was hidden:
     // append to history + trend without per-point redraw, then one repaint.
     window.__pushPointsBulk = function (pts) {
@@ -1254,7 +1224,7 @@
         // Raw RR intervals (host only) — feed this into Kubios / Elite HRV for
         // gold-standard 5-min-window HRV. `accepted=0` marks artifact-rejected beats.
         try {
-          const rr = RmssdBridge.getRrLog ? RmssdBridge.getRrLog() : [];
+          const rr = RmssdBridge.getRrLog ? await RmssdBridge.getRrLog() : [];
           if (rr && rr.length) {
             files.push({ name: `rmssd-u${u}-rr-${stamp}.csv`, mime: 'text/csv',
               content: toCsv(['wallClock', 'rr_ms', 'accepted'], rr.map((b) => [b.wall, b.rr, b.accepted])) });
@@ -1284,7 +1254,12 @@
       const calib = document.getElementById('calib');
       btn.disabled = true;
       try {
-        const r = RmssdBridge.refreezeBaseline();
+        // The native engine has no full-history store (it re-measures live), so we
+        // compute the rest-gated median from the dashboard's own history and push
+        // it as a manual baseline. In ?sim=1 the JS Monitor does it internally.
+        const r = RmssdBridge.nativeEngine
+          ? await refreezeFromDashboardHistory()
+          : await Promise.resolve(RmssdBridge.refreezeBaseline());
         baselineMsgUntil = Date.now() + 4000; // hold the message against per-second status overwrites
         calib.textContent = (r && r.applied)
           ? `全期間の安静データで基準を再計算（RMSSD ${r.baseline.rmssd}ms / HR ${Math.round(r.baseline.hr)} · n=${r.baseline.n}）`
@@ -1292,6 +1267,23 @@
       } catch (_) {}
       setTimeout(() => { btn.disabled = false; }, 1500);
     });
+
+    // Native refreeze: rest-gate the dashboard history (drop beats whose HR is far
+    // from the median = active/transition) and median the rest, then freeze it on
+    // the native engine via setBaseline. Mirrors the JS Baseline.refreezeFromHistory.
+    async function refreezeFromDashboardHistory() {
+      const pts = history.filter((p) => p && p.rmssd != null && p.hr != null && p.rmssd > 0 && p.hr > 0);
+      if (pts.length < 30) return { ok: true, applied: false };
+      const med = (arr) => { const s = [...arr].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+      const hrMed = med(pts.map((p) => p.hr));
+      let rested = pts.filter((p) => Math.abs(p.hr - hrMed) <= 6); // ±6 bpm rest gate
+      if (rested.length < 20) rested = pts;
+      const rmssd = Math.round(med(rested.map((p) => p.rmssd)) * 10) / 10;
+      const hr = Math.round(med(rested.map((p) => p.hr)) * 10) / 10;
+      const res = await Promise.resolve(RmssdBridge.setBaseline(rmssd, hr));
+      const ok = !!(res && res.ok);
+      return { ok, applied: ok, baseline: { rmssd, hr, n: rested.length } };
+    }
 
     // Smart-alerts on/off (Android host only; the engine in app.js reads this
     // localStorage flag). Hidden on remote/sim where notifications can't fire.
@@ -1353,19 +1345,19 @@
     document.getElementById('baseClose').addEventListener('click', closeBaseModal);
     document.getElementById('baseCancel').addEventListener('click', closeBaseModal);
     baseModal.addEventListener('click', (e) => { if (e.target.id === 'baseModal') closeBaseModal(); });
-    document.getElementById('baseSave').addEventListener('click', () => {
+    document.getElementById('baseSave').addEventListener('click', async () => {
       const rm = parseFloat(document.getElementById('baseRmssdIn').value);
       const hr = parseFloat(document.getElementById('baseHrIn').value);
       if (!(rm > 0 && rm <= 300 && hr >= 30 && hr <= 220)) {
         alert('RMSSD は 0〜300ms、心拍は 30〜220bpm の範囲で入力してください。'); return;
       }
       try {
-        const r = RmssdBridge.setBaseline(rm, hr);
+        const r = await Promise.resolve(RmssdBridge.setBaseline(rm, hr));
         if (r && r.ok) {
-          curBaseline = { rmssd: r.baseline.rmssd, hr: r.baseline.hr };
+          curBaseline = { rmssd: rm, hr };
           baselineMsgUntil = Date.now() + 4000;
           document.getElementById('calib').textContent =
-            `基準値を手動設定（RMSSD ${r.baseline.rmssd}ms / HR ${Math.round(r.baseline.hr)}）`;
+            `基準値を手動設定（RMSSD ${rm}ms / HR ${Math.round(hr)}）`;
           refreshBands();
           closeBaseModal();
         } else { alert('設定に失敗しました。'); }

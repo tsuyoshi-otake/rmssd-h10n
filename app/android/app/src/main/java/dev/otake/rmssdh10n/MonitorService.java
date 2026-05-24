@@ -150,6 +150,10 @@ public class MonitorService extends Service {
     public boolean nativeSetPostureRef() { return engine != null && engine.setPostureRef(); }
     public boolean nativeSetSupineRef() { return engine != null && engine.setSupineRef(); }
     public Boolean nativeToggleSleepLR() { return engine != null ? engine.toggleSleepLR() : null; }
+    // Baseline + RR-log controls routed from the plugin (no-op if engine off).
+    public boolean nativeResetBaseline() { if (engine == null) return false; engine.resetBaseline(); return true; }
+    public boolean nativeSetBaseline(double r, double h) { return engine != null && engine.setBaseline(r, h); }
+    public String nativeRrLog() { return engine != null ? engine.rrLogJson() : "[]"; }
 
     private void stopEngine() {
         if (engine != null) { engine.stop(); engine = null; }

@@ -91,6 +91,36 @@ public class HrvNativePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void resetBaseline(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        boolean ok = s != null && s.nativeResetBaseline();
+        JSObject ret = new JSObject();
+        ret.put("ok", ok);
+        ret.put("applied", ok);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void setBaseline(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        Double r = call.getDouble("rmssd");
+        Double h = call.getDouble("hr");
+        boolean ok = s != null && r != null && h != null && s.nativeSetBaseline(r, h);
+        JSObject ret = new JSObject();
+        ret.put("ok", ok);
+        call.resolve(ret);
+    }
+
+    /** Recent raw RR beats (JSON array string) for the Kubios/Elite-HRV export. */
+    @PluginMethod
+    public void getRrLog(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        JSObject ret = new JSObject();
+        ret.put("log", s != null ? s.nativeRrLog() : "[]");
+        call.resolve(ret);
+    }
+
+    @PluginMethod
     public void stop(PluginCall call) {
         Intent svc = new Intent(getContext(), MonitorService.class);
         svc.setAction(MonitorService.ACTION_STOP_ENGINE);
