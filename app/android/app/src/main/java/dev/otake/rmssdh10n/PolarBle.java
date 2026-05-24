@@ -1,8 +1,16 @@
 package dev.otake.rmssdh10n;
 
+import android.annotation.SuppressLint;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.util.Log;
 
+import androidx.core.content.ContextCompat;
 import androidx.core.util.Pair;
 
 import com.polar.sdk.api.PolarBleApi;
@@ -17,11 +25,13 @@ import com.polar.sdk.api.model.PolarHrData;
 import com.polar.sdk.api.model.PolarSensorSetting;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -111,6 +121,7 @@ public final class PolarBle {
     public void start() {
         exec.execute(() -> {
             try {
+                ensureBonded(); // pair the H10 first — its PFTP (recording/time) needs an encrypted link
                 Set<PolarBleApi.PolarBleSdkFeature> features = EnumSet.of(
                         PolarBleApi.PolarBleSdkFeature.FEATURE_HR,
                         PolarBleApi.PolarBleSdkFeature.FEATURE_POLAR_ONLINE_STREAMING,
@@ -215,23 +226,79 @@ public final class PolarBle {
 
     private void startAcc() {
         if (accDis != null && !accDis.isDisposed()) return;
+        // Query the device's actual ACC capabilities and pick from them (25 Hz / ±2 G /
+        // 16-bit when offered) instead of hardcoding — the H10 rejects unsupported combos
+        // (a wrong/extra key made startAccStreaming error and posture never got samples).
+        accDis = api.requestStreamSettings(id, PolarBleApi.PolarDeviceDataType.ACC)
+                .toFlowable()
+                .flatMap(available -> api.startAccStreaming(id, pickAccSetting(available)))
+                .subscribe(
+                        data -> {
+                            for (PolarAccelerometerData.PolarAccelerometerDataSample s : data.getSamples()) {
+                                sink.onAcc(s.getX(), s.getY(), s.getZ());
+                            }
+                        },
+                        err -> { sink.log("acc stream err: " + err.getMessage()); accDis = null; });
+        sink.log("ACC streaming requested");
+    }
+
+    /** Choose a light, supported ACC setting from what the device actually offers:
+     *  prefer 25 Hz / 16-bit / ±2 G, else fall back to the smallest offered value. */
+    private static PolarSensorSetting pickAccSetting(PolarSensorSetting available)
+            throws com.polar.sdk.api.errors.PolarInvalidSensorSettingsError {
+        Map<PolarSensorSetting.SettingType, Set<Integer>> avail = available.getSettings();
+        Map<PolarSensorSetting.SettingType, Integer> chosen = new HashMap<>();
+        putPreferred(chosen, avail, PolarSensorSetting.SettingType.SAMPLE_RATE, 25);
+        putPreferred(chosen, avail, PolarSensorSetting.SettingType.RESOLUTION, 16);
+        putPreferred(chosen, avail, PolarSensorSetting.SettingType.RANGE, 2);
+        return new PolarSensorSetting(chosen);
+    }
+
+    private static void putPreferred(Map<PolarSensorSetting.SettingType, Integer> out,
+            Map<PolarSensorSetting.SettingType, Set<Integer>> avail,
+            PolarSensorSetting.SettingType type, int preferred) {
+        Set<Integer> opts = avail != null ? avail.get(type) : null;
+        if (opts == null || opts.isEmpty()) return;            // not offered — let the SDK default it
+        out.put(type, opts.contains(preferred) ? preferred : Collections.min(opts));
+    }
+
+    /** Ensure the H10 is OS-bonded before the SDK connects. Its PFTP (recording/time)
+     *  characteristics need an encrypted link, so the H10 requests pairing on connect —
+     *  but the SDK's 10 s feature-check disconnects mid-SMP (SMP_CONN_TOUT), so the
+     *  in-connect pairing never completes. Bonding here first (no SDK connection yet, no
+     *  10 s clock) lets SMP finish. No-op when already bonded, so it can't regress the
+     *  working path; best-effort otherwise (we still try to connect if it fails). */
+    @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT is requested at runtime in MainActivity
+    private void ensureBonded() {
         try {
-            Map<PolarSensorSetting.SettingType, Integer> m = new HashMap<>();
-            m.put(PolarSensorSetting.SettingType.SAMPLE_RATE, 25);
-            m.put(PolarSensorSetting.SettingType.RESOLUTION, 16);
-            m.put(PolarSensorSetting.SettingType.RANGE, 2);
-            m.put(PolarSensorSetting.SettingType.CHANNELS, 3);
-            PolarSensorSetting setting = new PolarSensorSetting(m);
-            accDis = api.startAccStreaming(id, setting).subscribe(
-                    data -> {
-                        for (PolarAccelerometerData.PolarAccelerometerDataSample s : data.getSamples()) {
-                            sink.onAcc(s.getX(), s.getY(), s.getZ());
-                        }
-                    },
-                    err -> { sink.log("acc stream err: " + err.getMessage()); accDis = null; });
-            sink.log("ACC 25Hz started");
+            BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter ad = bm != null ? bm.getAdapter() : null;
+            if (ad == null) return;
+            BluetoothDevice dev = ad.getRemoteDevice(id);
+            if (dev.getBondState() == BluetoothDevice.BOND_BONDED) return; // already paired — nothing to do
+            final CountDownLatch latch = new CountDownLatch(1);
+            BroadcastReceiver rx = new BroadcastReceiver() {
+                @Override public void onReceive(Context c, Intent i) {
+                    BluetoothDevice d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                    if (d != null && id.equalsIgnoreCase(d.getAddress())) {
+                        int st = i.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
+                        if (st == BluetoothDevice.BOND_BONDED || st == BluetoothDevice.BOND_NONE) latch.countDown();
+                    }
+                }
+            };
+            ContextCompat.registerReceiver(ctx, rx,
+                    new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+                    ContextCompat.RECEIVER_NOT_EXPORTED);
+            try {
+                sink.log("bonding H10 (createBond)…");
+                if (!dev.createBond()) sink.log("createBond() returned false");
+                latch.await(30, TimeUnit.SECONDS);
+            } finally {
+                try { ctx.unregisterReceiver(rx); } catch (Exception ignored) {}
+            }
+            sink.log("bond state after attempt: " + dev.getBondState());
         } catch (Throwable t) {
-            sink.log("acc start failed: " + t.getMessage());
+            sink.log("ensureBonded failed: " + t.getMessage());
         }
     }
 
