@@ -122,9 +122,9 @@ public class MonitorService extends Service {
             startEngine(mac != null ? mac : DEFAULT_MAC, acc, user, intent.getStringExtra(EXTRA_SEED));
             return;
         }
-        // Null/empty intent = START_STICKY restart. Restore the native engine if
-        // it was the active one (kv flag), so monitoring resumes after a kill.
-        if ("native".equals(db().kvGet("engine"))) {
+        // Null/empty intent = START_STICKY restart (or keepAlive's service start).
+        // Restore the native engine if it was the active one and none is running yet.
+        if (engine == null && "native".equals(db().kvGet("engine"))) {
             String mac = db().kvGet("deviceMac");
             boolean acc = "1".equals(db().kvGet("acc"));
             int user = parseInt(db().kvGet("user"), 1);
@@ -133,7 +133,15 @@ public class MonitorService extends Service {
     }
 
     private void startEngine(String mac, boolean acc, int user, String seed) {
-        if (engine != null) engine.stop();
+        // Idempotent: a normal launch fires BOTH an explicit START_ENGINE and a
+        // kv-restore start (keepAlive's service start hits the null-intent branch
+        // while kv still says "native" from a prior session). Starting twice spins
+        // up two H10 connections whose scans collide (InterruptedException), so a
+        // running engine wins — switchUser/stop set engine=null first via stopEngine.
+        if (engine != null) {
+            Log.i(TAG, "startEngine ignored — engine already running");
+            return;
+        }
         engine = new HrvEngine(this, db(), acc);
         engine.setUser(user);
         if (seed != null) engine.seed(seed);
