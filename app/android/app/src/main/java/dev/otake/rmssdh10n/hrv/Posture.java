@@ -99,7 +99,14 @@ public final class Posture {
         return ref.copy();
     }
 
-    public Vec setReference() { return setRefInternal(); }
+    // Manual upright calibration. Reject while moving so a press mid-motion can't
+    // lock in a garbage reference (the auto path already rest-gates); the caller
+    // tells the user to hold still and try again.
+    public Vec setReference() {
+        if (g == null) return null;
+        if (activity > REST_ACTIVITY) return null;
+        return setRefInternal();
+    }
 
     public Vec setSupineReference() {
         if (g == null || ref == null) return null;
