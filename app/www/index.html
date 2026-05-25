@@ -79,7 +79,7 @@
       background: var(--tone, var(--wait)); box-shadow: 0 0 26px 1px var(--tone, transparent); }
     .state .ind { display: none; } /* tone is shown by the left accent bar now */
     .state .body { min-width: 0; }
-    .state .label { font-size: 26px; font-weight: 700; letter-spacing: .01em; }
+    .state .label { font-size: 26px; font-weight: 700; letter-spacing: .01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .state .detail { font-size: 13px; color: var(--muted); margin-top: 5px; line-height: 1.5; max-width: 52ch; }
     /* autonomic 2-axis map: x = vagal HRV (recovery), y = load/arousal */
     .anmap { position: relative; width: 100%; aspect-ratio: 1 / 1; max-height: 210px; margin: 0 auto;
@@ -97,7 +97,7 @@
     .anmap .dot { display: none; position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; border-radius: 50%;
       background: var(--accent); border: 2px solid var(--bg); box-shadow: 0 0 14px 2px var(--accent);
       transform: translate(-50%, -50%); transition: left .6s cubic-bezier(.22,.61,.36,1), top .6s cubic-bezier(.22,.61,.36,1), background .5s, box-shadow .5s; }
-    .anmeta { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
+    .anmeta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 10px; margin-top: 8px; font-size: 11px; color: var(--muted); font-family: var(--mono); }
     .anmeta #anScores { color: var(--text); }
     .anmeta #anBreath { text-align: right; }
     .anmeta .bchip { font-weight: 700; white-space: nowrap; }
@@ -193,12 +193,14 @@
       .wrap { padding: 13px; }
       .state { grid-template-columns: 1fr; gap: 14px; padding: 16px 18px; margin-bottom: 12px; }
       .state .label { font-size: 21px; }
-      .state .detail { font-size: 12px; margin-top: 4px; }
+      .state .detail { font-size: 12px; margin-top: 4px; min-height: 3em; } /* reserve 2 lines so detail length never shifts the cards below */
+      .anmeta { min-height: 2.8em; align-content: flex-start; }              /* reserve so wrapping meta doesn't shift the cards */
       .anmap { max-height: 232px; max-width: 280px; }
       .cards { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
       .card { padding: 12px 15px; }
       .card .value { font-size: 27px; }
-      .mini { grid-column: 1 / -1; flex-direction: row; justify-content: space-around; }
+      .mini { grid-column: 1 / -1; flex-direction: row; justify-content: space-between; }
+      .mini .row { flex: 1 1 0; min-width: 0; } /* equal-width cells: value digit-count changes don't re-space the row */
     }
 
     /* --- activity logging (record bar + chips + picker modal) --- */
