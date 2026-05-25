@@ -5,14 +5,10 @@ import android.util.Log;
 
 import org.json.JSONObject;
 
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Date;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
-import java.util.TimeZone;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -62,13 +58,6 @@ public final class HrvEngine {
 
     /** Relax-mode voice readout sink (Android TextToSpeech in the service). */
     public interface Speaker { void speak(String text); }
-
-    private static final SimpleDateFormat ISO;
-    static {
-        ISO = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'+09:00'", Locale.US);
-        ISO.setTimeZone(TimeZone.getTimeZone("GMT+09:00")); // JST, matching src/time.js
-    }
-    private static synchronized String localIso(long epochMs) { return ISO.format(new Date(epochMs)); }
 
     private final Context ctx;
     private final HrvDb db;
@@ -250,7 +239,7 @@ public final class HrvEngine {
             for (int i = 0; i < rrLog.size(); i++) {
                 double[] e = rrLog.get(i);
                 if (i > 0) sb.append(',');
-                sb.append("{\"wall\":\"").append(localIso((long) e[0]))
+                sb.append("{\"wall\":\"").append(HrvTime.localIso((long) e[0]))
                   .append("\",\"rr\":").append(round1(e[1]))
                   .append(",\"accepted\":").append((int) e[2]).append('}');
             }
@@ -375,7 +364,7 @@ public final class HrvEngine {
             for (Backfill.Pt pt : pts) {
                 if (pt.tMs > now + 60_000L) continue;  // clock-skew guard: never write future points
                 if (existing.contains(pt.tMs)) continue;
-                String json = buildPointJson(localIso(pt.tMs), pt.rmssd,
+                String json = HrvJson.buildPointJson(HrvTime.localIso(pt.tMs), pt.rmssd,
                         pt.hr != null ? (double) pt.hr : null, pt.resp, pt.tone,
                         null, null, null, null, 0, null, null);
                 rows.add(new Object[]{ pt.tMs, json });
@@ -495,12 +484,12 @@ public final class HrvEngine {
         Double sdnn = r.sdnn != null ? round1(r.sdnn) : null;
         Double rmssd5 = r5.rmssd != null ? round1(r5.rmssd) : null;
         Double hrVal = effHr != null ? (double) effHr : null;
-        String wall = localIso(now);
+        String wall = HrvTime.localIso(now);
 
         // daily steps rollover + persist
         int stepDelta = Math.max(0, stepNow - lastStepCount);
         lastStepCount = stepNow;
-        long today = jstMidnight(now);
+        long today = HrvTime.jstMidnight(now);
         if (stepDay != today) { stepDay = today; stepTotal = 0; }
         if (stepDelta > 0) {
             stepTotal += stepDelta;
@@ -512,22 +501,22 @@ public final class HrvEngine {
             status.put("connected", connected);
             status.put("user", user);
             status.put("mode", "hr-rr");
-            status.put("hr", jn(hrVal));
-            status.put("rmssd", jn(rmssd));
-            status.put("rmssd5", jn(rmssd5));
-            status.put("rmssdSmoothed", jn(rmssdSm));
-            status.put("sdnn", jn(sdnn));
+            status.put("hr", HrvJson.jn(hrVal));
+            status.put("rmssd", HrvJson.jn(rmssd));
+            status.put("rmssd5", HrvJson.jn(rmssd5));
+            status.put("rmssdSmoothed", HrvJson.jn(rmssdSm));
+            status.put("sdnn", HrvJson.jn(sdnn));
             status.put("rrCount", r.count);
             status.put("beatsTotal", beats);
             status.put("rejected", r.corrected);
             status.put("corrected", r.corrected);
             status.put("baseline", base != null ? new JSONObject().put("rmssd", round1(base.rmssd)).put("hr", round1(base.hr)) : JSONObject.NULL);
             status.put("calibration", round2(baseline.progress()));
-            status.put("state", stateJson(state));
-            status.put("respiration", jn(respOut));
-            status.put("respirationConfidence", jn(respConf));
+            status.put("state", HrvJson.stateJson(state));
+            status.put("respiration", HrvJson.jn(respOut));
+            status.put("respirationConfidence", HrvJson.jn(respConf));
             status.put("respirationPreview", previewOut);
-            status.put("posture", postureJson(p));
+            status.put("posture", HrvJson.postureJson(p));
             status.put("steps", new JSONObject().put("today", stepTotal).put("cadence", steps.cadence()).put("walking", steps.walking()));
             status.put("body", body.state);
             status.put("engine", "native");
@@ -562,7 +551,7 @@ public final class HrvEngine {
             if (fresh && (hrVal != null || rmssd != null)) {
                 long tSec = (now / 1000L) * 1000L;
                 Integer leanOut = (p.calibrated && p.receiving && p.leanDeg != null) ? p.leanDeg : null;
-                String pointStr = buildPointJson(localIso(tSec), rmssd, hrVal, respOut,
+                String pointStr = HrvJson.buildPointJson(HrvTime.localIso(tSec), rmssd, hrVal, respOut,
                         state != null ? state.tone : null,
                         leanOut, p.state, p.leanDir, p.activity, stepDelta, body.state, p.sleepPos);
                 db.addPoint(tSec, pointStr);
@@ -584,52 +573,6 @@ public final class HrvEngine {
     }
 
     // --- helpers -----------------------------------------------------------
-    /** Build the point JSON shared by the live tick and the offline backfill, so the
-     *  key set never drifts between the two. Backfilled points pass null posture/steps. */
-    static String buildPointJson(String wall, Double rmssd, Double hr, Double resp, String tone,
-            Integer lean, String posture, String leanDir, Integer activity, int step,
-            String body, String sleepPos) throws Exception {
-        JSONObject point = new JSONObject();
-        point.put("t", wall);
-        point.put("rmssd", jn(rmssd));
-        point.put("hr", jn(hr));
-        point.put("resp", jn(resp));
-        point.put("tone", tone != null ? tone : JSONObject.NULL);
-        point.put("lean", lean != null ? lean : JSONObject.NULL);
-        point.put("posture", posture != null ? posture : JSONObject.NULL);
-        point.put("leanDir", leanDir != null ? leanDir : JSONObject.NULL);
-        point.put("activity", activity != null ? activity : JSONObject.NULL);
-        point.put("step", step);
-        point.put("body", body != null ? body : JSONObject.NULL);
-        point.put("sleepPos", sleepPos != null ? sleepPos : JSONObject.NULL);
-        return point.toString();
-    }
-
-    private static JSONObject stateJson(Analysis.State s) throws Exception {
-        if (s == null) return null;
-        JSONObject o = new JSONObject();
-        o.put("label", s.label);
-        o.put("tone", s.tone);
-        o.put("detail", s.detail);
-        o.put("arousal", s.arousal != null ? s.arousal : JSONObject.NULL);
-        o.put("recovery", s.recovery != null ? s.recovery : JSONObject.NULL);
-        o.put("load", s.load != null ? s.load : JSONObject.NULL);
-        return o;
-    }
-
-    private static JSONObject postureJson(Posture.Result p) throws Exception {
-        JSONObject o = new JSONObject();
-        o.put("receiving", p.receiving);
-        o.put("calibrated", p.calibrated);
-        o.put("state", p.state);
-        o.put("leanDeg", p.leanDeg != null ? p.leanDeg : JSONObject.NULL);
-        o.put("activity", p.activity != null ? p.activity : JSONObject.NULL);
-        o.put("moving", p.moving);
-        o.put("sleepPos", p.sleepPos != null ? p.sleepPos : JSONObject.NULL);
-        o.put("leanDir", p.leanDir != null ? p.leanDir : JSONObject.NULL);
-        return o;
-    }
-
     private Posture.Vec vecFromKv(String key) { return vecFromJson(db.kvGet(key)); }
     private static Posture.Vec vecFromJson(String json) {
         if (json == null) return null;
@@ -661,12 +604,6 @@ public final class HrvEngine {
         } catch (Exception ignored) {}
     }
 
-    private static long jstMidnight(long now) {
-        long jst = now + 9L * 3600 * 1000;
-        long dayIdx = Math.floorDiv(jst, 86400000L);
-        return dayIdx * 86400000L - 9L * 3600 * 1000;
-    }
-
     private static double medianOf(List<Double> a) {
         if (a.isEmpty()) return 0;
         List<Double> s = new ArrayList<>(a);
@@ -674,7 +611,6 @@ public final class HrvEngine {
         int m = s.size() >> 1;
         return (s.size() % 2 == 1) ? s.get(m) : (s.get(m - 1) + s.get(m)) / 2.0;
     }
-    private static Object jn(Double v) { return v == null ? JSONObject.NULL : v; }
     private static double round1(double v) { return Math.round(v * 10.0) / 10.0; }
     private static double round2(double v) { return Math.round(v * 100.0) / 100.0; }
 }
