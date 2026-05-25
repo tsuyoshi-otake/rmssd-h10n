@@ -65,6 +65,7 @@ public final class PolarBle {
     private static final int RECORDING_DEFER_S = 8;      // let live HR/ACC settle before PFTP
     private static final int RETRY_DELAY_S = 5;          // spacing for transient PFTP 106 retries
     private static final int MAX_RECORDING_ATTEMPTS = 6; // bound the recover/start retry loop
+    private static final int MAX_RECOVERY_RECONNECTS = 2;// bounded forced reconnects when PFTP stays wedged on a link
     private static final long RR_CAP = 95000L;           // ~H10 RR memory limit (truncation heuristic)
     private static final long FULL_DURATION_MS = 18L * 3600 * 1000; // ~18 h
     private static final long TRUNCATE_TAIL_MS = 5L * 60 * 1000;    // unrecorded tail ⇒ memory-full auto-stop
@@ -129,6 +130,7 @@ public final class PolarBle {
     private volatile boolean linkConnected = false;   // BLE link up — gates PFTP ops
     private volatile boolean externalBlocking = false;// a non-owned recording occupies the slot
     private int recordingAttempt = 0;                 // exec-thread only — PFTP retry counter
+    private int recoveryReconnects = 0;               // exec-thread only — bounded forced reconnects on stuck PFTP
     // CAS-guarded so duplicate feature-ready callbacks can't queue two recording jobs.
     private final AtomicBoolean recordingHandledThisConn = new AtomicBoolean(false);
 
@@ -357,12 +359,40 @@ public final class PolarBle {
             sink.log("recording-on-connect failed: " + t.getMessage());
             needRetry = true;
         }
-        if (needRetry && !stopping && linkConnected && recordingAttempt < MAX_RECORDING_ATTEMPTS) {
-            recordingAttempt++;
-            sink.log("recording retry " + recordingAttempt + "/" + MAX_RECORDING_ATTEMPTS
-                    + " in " + RETRY_DELAY_S + "s");
-            exec.schedule(this::runRecordingOnConnect, RETRY_DELAY_S, TimeUnit.SECONDS);
+        if (!needRetry) { recoveryReconnects = 0; return; } // recovered/started — clear the reconnect budget
+        if (!stopping && linkConnected) {
+            if (recordingAttempt < MAX_RECORDING_ATTEMPTS) {
+                recordingAttempt++;
+                sink.log("recording retry " + recordingAttempt + "/" + MAX_RECORDING_ATTEMPTS
+                        + " in " + RETRY_DELAY_S + "s");
+                exec.schedule(this::runRecordingOnConnect, RETRY_DELAY_S, TimeUnit.SECONDS);
+            } else if (recoveryReconnects < MAX_RECOVERY_RECONNECTS) {
+                // PFTP stayed 106 through every retry on THIS link. A phone-side abrupt drop
+                // (e.g. a Bluetooth toggle after a force-stop) can wedge the H10's PFTP so it
+                // never clears on the same connection — only a fresh link does (what re-strapping
+                // the H10 achieves). Force one clean reconnect and let recovery retry on the fresh
+                // connection (recordingAttempt resets in deviceConnected).
+                recoveryReconnects++;
+                sink.log("recording stuck after retries — forcing clean reconnect "
+                        + recoveryReconnects + "/" + MAX_RECOVERY_RECONNECTS);
+                forceReconnectForRecording();
+            } else {
+                sink.log("recording recovery gave up (PFTP 106 persists) — re-strap H10 to recover");
+            }
         }
+    }
+
+    /** Recovery's PFTP is wedged on the current link — disconnect and reconnect to get a fresh
+     *  bonded link, then recovery retries on the new connection. The SDK treats an explicit
+     *  disconnect as intentional (no auto-reconnect), so we reconnect ourselves. */
+    private void forceReconnectForRecording() {
+        if (stopping || api == null) return;
+        try { api.disconnectFromDevice(id); } catch (Throwable ignored) {}
+        exec.schedule(() -> {
+            if (stopping || api == null) return;
+            try { sink.log("reconnecting after recovery stall"); api.connectToDevice(id); }
+            catch (Throwable t) { sink.log("reconnect failed: " + t.getMessage()); }
+        }, 3, TimeUnit.SECONDS);
     }
 
     /** Stop → fetch → replay+persist → remove a recoverable recording. */
