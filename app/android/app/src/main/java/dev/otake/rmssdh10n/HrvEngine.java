@@ -60,6 +60,9 @@ public final class HrvEngine {
         void backfill(String json);
     }
 
+    /** Relax-mode voice readout sink (Android TextToSpeech in the service). */
+    public interface Speaker { void speak(String text); }
+
     private static final SimpleDateFormat ISO;
     static {
         ISO = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'+09:00'", Locale.US);
@@ -89,6 +92,9 @@ public final class HrvEngine {
     private volatile long connectedSince = 0;    // wall-clock the current BLE connection began (0 = disconnected)
     private long lastReconnectNudge = 0;         // stream-watchdog throttle (tick thread only)
     private volatile int lastBackfillRestored = 0; // points restored by the most recent gap backfill
+    private volatile Speaker speaker;            // relax-mode TTS sink (null = silent)
+    private volatile int relaxIntervalSec = 0;   // 0 = off; else read out every N s
+    private long lastSpokenAt = 0;               // tick-thread throttle for the readout
     private double lastPeakMs = 0;
     private long beats = 0;
     private int lastStepCount = 0;
@@ -140,6 +146,34 @@ public final class HrvEngine {
     }
 
     public void setEmitter(Emitter e) { this.emitter = e; }
+    public void setSpeaker(Speaker s) { this.speaker = s; }
+
+    /** Relax-mode readout interval in seconds (0 = off). Speaks the first reading promptly. */
+    public void setRelaxIntervalSec(int sec) {
+        relaxIntervalSec = Math.max(0, sec);
+        lastSpokenAt = 0; // make the next fresh tick read out immediately
+        Log.i(TAG, "[relax] interval=" + relaxIntervalSec + "s");
+        Speaker sp = speaker;
+        if (sp != null) sp.speak(relaxIntervalSec > 0 ? "リラックス読み上げを開始します。" : "読み上げを停止します。");
+    }
+
+    /** Compose the Japanese relax readout: 心拍 / 呼吸 / RMSSD-vs-baseline / 状態. */
+    private String relaxReadout(Double hr, Double resp, Double respConf, Double rmssd,
+                                Double rmssdSm, Analysis.Base base, Analysis.State state) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("心拍").append(Math.round(hr));
+        if (resp != null && (respConf == null || respConf >= 0.35)) sb.append("、呼吸").append(Math.round(resp));
+        if (rmssd != null) {
+            sb.append("、RMSSDは").append(String.format(java.util.Locale.US, "%.1f", rmssd)); // the 30s card value
+            if (rmssdSm != null && base != null && base.rmssd > 0) {
+                double ratio = rmssdSm / base.rmssd; // direction uses the smoothed value (matches state)
+                sb.append(ratio >= 1.15 ? "、基準より高め" : ratio <= 0.85 ? "、基準より低め" : "、基準どおり");
+            }
+        }
+        if (state != null && state.label != null && !state.label.isEmpty()) sb.append("、").append(state.label);
+        sb.append("。");
+        return sb.toString();
+    }
     public void setUser(int u) { this.user = u; }
 
     /** Seed posture refs + baseline from the WebView's persisted values (JSON). */
@@ -506,6 +540,20 @@ public final class HrvEngine {
             db.setStatus(statusStr, now);
             Emitter e = emitter;
             if (e != null) e.status(statusStr);
+
+            // Relax-mode voice readout. Runs in the service tick, so it speaks with the
+            // screen off / phone in a pocket (the WebView's JS timer would be throttled).
+            // Only on a fresh live reading; silent while disconnected (no nagging).
+            int rint = relaxIntervalSec;
+            Speaker sp = speaker;
+            if (rint > 0 && sp != null && hrVal != null
+                    && connected && lastRrAt > 0 && (now - lastRrAt) < POINT_FRESH_MS
+                    && now - lastSpokenAt >= rint * 1000L) {
+                lastSpokenAt = now;
+                String readout = relaxReadout(hrVal, respOut, respConf, rmssd, rmssdSm, base, state);
+                Log.i(TAG, "[relax] " + readout);
+                sp.speak(readout);
+            }
 
             // Persist a chart point only with a FRESH live reading (connected + an RR
             // arrived within POINT_FRESH_MS). t is floored to the whole second so a

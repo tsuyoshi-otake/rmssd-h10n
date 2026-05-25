@@ -44,6 +44,7 @@ public class MonitorService extends Service {
     private PowerManager.WakeLock wakeLock;
     private HrvDb db;
     private HrvEngine engine;
+    private TtsSpeaker tts; // relax-mode voice readout (created with the engine, on the main thread)
 
     /** Register the WebView-side emitter; applied to a running engine immediately. */
     public static void registerEmitter(HrvEngine.Emitter e) {
@@ -146,6 +147,11 @@ public class MonitorService extends Service {
         engine.setUser(user);
         if (seed != null) engine.seed(seed);
         engine.setEmitter(sEmitter);
+        // TextToSpeech must be constructed on a thread with a Looper; onStartCommand
+        // (hence startEngine) runs on the main thread, so build it here, not lazily
+        // from the plugin's background thread. Idle until relax mode is enabled.
+        if (tts == null) tts = new TtsSpeaker(getApplicationContext());
+        engine.setSpeaker(tts);
         engine.start(mac);
         db().kvPut("engine", "native");
         db().kvPut("deviceMac", mac);
@@ -163,12 +169,15 @@ public class MonitorService extends Service {
     public boolean nativeSetBaseline(double r, double h) { return engine != null && engine.setBaseline(r, h); }
     public String nativeRrLog() { return engine != null ? engine.rrLogJson() : "[]"; }
     public void nativeForegroundEntered() { if (engine != null) engine.foregroundEntered(); }
+    // Relax-mode voice readout interval (0 = off). No-op if the engine isn't running.
+    public void nativeSetRelaxVoice(int sec) { if (engine != null) engine.setRelaxIntervalSec(sec); }
 
     private void stopEngine() {
         // Explicit (user) stop: mark the recording discarded BEFORE teardown so the next
         // launch does NOT auto-recover it. An OS kill goes through onDestroy without this,
         // leaving the recording 'active' so its gap IS recovered on restart.
         if (engine != null) { engine.markUserStopped(); engine.stop(); engine = null; }
+        if (tts != null) { tts.shutdown(); tts = null; }
         db().kvPut("engine", "js");
         Log.i(TAG, "native engine stopped (engine=js)");
     }
@@ -180,6 +189,7 @@ public class MonitorService extends Service {
     @Override
     public void onDestroy() {
         if (engine != null) { engine.stop(); engine = null; }
+        if (tts != null) { tts.shutdown(); tts = null; }
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         wakeLock = null;
         if (INSTANCE == this) INSTANCE = null;

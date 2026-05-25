@@ -112,6 +112,18 @@ public class HrvNativePlugin extends Plugin {
         call.resolve(ret);
     }
 
+    /** Relax-mode voice readout interval in seconds (0 = off; e.g. 60 or 30). */
+    @PluginMethod
+    public void setRelaxVoice(PluginCall call) {
+        int sec = call.getInt("sec", 0);
+        MonitorService s = MonitorService.INSTANCE;
+        if (s != null) s.nativeSetRelaxVoice(sec);
+        JSObject ret = new JSObject();
+        ret.put("ok", s != null);
+        ret.put("sec", sec);
+        call.resolve(ret);
+    }
+
     /** Recent raw RR beats (JSON array string) for the Kubios/Elite-HRV export. */
     @PluginMethod
     public void getRrLog(PluginCall call) {

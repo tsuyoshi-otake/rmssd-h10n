@@ -132,6 +132,14 @@
     .mini .v .unit { font-family: var(--sans); font-size: 11px; color: var(--muted); margin-left: 3px; }
     .chartbox { position: relative; height: 300px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 14px; box-shadow: var(--shadow); }
     .chartbox.trend { height: 220px; }
+    .metricFilter { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 8px; }
+    .metricFilter .flab { font-size: 11px; color: var(--muted); margin-right: 2px; }
+    .mchip { font-size: 12px; padding: 3px 10px 3px 8px; border-radius: 999px; border: 1px solid var(--c, var(--line));
+      background: transparent; color: var(--text); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; line-height: 1.6; }
+    .mchip::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--c, var(--muted)); }
+    .mchip:hover { background: var(--raised); }
+    .mchip.off { opacity: .45; border-color: var(--line); color: var(--muted); }
+    .mchip.off::before { background: var(--muted); }
     canvas { display: block; }
     .section { display: flex; align-items: baseline; gap: 12px; margin: 24px 4px 10px; }
     .section.sub { margin: 14px 4px 6px; }
@@ -271,6 +279,7 @@
         <button id="exportBtn" title="履歴・トレンド・アクティビティ・基準値をCSVで書き出して共有"><span class="lbl-full">エクスポート (CSV)</span></button>
         <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
         <button id="alertBtn" title="座りすぎ・高負荷が続いたら通知">通知: ON</button>
+        <button id="relaxBtn" title="心拍・呼吸・状態を定期的に音声で読み上げ（画面OFFでも・目を閉じて把握できる）">リラックス読み上げ: OFF</button>
         <div class="sep"></div>
         <button id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止">PC共有サーバー: <span id="serverLabel">OFF</span></button>
         <div id="serverUrl" class="srvurl" title="クリックでURLをコピー" style="display:none"></div>
@@ -321,6 +330,14 @@
     <div class="section">
       <span class="section-title">直近15分・詳細（1秒）</span>
       <span id="histInfo2" style="font-size:12px;color:#6e7681"></span>
+    </div>
+    <div class="metricFilter" id="metricFilter" title="表示する指標を切り替え（全グラフ共通・タップでON/OFF）">
+      <span class="flab">表示:</span>
+      <button class="mchip" data-metric="rmssd" style="--c:#58a6ff">RMSSD</button>
+      <button class="mchip" data-metric="hr" style="--c:#f85149">心拍</button>
+      <button class="mchip" data-metric="resp" style="--c:#2dd4bf">呼吸</button>
+      <button class="mchip" data-metric="lean" style="--c:#a78bfa">姿勢</button>
+      <button class="mchip" data-metric="steps" style="--c:#f59e0b">歩数</button>
     </div>
     <div class="chartbox"><canvas id="chart"></canvas></div>
 
@@ -576,8 +593,8 @@
         interaction: { intersect: false, mode: 'index' },
         scales: {
           x: { ticks: { color: '#8b949e', maxTicksLimit: 8 }, grid: { color: '#21262d' } },
-          y: { position: 'left', title: { display: true, text: 'RMSSD (ms)', color: '#58a6ff' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
-          y1: { position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
+          y: { display: 'auto', position: 'left', title: { display: true, text: 'RMSSD (ms)', color: '#58a6ff' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+          y1: { display: 'auto', position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
           y2: { display: false, min: 5, max: 30 },
           y3: { display: false, min: 0, max: 90 },
         },
@@ -604,8 +621,8 @@
         interaction: { intersect: false, mode: 'index' },
         scales: {
           x: { ticks: { color: '#8b949e', maxTicksLimit: 10 }, grid: { color: '#21262d' } },
-          y: { position: 'left', title: { display: true, text: 'RMSSD (ms)', color: '#58a6ff' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
-          y1: { position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
+          y: { display: 'auto', position: 'left', title: { display: true, text: 'RMSSD (ms)', color: '#58a6ff' }, ticks: { color: '#8b949e' }, grid: { color: '#21262d' } },
+          y1: { display: 'auto', position: 'right', title: { display: true, text: 'HR (bpm)', color: '#f85149' }, ticks: { color: '#8b949e' }, grid: { drawOnChartArea: false } },
           y2: { display: false, min: 5, max: 30 },
           y3: { display: false, min: 0, max: 90 },
           y4: { display: false, min: 0, beginAtZero: true }, // steps/bucket (bars, scaled to fit lower band)
@@ -615,6 +632,37 @@
     });
     const trend5Chart = makeTrendChart('trend5Chart');
     const trend15Chart = makeTrendChart('trend15Chart');
+
+    // ---- metric filter: chips to show/hide each series across ALL charts ------
+    // Default all on; the choice persists. Dataset order is shared (index → metric):
+    // the detail chart has the first 4, the trend charts add 歩数 at index 4. Hiding
+    // a dataset whose axis is display:'auto' (y/y1) also tidies away that axis.
+    (function () {
+      const bar = document.getElementById('metricFilter');
+      if (!bar) return;
+      const KEY = 'rmssd-h10n.metricFilter.v1';
+      const BY_INDEX = ['rmssd', 'hr', 'resp', 'lean', 'steps'];
+      const charts = [chart, trend5Chart, trend15Chart];
+      let state = {};
+      try { state = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (_) {}
+      const on = (m) => state[m] !== false; // unset = visible (default = all shown)
+      const apply = () => {
+        for (const c of charts) {
+          c.data.datasets.forEach((ds, i) => { ds.hidden = !on(BY_INDEX[i]); });
+          c.update('none');
+        }
+        bar.querySelectorAll('.mchip').forEach((b) => b.classList.toggle('off', !on(b.dataset.metric)));
+      };
+      bar.querySelectorAll('.mchip').forEach((b) => {
+        b.addEventListener('click', () => {
+          const m = b.dataset.metric;
+          state[m] = !on(m);
+          try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (_) {}
+          apply();
+        });
+      });
+      apply(); // restore saved filter on load (no-op if all on)
+    })();
 
     function redrawFromHistory() {
       chart.data.labels = history.map((p) => new Date(p.t).toLocaleTimeString('ja-JP'));
@@ -1381,6 +1429,38 @@
         try { localStorage.setItem(KEY, isOn() ? '0' : '1'); } catch (_) {}
         render();
       });
+    })();
+
+    // Relax-mode voice readout (Android host only). The native engine in the
+    // foreground service speaks 心拍/呼吸/RMSSD/状態 via TextToSpeech, so it works
+    // with the screen off / phone in a pocket — you can grasp the values with eyes
+    // closed. This button is just the remote control for the interval; cycles
+    // OFF → 1分 → 30秒. The engine resets to off on a fresh start, so re-apply the
+    // saved choice once the engine is up (first status frame).
+    (function () {
+      const btn = document.getElementById('relaxBtn');
+      if (!btn) return;
+      if (!RmssdBridge.nativeEngine) { btn.style.display = 'none'; return; } // native TTS host only
+      const KEY = 'rmssd-h10n.relax.v1';
+      const STEPS = [0, 60, 30];                 // seconds; 0 = off
+      const LABEL = { 0: 'OFF', 60: '1分', 30: '30秒' };
+      const read = () => { const v = parseInt(localStorage.getItem(KEY), 10); return STEPS.includes(v) ? v : 0; };
+      const render = (sec) => { btn.textContent = 'リラックス読み上げ: ' + LABEL[sec]; };
+      const apply = (sec, persist) => {
+        render(sec);
+        try { RmssdBridge.setRelaxVoice(sec); } catch (_) {}
+        if (persist) { try { localStorage.setItem(KEY, String(sec)); } catch (_) {} }
+      };
+      btn.addEventListener('click', () => {
+        const cur = read();
+        apply(STEPS[(STEPS.indexOf(cur) + 1) % STEPS.length], true);
+      });
+      const saved = read();
+      render(saved);
+      if (saved > 0) {
+        let applied = false; // one-shot: re-apply once the engine is running
+        RmssdBridge.onStatus(() => { if (!applied) { applied = true; apply(saved, false); } });
+      }
     })();
 
     document.getElementById('recalPostureBtn').addEventListener('click', async () => {
