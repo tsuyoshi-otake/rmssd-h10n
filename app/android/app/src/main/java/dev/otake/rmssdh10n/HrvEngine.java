@@ -29,7 +29,7 @@ import dev.otake.rmssdh10n.hrv.Steps;
  * The native 1 Hz HRV reporting loop — the service-side counterpart of
  * app/src/monitor.js's _tick(). Runs on a {@link ScheduledExecutorService} (no
  * WebView/JS timer), so it keeps ticking with the screen off. Receives RR/HR/ACC
- * from {@link BleNative}; computes RMSSD/SDNN/HR, posture+sleep-position, steps,
+ * from {@link PolarBle}; computes RMSSD/SDNN/HR, posture+sleep-position, steps,
  * respiration (RSA/Welch), the resting baseline and the autonomic/body state;
  * writes every frame to {@link HrvDb} (source of truth) and pushes live frames to
  * the WebView via the {@link Emitter}. Produces the same status/point keys the

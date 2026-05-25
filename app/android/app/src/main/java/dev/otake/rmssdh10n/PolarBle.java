@@ -39,8 +39,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import io.reactivex.rxjava3.disposables.Disposable;
 
 /**
- * Polar BLE SDK driver — drop-in replacement for {@link BleNative} that keeps the
- * exact same {@link Sink} contract so {@link HrvEngine} is unchanged. It adds what
+ * Polar BLE SDK driver. Exposes the {@link Sink} contract that decouples
+ * {@link HrvEngine} from the BLE layer. It adds what
  * raw GATT could not: the H10's onboard <b>RR exercise recording</b>, used to
  * backfill the measurement gap created while the phone is away / out of range.
  *
@@ -78,10 +78,9 @@ public final class PolarBle {
     private static final long RR_CAP = 95000L;           // ~H10 RR memory limit (truncation heuristic)
     private static final long FULL_DURATION_MS = 18L * 3600 * 1000; // ~18 h
     private static final long TRUNCATE_TAIL_MS = 5L * 60 * 1000;    // unrecorded tail ⇒ memory-full auto-stop
-    private static final String OWNER = "rmssd-h10n";
     private static final String EX_PREFIX = "rmssd-";    // identifier prefix of recordings we own
 
-    /** Same shape as {@link BleNative.Sink} so {@link HrvEngine} swaps drivers freely. */
+    /** BLE-layer contract consumed by {@link HrvEngine} (decouples driver from engine). */
     public interface Sink {
         void onHr(int hr);
         void onRr(double rrMs);
@@ -139,8 +138,6 @@ public final class PolarBle {
     private volatile boolean recordingActive = false;
     private volatile boolean linkConnected = false;   // BLE link up — gates PFTP ops
     private volatile boolean externalBlocking = false;// a non-owned recording occupies the slot
-    private volatile long recordingStartedAtMs = 0;   // our-clock start of the active recording (start-anchor)
-    private volatile String activeExId = null;        // exId of the recording we started
     private int recordingAttempt = 0;                 // exec-thread only — PFTP retry counter
     // CAS-guarded so duplicate feature-ready callbacks can't queue two recording jobs.
     private final AtomicBoolean recordingHandledThisConn = new AtomicBoolean(false);
@@ -513,8 +510,6 @@ public final class PolarBle {
         }
         if (ok) {
             recordingActive = true;
-            recordingStartedAtMs = startReqMs;
-            activeExId = exId;
             if (store != null) store.recActive(exId, System.currentTimeMillis());
             sink.log("RR recording started");
             return true;
