@@ -146,23 +146,6 @@ public final class HrvEngine {
         if (sp != null) sp.speak(relaxIntervalSec > 0 ? "リラックス読み上げを開始します。" : "読み上げを停止します。");
     }
 
-    /** Compose the Japanese relax readout: 心拍 / 呼吸 / RMSSD-vs-baseline / 状態. */
-    private String relaxReadout(Double hr, Double resp, Double respConf, Double rmssd,
-                                Double rmssdSm, Analysis.Base base, Analysis.State state) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("心拍").append(Math.round(hr));
-        if (resp != null && (respConf == null || respConf >= 0.35)) sb.append("、呼吸").append(Math.round(resp));
-        if (rmssd != null) {
-            sb.append("、RMSSDは").append(String.format(java.util.Locale.US, "%.1f", rmssd)); // the 30s card value
-            if (rmssdSm != null && base != null && base.rmssd > 0) {
-                double ratio = rmssdSm / base.rmssd; // direction uses the smoothed value (matches state)
-                sb.append(ratio >= 1.15 ? "、基準より高め" : ratio <= 0.85 ? "、基準より低め" : "、基準どおり");
-            }
-        }
-        if (state != null && state.label != null && !state.label.isEmpty()) sb.append("、").append(state.label);
-        sb.append("。");
-        return sb.toString();
-    }
     public void setUser(int u) { this.user = u; }
 
     /** Seed posture refs + baseline from the WebView's persisted values (JSON). */
@@ -539,7 +522,8 @@ public final class HrvEngine {
                     && connected && lastRrAt > 0 && (now - lastRrAt) < POINT_FRESH_MS
                     && now - lastSpokenAt >= rint * 1000L) {
                 lastSpokenAt = now;
-                String readout = relaxReadout(hrVal, respOut, respConf, rmssd, rmssdSm, base, state);
+                String readout = RelaxReadout.format(hrVal, respOut, respConf, rmssd, rmssdSm,
+                        base != null ? base.rmssd : null, state != null ? state.label : null);
                 Log.i(TAG, "[relax] " + readout);
                 sp.speak(readout);
             }
