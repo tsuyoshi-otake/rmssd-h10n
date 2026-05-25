@@ -233,7 +233,18 @@ public final class HrvEngine {
     public void start(String mac) {
         battWindowStart = System.currentTimeMillis();
         deviceMac = mac;
-        ble = new PolarBle(ctx, mac, withAcc, new PolarBle.Sink() {
+        ble = new PolarBle(ctx, mac, withAcc, createBleSink());
+        ble.setRecordingStore(recStore);
+        ble.start();
+        ticker = Executors.newSingleThreadScheduledExecutor();
+        ticker.scheduleAtFixedRate(this::tickSafe, 1000, 1000, TimeUnit.MILLISECONDS);
+        Log.i(TAG, "engine started (mac=" + mac + ", acc=" + withAcc + ")");
+    }
+
+    /** BLE-layer callback that funnels live HR/RR/ACC + connection state into the engine's
+     *  windows, posture/step accumulators, RR log and the point-freshness gate (lastRrAt). */
+    private PolarBle.Sink createBleSink() {
+        return new PolarBle.Sink() {
             @Override public void onHr(int hr) { deviceHr = hr; }
             @Override public void onRr(double rrMs) {
                 lastRrAt = System.currentTimeMillis();
@@ -260,12 +271,7 @@ public final class HrvEngine {
                 if (!c) deviceHr = null;
             }
             @Override public void log(String m) { Log.i(TAG, "[ble] " + m); }
-        });
-        ble.setRecordingStore(recStore);
-        ble.start();
-        ticker = Executors.newSingleThreadScheduledExecutor();
-        ticker.scheduleAtFixedRate(this::tickSafe, 1000, 1000, TimeUnit.MILLISECONDS);
-        Log.i(TAG, "engine started (mac=" + mac + ", acc=" + withAcc + ")");
+        };
     }
 
     public void stop() {
