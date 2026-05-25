@@ -6,7 +6,6 @@ import android.util.Log;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -15,7 +14,6 @@ import java.util.concurrent.TimeUnit;
 import dev.otake.rmssdh10n.hrv.Analysis;
 import dev.otake.rmssdh10n.hrv.BodyState;
 import dev.otake.rmssdh10n.hrv.Posture;
-import dev.otake.rmssdh10n.hrv.Respiration;
 import dev.otake.rmssdh10n.hrv.Rmssd;
 import dev.otake.rmssdh10n.hrv.Steps;
 
@@ -31,12 +29,6 @@ import dev.otake.rmssdh10n.hrv.Steps;
  */
 public final class HrvEngine {
     private static final String TAG = "HrvEngine";
-    private static final long RESP_WINDOW_MS = 120000;
-    // Respiration is a ~1–2 min average, so a single failed 3 s recompute must not
-    // blank the readout. Hold the last good estimate and decay its confidence to 0
-    // over RESP_HOLD_MS of staleness; only then drop to null. (Schäfer & Kratky
-    // 2008: RSA-derived rate is stable over >1 min windows.)
-    private static final long RESP_HOLD_MS = 120000;
     // Only persist a chart point when a live RR arrived this recently. While
     // disconnected the RMSSD window keeps stale values (it evicts by beat-time, not
     // wall-time), so writing then would fill the gap with a flat fake line AND block
@@ -88,13 +80,8 @@ public final class HrvEngine {
 
     // raw RR log for the Kubios/Elite-HRV export: {wallMs, rr, accepted}
     private final List<double[]> rrLog = new ArrayList<>();
-    // respiration buffer (accepted NN beats) + smoothing history + throttle
-    private final List<double[]> respBuffer = new ArrayList<>(); // {tMs, rr}
-    private final List<double[]> respHistory = new ArrayList<>(); // {brpm, conf}
-    private int respEvery = 3;
-    private boolean respPreview = false;
-    private long respLastGoodMs = 0;       // wall-clock of the most recent accepted estimate
-    private long respLastLogMs = 0;        // throttle for dropout-reason logging
+    // RSA respiration estimate: accepted-NN buffer + Welch recompute + last-good hold.
+    private final RespirationTracker respiration = new RespirationTracker(3);
 
     // daily steps {day, total}
     private long stepDay = 0;
@@ -254,11 +241,7 @@ public final class HrvEngine {
                     win5.add(lastPeakMs, rrMs);
                     rrLog.add(new double[]{ System.currentTimeMillis(), rrMs, accepted ? 1 : 0 });
                     if (rrLog.size() > 2500) rrLog.remove(0);
-                    if (accepted) {
-                        respBuffer.add(new double[]{ lastPeakMs, rrMs });
-                        double cutoff = lastPeakMs - RESP_WINDOW_MS;
-                        while (!respBuffer.isEmpty() && respBuffer.get(0)[0] < cutoff) respBuffer.remove(0);
-                    }
+                    if (accepted) respiration.addAcceptedBeat(lastPeakMs, rrMs);
                 }
             }
             @Override public void onAcc(int x, int y, int z) {
@@ -369,37 +352,9 @@ public final class HrvEngine {
             base = baseline.get();
             state = classifier.update(rmssdSmInner, hrInner, base, now);
 
-            // Respiration: recompute the heavy Welch PSD only every few ticks.
-            if (tickCount % respEvery == 0) {
-                int m = respBuffer.size();
-                double[] xs = new double[m], ys = new double[m];
-                for (int i = 0; i < m; i++) { xs[i] = respBuffer.get(i)[0]; ys[i] = respBuffer.get(i)[1]; }
-                Respiration.Result rr = Respiration.estimate(xs, ys);
-                if (rr.breathsPerMin != null && (rr.valid || rr.preview)) {
-                    respHistory.add(new double[]{ rr.breathsPerMin, rr.confidence });
-                    if (respHistory.size() > 5) respHistory.remove(0);
-                    respPreview = rr.preview;
-                    respLastGoodMs = now;
-                } else if (now - respLastLogMs > 30000) {
-                    // Throttled dropout diagnostics (P4): see why estimates are missing.
-                    Log.i(TAG, "[resp] miss reason=" + rr.reason + " snr=" + rr.snr
-                            + " f=" + rr.freqHz + " buf=" + m);
-                    respLastLogMs = now;
-                }
-                // NOTE: a failed recompute does NOT clear history — see hold below.
-            }
-            // Last-good hold: keep the smoothed value alive and fade its confidence
-            // with staleness; only drop to null once the estimate is too old.
-            long staleAge = respLastGoodMs > 0 ? (now - respLastGoodMs) : Long.MAX_VALUE;
-            if (staleAge > RESP_HOLD_MS) { respHistory.clear(); respPreview = false; }
-            previewOut = respPreview;
-            if (!respHistory.isEmpty()) {
-                List<Double> brs = new ArrayList<>(), cfs = new ArrayList<>();
-                for (double[] e : respHistory) { brs.add(e[0]); cfs.add(e[1]); }
-                double decay = Math.max(0, 1 - (double) staleAge / RESP_HOLD_MS);
-                respOut = round1(medianOf(brs));
-                respConf = round2(medianOf(cfs) * decay);
-            } else { previewOut = false; }
+            // Respiration (RSA): Welch recompute throttled inside the tracker + last-good hold.
+            RespirationTracker.Result resp = respiration.compute(now, tickCount);
+            respOut = resp.brpm; respConf = resp.confidence; previewOut = resp.preview;
 
             double lnDelta0 = (base != null && rmssdSmInner != null && base.rmssd > 0)
                 ? Math.log(rmssdSmInner / base.rmssd) : Double.NaN;
@@ -541,13 +496,6 @@ public final class HrvEngine {
         } catch (Exception ignored) {}
     }
 
-    private static double medianOf(List<Double> a) {
-        if (a.isEmpty()) return 0;
-        List<Double> s = new ArrayList<>(a);
-        Collections.sort(s);
-        int m = s.size() >> 1;
-        return (s.size() % 2 == 1) ? s.get(m) : (s.get(m - 1) + s.get(m)) / 2.0;
-    }
     private static double round1(double v) { return Math.round(v * 10.0) / 10.0; }
     private static double round2(double v) { return Math.round(v * 100.0) / 100.0; }
 }
