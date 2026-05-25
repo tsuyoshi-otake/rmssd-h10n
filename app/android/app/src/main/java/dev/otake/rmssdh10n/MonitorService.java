@@ -77,19 +77,7 @@ public class MonitorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Intent open = new Intent(this, MainActivity.class);
-        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT
-                | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
-        PendingIntent pi = PendingIntent.getActivity(this, 0, open, piFlags);
-
-        Notification n = new NotificationCompat.Builder(this, CHANNEL)
-                .setContentTitle("RMSSD モニタリング")
-                .setContentText("心拍変動を計測中（バックグラウンド）")
-                .setSmallIcon(R.mipmap.ic_launcher)
-                .setOngoing(true)
-                .setContentIntent(pi)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build();
+        Notification n = buildNotification(false);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
@@ -108,6 +96,34 @@ public class MonitorService extends Service {
 
         handleIntent(intent);
         return START_STICKY; // restart if the OS kills us
+    }
+
+    /** Build the ongoing foreground notification. When {@code stale}, the text flags a
+     *  connected-but-silent link (a post-force-stop orphan the watchdog can't always clear
+     *  from the phone side) and tells the user the one thing that reliably fixes it. */
+    private Notification buildNotification(boolean stale) {
+        Intent open = new Intent(this, MainActivity.class);
+        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT
+                | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
+        PendingIntent pi = PendingIntent.getActivity(this, 0, open, piFlags);
+        return new NotificationCompat.Builder(this, CHANNEL)
+                .setContentTitle("RMSSD モニタリング")
+                .setContentText(stale ? "H10が無反応 — センサーを付け直してください"
+                                      : "心拍変動を計測中（バックグラウンド）")
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setOngoing(true)
+                .setContentIntent(pi)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build();
+    }
+
+    /** Flip the ongoing notification between normal and "re-attach H10". Called from the
+     *  engine tick thread on a state change only; NotificationManager.notify is thread-safe. */
+    private void updateNotification(boolean stale) {
+        try {
+            NotificationManager nm = getSystemService(NotificationManager.class);
+            if (nm != null) nm.notify(NOTIF_ID, buildNotification(stale));
+        } catch (Throwable ignored) {}
     }
 
     private void handleIntent(Intent intent) {
@@ -152,6 +168,7 @@ public class MonitorService extends Service {
         // from the plugin's background thread. Idle until relax mode is enabled.
         if (tts == null) tts = new TtsSpeaker(getApplicationContext());
         engine.setSpeaker(tts);
+        engine.setLinkStateSink(this::updateNotification); // surface a stalled link in the notification
         engine.start(mac);
         db().kvPut("engine", "native");
         db().kvPut("deviceMac", mac);
@@ -173,10 +190,12 @@ public class MonitorService extends Service {
     public void nativeSetRelaxVoice(int sec) { if (engine != null) engine.setRelaxIntervalSec(sec); }
 
     private void stopEngine() {
-        // Explicit (user) stop: mark the recording discarded BEFORE teardown so the next
-        // launch does NOT auto-recover it. An OS kill goes through onDestroy without this,
-        // leaving the recording 'active' so its gap IS recovered on restart.
-        if (engine != null) { engine.markUserStopped(); engine.stop(); engine = null; }
+        // Explicit (user) stop. Halt the engine/BLE worker FIRST, THEN mark the recording
+        // discarded — otherwise an in-flight startRecording on the worker could write 'active'
+        // back AFTER the discard, making the next launch treat it as an OS-kill gap to recover.
+        // (An OS kill goes through onDestroy WITHOUT markUserStopped, leaving it 'active' so its
+        // gap IS recovered on restart — preserving that distinction is the whole point.)
+        if (engine != null) { engine.stop(); engine.markUserStopped(); engine = null; }
         if (tts != null) { tts.shutdown(); tts = null; }
         db().kvPut("engine", "js");
         Log.i(TAG, "native engine stopped (engine=js)");

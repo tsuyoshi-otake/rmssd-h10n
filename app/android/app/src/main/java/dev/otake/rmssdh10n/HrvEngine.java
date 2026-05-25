@@ -35,10 +35,14 @@ public final class HrvEngine {
     // the offline backfill (its "skip seconds already present" would skip the gap).
     private static final long POINT_FRESH_MS = 5000;
     // GATT can report 'connected' while the streams never deliver (an abrupt OS kill can
-    // orphan the H10's side, leaving a half-open link). If no RR arrives within this window
-    // after a connection begins, the stream watchdog forces a reconnect to re-establish
-    // streams + the recording recovery on a fresh GATT.
-    private static final long STALE_STREAM_MS = 35000;
+    // orphan the H10's side, leaving a half-open link). The stream watchdog first re-subscribes
+    // (gentle); if RR still never arrives it escalates to a forced clean reconnect — a
+    // re-subscribe cannot heal a half-open link, only a fresh GATT can.
+    private static final long STALE_STREAM_MS = 35000;        // no RR this long after connect ⇒ first (gentle) nudge
+    private static final long STALE_ACTION_MS = 45000;        // min spacing between watchdog actions
+    private static final long STALE_FORCE_MS  = 70000;        // still no RR this long ⇒ escalate to a forced reconnect
+    private static final int  MAX_STALE_FORCE_RECONNECTS = 3; // bound forced reconnects per stale episode (churn guard)
+    private static final long NOTIF_STALE_MS  = 20000;        // connected but no fresh RR this long ⇒ notify "re-attach H10"
 
     public interface Emitter {
         void status(String json);
@@ -48,6 +52,10 @@ public final class HrvEngine {
 
     /** Relax-mode voice readout sink (Android TextToSpeech in the service). */
     public interface Speaker { void speak(String text); }
+
+    /** Surfaces a stalled link to the foreground notification (connected but no RR —
+     *  e.g. a post-force-stop orphan the watchdog can't clear from the phone side). */
+    public interface LinkStateSink { void onLinkStale(boolean stale); }
 
     private final Context ctx;
     private final HrvDb db;
@@ -70,10 +78,13 @@ public final class HrvEngine {
     private volatile long lastRrAt = 0;          // wall-clock of the last RR received (point-freshness gate)
     private volatile long connectedSince = 0;    // wall-clock the current BLE connection began (0 = disconnected)
     private long lastReconnectNudge = 0;         // stream-watchdog throttle (tick thread only)
+    private int  staleForceReconnects = 0;       // forced reconnects this stale episode (tick thread only)
     private volatile int lastBackfillRestored = 0; // points restored by the most recent gap backfill
     private volatile Speaker speaker;            // relax-mode TTS sink (null = silent)
     private volatile int relaxIntervalSec = 0;   // 0 = off; else read out every N s
     private long lastSpokenAt = 0;               // tick-thread throttle for the readout
+    private volatile LinkStateSink linkStateSink; // foreground-notification link hint (null = none)
+    private boolean linkStaleShown = false;       // last reported link-stale state (tick thread only)
     private double lastPeakMs = 0;
     private long beats = 0;
     private int lastStepCount = 0;
@@ -122,6 +133,7 @@ public final class HrvEngine {
 
     public void setEmitter(Emitter e) { this.emitter = e; }
     public void setSpeaker(Speaker s) { this.speaker = s; }
+    public void setLinkStateSink(LinkStateSink s) { this.linkStateSink = s; }
 
     /** Relax-mode readout interval in seconds (0 = off). Speaks the first reading promptly. */
     public void setRelaxIntervalSec(int sec) {
@@ -318,17 +330,39 @@ public final class HrvEngine {
         tickCount++;
         battTicks++;
 
-        // Stream watchdog: GATT 'connected' but NO RR since this connection began (≥35 s) is a
-        // stalled link (a stream subscription errored). Re-subscribe the streams (throttled
-        // 60 s). Gentle — no disconnect; a true orphan (after a force-stop) needs a BT toggle.
+        // Stream watchdog: GATT 'connected' but NO RR since this connection began is a stalled
+        // link. Re-subscribe first (gentle); if RR still never arrives, the link is a half-open
+        // orphan a re-subscribe can't fix → force a clean reconnect, bounded per episode so the
+        // churn can't wedge the scanner. The force budget resets as soon as RR flows again.
         long cs = connectedSince;
+        if (lastRrAt > 0 && now - lastRrAt < POINT_FRESH_MS) staleForceReconnects = 0;
         if (connected && cs > 0 && now - cs > STALE_STREAM_MS && lastRrAt < cs
-                && now - lastReconnectNudge > 60000) {
-            lastReconnectNudge = now;
-            Log.w(TAG, "[ble] stream watchdog: no RR " + ((now - cs) / 1000) + "s after connect — re-subscribing");
+                && now - lastReconnectNudge > STALE_ACTION_MS) {
             PolarBle b = ble;
-            if (b != null) b.nudgeStreams();
+            if (b != null) {
+                lastReconnectNudge = now;
+                if (now - cs > STALE_FORCE_MS && staleForceReconnects < MAX_STALE_FORCE_RECONNECTS) {
+                    staleForceReconnects++;
+                    Log.w(TAG, "[ble] stream watchdog: no RR " + ((now - cs) / 1000) + "s — forcing clean reconnect "
+                            + staleForceReconnects + "/" + MAX_STALE_FORCE_RECONNECTS);
+                    b.forceReconnect();
+                } else {
+                    Log.w(TAG, "[ble] stream watchdog: no RR " + ((now - cs) / 1000) + "s after connect — re-subscribing");
+                    b.nudgeStreams();
+                }
+            }
         }
+
+        // Foreground-notification link hint: connected but no fresh RR for a while (a
+        // post-force-stop orphan the watchdog can't always clear from the phone side, or a
+        // mid-session stall). Surface "re-attach H10"; only RR actually resuming clears it, so
+        // the brief blip of a forced reconnect doesn't make it flap.
+        boolean delivering = lastRrAt > 0 && now - lastRrAt < POINT_FRESH_MS;
+        boolean quiet = !delivering && (
+                (cs > 0 && lastRrAt < cs && now - cs > NOTIF_STALE_MS)     // connected, never delivered (orphan)
+             || (lastRrAt > 0 && now - lastRrAt > NOTIF_STALE_MS));        // delivered before, now silent (stall)
+        if (delivering && linkStaleShown) { linkStaleShown = false; notifyLinkStale(false); }
+        else if (quiet && !linkStaleShown) { linkStaleShown = true; notifyLinkStale(true); }
 
         Rmssd.Result r, r5;
         Posture.Result p;
@@ -494,6 +528,11 @@ public final class HrvEngine {
             String s = db.kvGet("baseline");
             if (s != null) { JSONObject o = new JSONObject(s); if (o.has("rmssd") && o.has("hr")) baseline.loadFrozen(o.optDouble("rmssd"), o.optDouble("hr")); }
         } catch (Exception ignored) {}
+    }
+
+    private void notifyLinkStale(boolean stale) {
+        LinkStateSink ls = linkStateSink;
+        if (ls != null) { try { ls.onLinkStale(stale); } catch (Throwable ignored) {} }
     }
 
     private static double round1(double v) { return Math.round(v * 10.0) / 10.0; }

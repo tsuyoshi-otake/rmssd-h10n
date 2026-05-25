@@ -194,27 +194,31 @@ public final class HrvDb extends SQLiteOpenHelper implements RecordingBackfillSt
         ContentValues cv = new ContentValues();
         cv.put("state", "active"); cv.put("start_ack_ms", startAckMs);
         cv.put("updated_at", System.currentTimeMillis());
-        getWritableDatabase().update("recordings", cv, "ex_id=?", new String[]{ exId });
+        getWritableDatabase().update("recordings", cv,
+                "ex_id=? AND state != 'discarded_by_user'", new String[]{ exId });
     }
 
     public synchronized void recordingSetState(String exId, String state) {
         ContentValues cv = new ContentValues();
         cv.put("state", state); cv.put("updated_at", System.currentTimeMillis());
-        getWritableDatabase().update("recordings", cv, "ex_id=?", new String[]{ exId });
+        getWritableDatabase().update("recordings", cv,
+                "ex_id=? AND state != 'discarded_by_user'", new String[]{ exId });
     }
 
     public synchronized void recordingSetFetched(String exId, long rrCount, long durationMs, int truncated) {
         ContentValues cv = new ContentValues();
         cv.put("rr_count", rrCount); cv.put("duration_ms", durationMs); cv.put("truncated", truncated);
         cv.put("state", "fetching"); cv.put("updated_at", System.currentTimeMillis());
-        getWritableDatabase().update("recordings", cv, "ex_id=?", new String[]{ exId });
+        getWritableDatabase().update("recordings", cv,
+                "ex_id=? AND state != 'discarded_by_user'", new String[]{ exId });
     }
 
     public synchronized void recordingMarkRemoved(String exId) {
         ContentValues cv = new ContentValues();
         cv.put("state", "removed"); cv.put("remove_status", "done");
         cv.put("updated_at", System.currentTimeMillis());
-        getWritableDatabase().update("recordings", cv, "ex_id=?", new String[]{ exId });
+        getWritableDatabase().update("recordings", cv,
+                "ex_id=? AND state != 'discarded_by_user'", new String[]{ exId });
     }
 
     /** Mark every still-open recording as user-discarded so it is NOT auto-recovered
@@ -246,31 +250,34 @@ public final class HrvDb extends SQLiteOpenHelper implements RecordingBackfillSt
      *  boundary second is never overwritten by a null-posture backfill point) AND
      *  record the import range in the ledger — one transaction, so a crash can't leave
      *  points without their ledger entry (or vice-versa). {@code points} = list of
-     *  {Long tMs, String json}. Returns the new import row id. */
-    public synchronized long backfillCommit(List<Object[]> points, long fromMs, long toMs, int restored,
+     *  {Long tMs, String json}. Returns the number of points ACTUALLY inserted (rows a
+     *  live second already occupied are ignored), which is what the ledger/UI report. */
+    public synchronized long backfillCommit(List<Object[]> points, long fromMs, long toMs,
                                             long anchorStartMs, String exId, int truncated, int baselineVersion) {
         flush(); // make pending live points visible/ordered before this txn
         SQLiteDatabase db = getWritableDatabase();
-        long importId;
+        int inserted = 0;
         db.beginTransaction();
         try {
             for (Object[] p : points) {
                 ContentValues cv = new ContentValues();
                 cv.put("t_ms", (Long) p[0]);
                 cv.put("json", (String) p[1]);
-                db.insertWithOnConflict("points", null, cv, SQLiteDatabase.CONFLICT_IGNORE);
+                // CONFLICT_IGNORE returns -1 when a live point already holds this second
+                // (it landed between pointTimesIn and this txn) — count only real inserts.
+                if (db.insertWithOnConflict("points", null, cv, SQLiteDatabase.CONFLICT_IGNORE) != -1) inserted++;
             }
             ContentValues iv = new ContentValues();
-            iv.put("from_ms", fromMs); iv.put("to_ms", toMs); iv.put("restored", restored);
+            iv.put("from_ms", fromMs); iv.put("to_ms", toMs); iv.put("restored", inserted);
             iv.put("anchor_start_ms", anchorStartMs); iv.put("ex_id", exId);
             iv.put("truncated", truncated); iv.put("baseline_version", baselineVersion);
             iv.put("merged_to_ui", 0); iv.put("created_at", System.currentTimeMillis());
-            importId = db.insert("backfill_imports", null, iv);
+            db.insert("backfill_imports", null, iv);
             db.setTransactionSuccessful();
         } finally {
             db.endTransaction();
         }
-        return importId;
+        return inserted;
     }
 
     /** Unmerged import ranges as a JSON array string for the WebView catch-up. */

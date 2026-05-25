@@ -38,11 +38,11 @@ public class RecordingBackfillStoreTest {
         @Override public void recordingSetFetched(String exId, long rrCount, long durationMs, int truncated) { fetchTrunc = truncated; }
         @Override public void recordingMarkRemoved(String exId) { removedExId = exId; }
         @Override public Set<Long> pointTimesIn(long fromMs, long toMs) { return existing; }
-        @Override public long backfillCommit(List<Object[]> points, long fromMs, long toMs, int restored,
+        @Override public long backfillCommit(List<Object[]> points, long fromMs, long toMs,
                                              long anchorStartMs, String exId, int truncated, int baselineVersion) {
             if (commitThrows) throw new RuntimeException("commit boom");
-            committed = true; committedRestored = restored; committedBlv = baselineVersion;
-            return 1L;
+            committed = true; committedRestored = points.size(); committedBlv = baselineVersion;
+            return points.size(); // fake "actually inserted" = all attempted (no real dedup here)
         }
     }
 

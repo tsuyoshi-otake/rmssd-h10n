@@ -35,7 +35,9 @@ final class RecordingBackfillStore implements PolarBle.RecordingStore {
         void recordingSetFetched(String exId, long rrCount, long durationMs, int truncated);
         void recordingMarkRemoved(String exId);
         Set<Long> pointTimesIn(long fromMs, long toMs);
-        long backfillCommit(List<Object[]> points, long fromMs, long toMs, int restored,
+        /** Returns the number of points ACTUALLY inserted (CONFLICT_IGNORE may drop a second a
+         *  live point already filled), so the ledger/UI count reflects reality. */
+        long backfillCommit(List<Object[]> points, long fromMs, long toMs,
                             long anchorStartMs, String exId, int truncated, int baselineVersion);
     }
 
@@ -99,13 +101,14 @@ final class RecordingBackfillStore implements PolarBle.RecordingStore {
             long from = pts.get(0).tMs, to = pts.get(pts.size() - 1).tMs;
             Set<Long> existing = db.pointTimesIn(from, to);
             List<Object[]> rows = buildRows(pts, existing, now);
-            int inserted = rows.size();
             // One transaction: INSERT OR IGNORE points + ledger row — crash-atomic and idempotent
-            // so a removeExercise failure can be retried without double-counting.
-            db.backfillCommit(rows, from, to, inserted, anchorStartMs, exId, truncated ? 1 : 0, base.version);
-            Log.i(TAG, "[backfill] restored " + inserted + " pts over " + ((to - from) / 1000) + "s"
+            // so a removeExercise failure can be retried without double-counting. The returned
+            // count is the ACTUAL inserts (a live point may have filled a boundary second between
+            // pointTimesIn above and the commit), so 'restored' never over-reports.
+            int restored = (int) db.backfillCommit(rows, from, to, anchorStartMs, exId, truncated ? 1 : 0, base.version);
+            Log.i(TAG, "[backfill] restored " + restored + " pts over " + ((to - from) / 1000) + "s"
                     + (truncated ? " (truncated)" : ""));
-            host.onBackfilled(inserted, from, to, truncated);
+            host.onBackfilled(restored, from, to, truncated);
             return true;
         } catch (Throwable t) {
             Log.e(TAG, "backfill failed", t);

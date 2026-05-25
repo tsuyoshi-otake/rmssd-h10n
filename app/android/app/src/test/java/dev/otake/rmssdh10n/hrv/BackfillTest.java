@@ -177,4 +177,28 @@ public class BackfillTest {
                     1000L, pts.get(i).tMs - pts.get(i - 1).tMs);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Tail off-by-one: a last beat that does NOT fall on a whole-second boundary
+    // must still be swept (the closing second emitted), not dropped ~1 s early.
+    // 50 beats of 950 ms ⇒ last beat at ANCHOR + 47 500 ms (off boundary); the
+    // final emitted second must be its ceil-second (ANCHOR + 48 000), not floor.
+    // -----------------------------------------------------------------------
+    @Test
+    public void lastPartialSecondIsCovered() {
+        int beats = 50;
+        double[] rrMs = new double[beats];
+        for (int i = 0; i < beats; i++) rrMs[i] = 950.0;
+
+        List<Backfill.Pt> pts = Backfill.replay(rrMs, ANCHOR, 40.0, 60.0);
+        assertTrue("should produce points", !pts.isEmpty());
+
+        long lastBeat = ANCHOR + (long) beats * 950L;                    // ANCHOR + 47 500
+        long expectedLast = (long) Math.ceil(lastBeat / 1000.0) * 1000L; // ANCHOR + 48 000
+        assertEquals("final (ceil) second of the last beat must be emitted",
+                expectedLast, pts.get(pts.size() - 1).tMs);
+        for (int i = 1; i < pts.size(); i++) {
+            assertEquals("tMs step=1000 at i=" + i, 1000L, pts.get(i).tMs - pts.get(i - 1).tMs);
+        }
+    }
 }

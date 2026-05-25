@@ -22,9 +22,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import io.reactivex.rxjava3.disposables.Disposable;
 
@@ -133,6 +135,15 @@ public final class PolarBle {
     private int recoveryReconnects = 0;               // exec-thread only — bounded forced reconnects on stuck PFTP
     // CAS-guarded so duplicate feature-ready callbacks can't queue two recording jobs.
     private final AtomicBoolean recordingHandledThisConn = new AtomicBoolean(false);
+    // Bumped on every (re)connect. The recording job + its retries capture the gen they
+    // belong to and bail if a newer connection has superseded them — so a retry scheduled
+    // under a dropped connection never runs against a fresh one (the counters above are
+    // reset per-connection on exec, keeping them exec-thread-confined).
+    private final AtomicInteger connGen = new AtomicInteger(0);
+    // Serializes the live-stream subscription lifecycle (start/dispose). bleSdkFeatureReady
+    // fires on the SDK callback thread while nudgeStreams runs on exec; without this the
+    // check-then-set on hrDis/accDis could double-subscribe and double-count RR.
+    private final Object streamLock = new Object();
 
     public PolarBle(Context ctx, String mac, boolean withAcc, Sink sink) {
         this.ctx = ctx.getApplicationContext();
@@ -182,6 +193,13 @@ public final class PolarBle {
         if (a != null) { try { a.foregroundEntered(); } catch (Throwable ignored) {} }
     }
 
+    /** Run work on the BLE worker, swallowing the rejection that happens if a teardown
+     *  already shut the executor down (callbacks can still fire mid-stop). */
+    private void execSafe(Runnable r) {
+        if (stopping) return;
+        try { exec.execute(r); } catch (RejectedExecutionException ignored) {}
+    }
+
     /** Re-subscribe the live streams when the link is 'connected' but no data is flowing
      *  (a stream subscription errored). Gentle on purpose: it does NOT disconnect — an
      *  explicit disconnect won't auto-reconnect (the SDK treats it as intentional) and a
@@ -190,13 +208,21 @@ public final class PolarBle {
      *  abrupt kill), only a Bluetooth toggle clears it. Driven by HrvEngine's watchdog. */
     public void nudgeStreams() {
         if (stopping || api == null) return;
-        exec.execute(() -> {
+        execSafe(() -> {
             if (stopping || api == null || !linkConnected) return;
             sink.log("nudge: re-subscribing streams (stale)");
             disposeStreams();
             startHr();
             if (withAcc) startAcc();
         });
+    }
+
+    /** Stream watchdog escalation: a 'connected' link that never delivered RR is a half-open
+     *  orphan (e.g. after a force-stop / abrupt kill). Re-subscribing can't fix that — only a
+     *  fresh link does. Force one clean disconnect→reconnect; the caller (HrvEngine watchdog)
+     *  bounds how many times this runs per stale episode so churn can't wedge the scanner. */
+    public void forceReconnect() {
+        execSafe(this::cleanReconnect);
     }
 
     public void stop() {
@@ -228,7 +254,8 @@ public final class PolarBle {
         @Override public void deviceConnected(PolarDeviceInfo info) {
             linkConnected = true;
             recordingHandledThisConn.set(false);
-            recordingAttempt = 0;
+            connGen.incrementAndGet();              // supersede retries scheduled under a prior connection
+            execSafe(() -> recordingAttempt = 0);   // reset the per-connection retry budget on exec
             sink.onConnected(true);
             sink.log("connected " + info.getDeviceId());
         }
@@ -237,7 +264,7 @@ public final class PolarBle {
             linkConnected = false;
             sink.onConnected(false);
             recordingHandledThisConn.set(false);
-            disposeStreams();
+            disposeStreams();  // streamLock-guarded; safe vs a concurrent startHr on exec
             sink.log("disconnected");
         }
         @Override public void bleSdkFeatureReady(String identifier, PolarBleApi.PolarBleSdkFeature feature) {
@@ -255,7 +282,11 @@ public final class PolarBle {
                         // Running heavy blocking PFTP ops on the single BLE link right at
                         // connect competed with stream setup and dropped the connection,
                         // and the H10 returns OPERATION_NOT_PERMITTED(106) until it settles.
-                        exec.schedule(PolarBle.this::runRecordingOnConnect, RECORDING_DEFER_S, TimeUnit.SECONDS);
+                        final int gen = connGen.get();   // this connection's generation
+                        if (!stopping) {
+                            try { exec.schedule(() -> runRecordingOnConnect(gen), RECORDING_DEFER_S, TimeUnit.SECONDS); }
+                            catch (RejectedExecutionException ignored) {}
+                        }
                     }
                     break;
                 default:
@@ -272,33 +303,37 @@ public final class PolarBle {
 
     // --- live streams (non-blocking; emit on the SDK thread into the Sink) --
     private void startHr() {
-        if (hrDis != null && !hrDis.isDisposed()) return;
-        hrDis = api.startHrStreaming(id).subscribe(
-                data -> {
-                    for (PolarHrData.PolarHrSample s : data.getSamples()) {
-                        sink.onHr(s.getHr());
-                        for (Integer rr : s.getRrsMs()) sink.onRr(rr.doubleValue());
-                    }
-                },
-                err -> { sink.log("hr stream err: " + err.getMessage()); hrDis = null; });
+        synchronized (streamLock) {
+            if (api == null || (hrDis != null && !hrDis.isDisposed())) return;
+            hrDis = api.startHrStreaming(id).subscribe(
+                    data -> {
+                        for (PolarHrData.PolarHrSample s : data.getSamples()) {
+                            sink.onHr(s.getHr());
+                            for (Integer rr : s.getRrsMs()) sink.onRr(rr.doubleValue());
+                        }
+                    },
+                    err -> { sink.log("hr stream err: " + err.getMessage()); hrDis = null; });
+        }
     }
 
     private void startAcc() {
-        if (accDis != null && !accDis.isDisposed()) return;
-        // Query the device's actual ACC capabilities and pick from them (25 Hz / ±2 G /
-        // 16-bit when offered) instead of hardcoding — the H10 rejects unsupported combos
-        // (a wrong/extra key made startAccStreaming error and posture never got samples).
-        accDis = api.requestStreamSettings(id, PolarBleApi.PolarDeviceDataType.ACC)
-                .toFlowable()
-                .flatMap(available -> api.startAccStreaming(id, pickAccSetting(available)))
-                .subscribe(
-                        data -> {
-                            for (PolarAccelerometerData.PolarAccelerometerDataSample s : data.getSamples()) {
-                                sink.onAcc(s.getX(), s.getY(), s.getZ());
-                            }
-                        },
-                        err -> { sink.log("acc stream err: " + err.getMessage()); accDis = null; });
-        sink.log("ACC streaming requested");
+        synchronized (streamLock) {
+            if (api == null || (accDis != null && !accDis.isDisposed())) return;
+            // Query the device's actual ACC capabilities and pick from them (25 Hz / ±2 G /
+            // 16-bit when offered) instead of hardcoding — the H10 rejects unsupported combos
+            // (a wrong/extra key made startAccStreaming error and posture never got samples).
+            accDis = api.requestStreamSettings(id, PolarBleApi.PolarDeviceDataType.ACC)
+                    .toFlowable()
+                    .flatMap(available -> api.startAccStreaming(id, pickAccSetting(available)))
+                    .subscribe(
+                            data -> {
+                                for (PolarAccelerometerData.PolarAccelerometerDataSample s : data.getSamples()) {
+                                    sink.onAcc(s.getX(), s.getY(), s.getZ());
+                                }
+                            },
+                            err -> { sink.log("acc stream err: " + err.getMessage()); accDis = null; });
+            sink.log("ACC streaming requested");
+        }
     }
 
     /** Choose a light, supported ACC setting from what the device actually offers:
@@ -322,10 +357,12 @@ public final class PolarBle {
     }
 
     private void disposeStreams() {
-        Disposable h = hrDis, a = accDis;
-        hrDis = null; accDis = null;
-        if (h != null) { try { h.dispose(); } catch (Throwable ignored) {} }
-        if (a != null) { try { a.dispose(); } catch (Throwable ignored) {} }
+        synchronized (streamLock) {
+            Disposable h = hrDis, a = accDis;
+            hrDis = null; accDis = null;
+            if (h != null) { try { h.dispose(); } catch (Throwable ignored) {} }
+            if (a != null) { try { a.dispose(); } catch (Throwable ignored) {} }
+        }
     }
 
     // --- recording lifecycle (exec thread; blocking RxJava is fine here) -----
@@ -336,8 +373,8 @@ public final class PolarBle {
      *  present (across reconnects AND app/OS restarts), else starts fresh while guarding
      *  a foreign slot. On a transient PFTP failure it retries rather than overwriting the
      *  not-yet-recovered gap. */
-    private void runRecordingOnConnect() {
-        if (stopping || api == null || !linkConnected) return;
+    private void runRecordingOnConnect(int gen) {
+        if (stopping || api == null || !linkConnected || gen != connGen.get()) return;
         boolean needRetry = false;
         try {
             RecordingStore store = recordingStore;
@@ -360,12 +397,13 @@ public final class PolarBle {
             needRetry = true;
         }
         if (!needRetry) { recoveryReconnects = 0; return; } // recovered/started — clear the reconnect budget
-        if (!stopping && linkConnected) {
+        if (!stopping && linkConnected && gen == connGen.get()) {
             if (recordingAttempt < MAX_RECORDING_ATTEMPTS) {
                 recordingAttempt++;
                 sink.log("recording retry " + recordingAttempt + "/" + MAX_RECORDING_ATTEMPTS
                         + " in " + RETRY_DELAY_S + "s");
-                exec.schedule(this::runRecordingOnConnect, RETRY_DELAY_S, TimeUnit.SECONDS);
+                try { exec.schedule(() -> runRecordingOnConnect(gen), RETRY_DELAY_S, TimeUnit.SECONDS); }
+                catch (RejectedExecutionException ignored) {}
             } else if (recoveryReconnects < MAX_RECOVERY_RECONNECTS) {
                 // PFTP stayed 106 through every retry on THIS link. A phone-side abrupt drop
                 // (e.g. a Bluetooth toggle after a force-stop) can wedge the H10's PFTP so it
@@ -382,17 +420,23 @@ public final class PolarBle {
         }
     }
 
-    /** Recovery's PFTP is wedged on the current link — disconnect and reconnect to get a fresh
-     *  bonded link, then recovery retries on the new connection. The SDK treats an explicit
-     *  disconnect as intentional (no auto-reconnect), so we reconnect ourselves. */
-    private void forceReconnectForRecording() {
+    /** Recovery's PFTP is wedged on the current link — get a fresh link so recovery retries on
+     *  a new connection (recordingAttempt resets in deviceConnected). Already on exec. */
+    private void forceReconnectForRecording() { cleanReconnect(); }
+
+    /** Disconnect then reconnect to obtain a fresh link (live streams or recording wedged on
+     *  the current one). An explicit disconnect disables the SDK's auto-reconnect, so we issue
+     *  the reconnect ourselves after a short gap. Must run on exec. */
+    private void cleanReconnect() {
         if (stopping || api == null) return;
         try { api.disconnectFromDevice(id); } catch (Throwable ignored) {}
-        exec.schedule(() -> {
-            if (stopping || api == null) return;
-            try { sink.log("reconnecting after recovery stall"); api.connectToDevice(id); }
-            catch (Throwable t) { sink.log("reconnect failed: " + t.getMessage()); }
-        }, 3, TimeUnit.SECONDS);
+        try {
+            exec.schedule(() -> {
+                if (stopping || api == null) return;
+                try { sink.log("reconnecting after stall"); api.connectToDevice(id); }
+                catch (Throwable t) { sink.log("reconnect failed: " + t.getMessage()); }
+            }, 3, TimeUnit.SECONDS);
+        } catch (RejectedExecutionException ignored) {}
     }
 
     /** Stop → fetch → replay+persist → remove a recoverable recording. */
@@ -403,10 +447,18 @@ public final class PolarBle {
             // would wrongly discard a live gap. No-op if already stopped (memory full).
             stopRecordingQuietly();
             recordingActive = false;
-            PolarExerciseEntry entry = matchEntry(listExercises(), open.exId);
+            List<PolarExerciseEntry> entries = listExercises();
+            if (entries == null) {
+                // Listing FAILED (PFTP 106 / timeout) — NOT the same as "no recording". We must
+                // not conclude it is gone: that would drop the anchor (recRemoved) and let the
+                // subsequent startFresh delete the un-fetched gap. Keep it and retry next time.
+                sink.log("recover: listExercises failed — keeping recording for retry");
+                return FetchResult.FAILED;
+            }
+            PolarExerciseEntry entry = matchEntry(entries, open.exId);
             if (entry == null) {
-                // Meta says we have a recording but the device has no matching exercise even
-                // after stopping (start never persisted on-device, or already removed).
+                // Listing SUCCEEDED and there is genuinely no matching exercise (start never
+                // persisted on-device, or already removed) → safe to mark removed.
                 sink.log("recover: no device entry for " + open.exId + " — marking removed");
                 RecordingStore s = recordingStore;
                 if (s != null) s.recRemoved(open.exId);

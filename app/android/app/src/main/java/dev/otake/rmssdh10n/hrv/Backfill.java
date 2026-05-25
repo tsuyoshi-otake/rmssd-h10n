@@ -107,7 +107,12 @@ public final class Backfill {
         // 3. Whole-second sweep.
         // ------------------------------------------------------------------
         long tFirst = (long) Math.floor(beatWall[0]  / 1000.0) * 1000L;
-        long tLast  = (long) Math.floor(beatWall[n - 1] / 1000.0) * 1000L;
+        // Ceil (not floor) of the last beat so the final partial second is swept too: with a
+        // floor bound and a `beatWall <= tSec` feed, a last beat at e.g. xx.900 is never fed
+        // (no tSec ever reaches it) and the backfill ends up to ~1 s early, dropping the closing
+        // beats from the last window. Ceil adds one frame that consumes them. No-op when the last
+        // beat lands exactly on a second boundary.
+        long tLast  = (long) Math.ceil(beatWall[n - 1] / 1000.0) * 1000L;
 
         // next beat index to feed (beats are fed lazily as time advances).
         int nextBeat = 0;
