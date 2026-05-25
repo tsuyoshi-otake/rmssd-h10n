@@ -28,7 +28,7 @@ import java.util.List;
  * Writes are batched in a transaction (flush every few seconds or N points) to
  * keep the background loop cheap.
  */
-public final class HrvDb extends SQLiteOpenHelper {
+public final class HrvDb extends SQLiteOpenHelper implements RecordingBackfillStore.Db {
     private static final String NAME = "hrv.db";
     private static final int VERSION = 2;
 

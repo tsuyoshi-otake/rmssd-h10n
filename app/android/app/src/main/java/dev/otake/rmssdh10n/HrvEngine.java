@@ -8,13 +8,11 @@ import org.json.JSONObject;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import dev.otake.rmssdh10n.hrv.Analysis;
-import dev.otake.rmssdh10n.hrv.Backfill;
 import dev.otake.rmssdh10n.hrv.BodyState;
 import dev.otake.rmssdh10n.hrv.Posture;
 import dev.otake.rmssdh10n.hrv.Respiration;
@@ -123,6 +121,7 @@ public final class HrvEngine {
     public HrvEngine(Context ctx, HrvDb db, boolean withAcc) {
         this.ctx = ctx.getApplicationContext();
         this.db = db;
+        this.recStore = buildRecStore();
         this.withAcc = withAcc;
         Posture.Vec ref = vecFromKv("postureRef");
         Posture.Vec sup = vecFromKv("supineRef");
@@ -295,88 +294,36 @@ public final class HrvEngine {
     }
 
     // --- recording store: DB-backed lifecycle so the H10 recording survives an app/OS
-    //     restart (the start-anchor + state live in HrvDb, not just process memory) -----
-    private static final String REC_OWNER = "rmssd-h10n";
-    private static final int REC_SCHEMA = 2;
+    //     restart, replaying a fetched gap into points. The lifecycle + replay logic lives in
+    //     RecordingBackfillStore; this Host exposes the live mac/user/baseline it reads and
+    //     routes the restored count back to the status frame + WebView backfill event. ------
+    private final RecordingBackfillStore recStore;  // built in the ctor, once db is assigned
 
-    private final PolarBle.RecordingStore recStore = new PolarBle.RecordingStore() {
-        @Override public PolarBle.RecordingStore.OpenRec getOpenRecording() {
-            HrvDb.Rec r = db.recordingGetOpen();
-            return (r == null) ? null
-                    : new PolarBle.RecordingStore.OpenRec(r.exId, r.anchorStartMs, r.state);
-        }
-        @Override public void recStarting(String exId, long startRequestMs) {
-            db.recordingStarting(exId, deviceMac, user, REC_OWNER, REC_SCHEMA, startRequestMs);
-        }
-        @Override public void recActive(String exId, long startAckMs) { db.recordingActive(exId, startAckMs); }
-        @Override public void recFetching(String exId, long rrCount, long durationMs, boolean truncated) {
-            db.recordingSetFetched(exId, rrCount, durationMs, truncated ? 1 : 0);
-        }
-        @Override public boolean recPersistGap(double[] rrMs, long anchorStartMs, String exId, boolean truncated) {
-            boolean ok = replayAndPersistGap(rrMs, anchorStartMs, exId, truncated);
-            if (ok) db.recordingSetState(exId, "persisted");
-            return ok;
-        }
-        @Override public void recRemoved(String exId) { db.recordingMarkRemoved(exId); }
-    };
-
-    /** Replay RR fetched from the H10's gap recording into 1 Hz points at their
-     *  start-anchored timestamps and persist them durably + atomically with a ledger row
-     *  (so a service-only restore the WebView never saw is still merged on next load).
-     *  INSERT OR IGNORE so a live boundary second is never overwritten by a null-posture
-     *  backfill point. Returns true once durable so {@link PolarBle} may remove the
-     *  device-side exercise. Idempotent on a re-import (same anchor → same seconds). Runs
-     *  on PolarBle's worker thread. */
-    private boolean replayAndPersistGap(double[] rrMs, long anchorStartMs, String exId, boolean truncated) {
-        try {
-            long now = System.currentTimeMillis();
-            // Clock sanity: a future / absurd anchor (e.g. an NTP jump) would misplace the
-            // whole gap. Treat as nothing-to-do (return true so the device exercise is still
-            // removed) rather than writing wrong-timestamped points.
-            if (anchorStartMs <= 0 || anchorStartMs > now + 60_000L) {
-                Log.w(TAG, "backfill: implausible anchor " + anchorStartMs + " (now=" + now + ") — skipping");
-                lastBackfillRestored = 0;
-                return true;
+    /** Host wiring for {@link #recStore}: live mac/user/baseline read under the engine lock,
+     *  and the restored count routed to the status frame + WebView backfill event. */
+    private RecordingBackfillStore buildRecStore() {
+        return new RecordingBackfillStore(db, new RecordingBackfillStore.Host() {
+            @Override public String deviceMac() { return deviceMac; }
+            @Override public int user() { return user; }
+            @Override public RecordingBackfillStore.BaselineRef baseline() {
+                synchronized (gate) {
+                    Analysis.Base b = baseline.get();
+                    return new RecordingBackfillStore.BaselineRef(
+                            b != null ? b.rmssd : 0, b != null ? b.hr : 0, baselineVersion);
+                }
             }
-            double baseR = 0, baseH = 0;
-            int blv;
-            synchronized (gate) {
-                Analysis.Base b = baseline.get();
-                if (b != null) { baseR = b.rmssd; baseH = b.hr; }
-                blv = baselineVersion;
+            @Override public void setRestored(int count) { lastBackfillRestored = count; }
+            @Override public void onBackfilled(int restored, long fromMs, long toMs, boolean truncated) {
+                lastBackfillRestored = restored;
+                Emitter e = emitter;
+                if (e != null) {
+                    try {
+                        e.backfill(new JSONObject().put("restored", restored)
+                                .put("fromMs", fromMs).put("toMs", toMs).put("truncated", truncated).toString());
+                    } catch (Exception ignored) {}
+                }
             }
-            List<Backfill.Pt> pts = Backfill.replay(rrMs, anchorStartMs, baseR, baseH);
-            if (pts.isEmpty()) { lastBackfillRestored = 0; return true; }
-            long from = pts.get(0).tMs, to = pts.get(pts.size() - 1).tMs;
-            Set<Long> existing = db.pointTimesIn(from, to);
-            List<Object[]> rows = new ArrayList<>();
-            for (Backfill.Pt pt : pts) {
-                if (pt.tMs > now + 60_000L) continue;  // clock-skew guard: never write future points
-                if (existing.contains(pt.tMs)) continue;
-                String json = HrvJson.buildPointJson(HrvTime.localIso(pt.tMs), pt.rmssd,
-                        pt.hr != null ? (double) pt.hr : null, pt.resp, pt.tone,
-                        null, null, null, null, 0, null, null);
-                rows.add(new Object[]{ pt.tMs, json });
-            }
-            int inserted = rows.size();
-            // One transaction: INSERT OR IGNORE points + ledger row — crash-atomic and
-            // idempotent so a removeExercise failure can be retried without double-counting.
-            db.backfillCommit(rows, from, to, inserted, anchorStartMs, exId, truncated ? 1 : 0, blv);
-            lastBackfillRestored = inserted;
-            Log.i(TAG, "[backfill] restored " + inserted + " pts over " + ((to - from) / 1000) + "s"
-                    + (truncated ? " (truncated)" : ""));
-            Emitter e = emitter;
-            if (e != null) {
-                try {
-                    e.backfill(new JSONObject().put("restored", inserted)
-                            .put("fromMs", from).put("toMs", to).put("truncated", truncated).toString());
-                } catch (Exception ignored) {}
-            }
-            return true;
-        } catch (Throwable t) {
-            Log.e(TAG, "backfill failed", t);
-            return false;
-        }
+        });
     }
 
     private void tickSafe() { try { tick(); } catch (Throwable t) { Log.e(TAG, "tick error", t); } }

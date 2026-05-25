@@ -22,6 +22,11 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+    testOptions {
+        // android.util.Log etc. are stubs that throw in JVM unit tests; return defaults
+        // (no-op) so pure logic that happens to log is testable. org.json stays real (see deps).
+        unitTests.returnDefaultValues = true
+    }
 }
 
 repositories {
