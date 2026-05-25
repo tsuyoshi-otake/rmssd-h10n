@@ -1,16 +1,7 @@
 package dev.otake.rmssdh10n;
 
-import android.annotation.SuppressLint;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothManager;
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.util.Log;
-
-import androidx.core.content.ContextCompat;
 
 import com.polar.sdk.api.PolarBleApi;
 import com.polar.sdk.api.PolarBleApiCallback;
@@ -30,7 +21,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -161,7 +151,7 @@ public final class PolarBle {
     public void start() {
         exec.execute(() -> {
             try {
-                ensureBonded(); // pair the H10 first — its PFTP (recording/time) needs an encrypted link
+                PolarBonding.ensureBonded(ctx, id, sink::log); // pair first — PFTP needs an encrypted link
                 Set<PolarBleApi.PolarBleSdkFeature> features = EnumSet.of(
                         PolarBleApi.PolarBleSdkFeature.FEATURE_HR,
                         PolarBleApi.PolarBleSdkFeature.FEATURE_POLAR_ONLINE_STREAMING,
@@ -327,46 +317,6 @@ public final class PolarBle {
         Set<Integer> opts = avail != null ? avail.get(type) : null;
         if (opts == null || opts.isEmpty()) return;            // not offered — let the SDK default it
         out.put(type, opts.contains(preferred) ? preferred : Collections.min(opts));
-    }
-
-    /** Ensure the H10 is OS-bonded before the SDK connects. Its PFTP (recording/time)
-     *  characteristics need an encrypted link, so the H10 requests pairing on connect —
-     *  but the SDK's 10 s feature-check disconnects mid-SMP (SMP_CONN_TOUT), so the
-     *  in-connect pairing never completes. Bonding here first (no SDK connection yet, no
-     *  10 s clock) lets SMP finish. No-op when already bonded, so it can't regress the
-     *  working path; best-effort otherwise (we still try to connect if it fails). */
-    @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT is requested at runtime in MainActivity
-    private void ensureBonded() {
-        try {
-            BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
-            BluetoothAdapter ad = bm != null ? bm.getAdapter() : null;
-            if (ad == null) return;
-            BluetoothDevice dev = ad.getRemoteDevice(id);
-            if (dev.getBondState() == BluetoothDevice.BOND_BONDED) return; // already paired — nothing to do
-            final CountDownLatch latch = new CountDownLatch(1);
-            BroadcastReceiver rx = new BroadcastReceiver() {
-                @Override public void onReceive(Context c, Intent i) {
-                    BluetoothDevice d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-                    if (d != null && id.equalsIgnoreCase(d.getAddress())) {
-                        int st = i.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
-                        if (st == BluetoothDevice.BOND_BONDED || st == BluetoothDevice.BOND_NONE) latch.countDown();
-                    }
-                }
-            };
-            ContextCompat.registerReceiver(ctx, rx,
-                    new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
-                    ContextCompat.RECEIVER_NOT_EXPORTED);
-            try {
-                sink.log("bonding H10 (createBond)…");
-                if (!dev.createBond()) sink.log("createBond() returned false");
-                latch.await(30, TimeUnit.SECONDS);
-            } finally {
-                try { ctx.unregisterReceiver(rx); } catch (Exception ignored) {}
-            }
-            sink.log("bond state after attempt: " + dev.getBondState());
-        } catch (Throwable t) {
-            sink.log("ensureBonded failed: " + t.getMessage());
-        }
     }
 
     private void disposeStreams() {
