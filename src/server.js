@@ -33,6 +33,7 @@ function createServer({ port = 3000, log = () => {} } = {}) {
     respiration: null,
     respirationConfidence: null,
     respirationPreview: false,
+    battery: null,
     updatedAt: null,
   };
 

@@ -291,6 +291,7 @@ const hostBridge = {
   toggleSleepLR: () => useNative ? HrvNative.toggleSleepLR() : monitor.toggleSleepLR(), // -> { ok, swap }
   setOrientation: (mode) => applyOrientation(mode), // 'auto' | 'portrait' | 'landscape'
   setRelaxVoice: (sec) => useNative ? HrvNative.setRelaxVoice({ sec }) : ({ ok: false }), // native TTS readout interval (s; 0=off)
+  setPowerSave: (on) => useNative ? HrvNative.setPowerSave({ on }) : ({ ok: false }), // ACC power-save mode (duty-cycle + steps off)
   exportFiles: (files) => exportFiles(files), // share/download CSVs -> { method, count }
   getRrLog: async () => { // recent raw RR beats for the Kubios export
     if (!useNative) return monitor.getRrLog();
@@ -375,6 +376,7 @@ function makeRemoteBridge() {
     toggleSleepLR: () => ({ ok: false }),
     setOrientation: noop,
     setRelaxVoice: () => ({ ok: false }), // native-only (host TTS); remote view can't drive it
+    setPowerSave: () => ({ ok: false }), // native-only (BLE/ACC); remote view can't drive it
     setEngine: () => ({ ok: false, engine: 'js' }),
     getEngine: () => 'js',
     exportFiles: (files) => exportFiles(files), // browser download

@@ -16,6 +16,9 @@
     header h1 { font-size: 18px; margin: 0; font-weight: 600; }
     #conn { font-size: 13px; color: #8b949e; }
     #conn.on { color: #3fb950; }
+    #batt { font-size: 13px; color: #8b949e; }
+    #batt.warn { color: #d29922; }
+    #batt.low { color: #f85149; font-weight: 600; }
     #calib { font-size: 13px; color: #d29922; }
     .spacer { flex: 1; }
     button {
@@ -73,6 +76,7 @@
   <header>
     <h1>RMSSD · Polar H10</h1>
     <span id="conn">接続待機中…</span>
+    <span id="batt" style="display:none"></span>
     <span id="calib"></span>
     <span class="spacer"></span>
     <span class="users" id="userSel" title="計測対象のユーザーを切り替え（基準値・記録は個別）">
@@ -405,6 +409,16 @@
       const conn = document.getElementById('conn');
       conn.textContent = s.connected ? '接続中 ●' : '未接続';
       conn.className = s.connected ? 'on' : '';
+
+      // H10 battery %; last-known is kept across a drop, so show it whenever present.
+      const batt = document.getElementById('batt');
+      if (s.battery != null && s.battery >= 0) {
+        batt.textContent = `電池 ${s.battery}%`;
+        batt.className = s.battery <= 10 ? 'low' : (s.battery <= 20 ? 'warn' : '');
+        batt.style.display = '';
+      } else {
+        batt.style.display = 'none';
+      }
 
       const calib = document.getElementById('calib');
       // A transient "full-session baseline" message owns the calib slot briefly.

@@ -37,6 +37,9 @@
     header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .01em; white-space: nowrap; }
     #conn { font-size: 12px; color: var(--muted); white-space: nowrap; }
     #conn.on { color: var(--hrv); }
+    #batt { font-size: 12px; color: var(--muted); white-space: nowrap; }
+    #batt.warn { color: var(--tense); }
+    #batt.low { color: var(--high); font-weight: 600; }
     #calib { font-size: 12px; color: var(--tense); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 34vw; }
     .spacer { flex: 1; }
     button {
@@ -140,6 +143,15 @@
     .mchip:hover { background: var(--raised); }
     .mchip.off { opacity: .45; border-color: var(--line); color: var(--muted); }
     .mchip.off::before { background: var(--muted); }
+    .periodSel { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 2px 0 8px; }
+    .periodSel .flab { font-size: 11px; color: var(--muted); margin-right: 2px; }
+    .pchip { font-size: 12px; padding: 3px 11px; border-radius: 999px; border: 1px solid var(--line);
+             background: var(--surface); color: var(--muted); cursor: pointer; }
+    .pchip.active { border-color: var(--accent); color: var(--text); background: rgba(56,189,248,.12); font-weight: 600; }
+    .card.clickable { cursor: pointer; }
+    .card.clickable:active { transform: scale(.99); }
+    .card.agg { background: rgba(56,189,248,.05); }
+    .cardmode { font-size: 10px; font-weight: 700; color: var(--accent); margin-left: 5px; letter-spacing: .03em; }
     canvas { display: block; }
     .section { display: flex; align-items: baseline; gap: 12px; margin: 24px 4px 10px; }
     .section.sub { margin: 14px 4px 6px; }
@@ -262,6 +274,7 @@
   <header>
     <div class="brand" id="brand"><span class="mark"></span><h1><span class="lbl-full">RMSSD · Polar H10</span><span class="lbl-short">RMSSD</span></h1></div>
     <span id="conn">接続待機中…</span>
+    <span id="batt" style="display:none"></span>
     <span id="calib"></span>
     <span class="spacer"></span>
     <span class="users" id="userSel" title="計測対象のユーザーを切り替え（基準値・記録は個別）">
@@ -282,6 +295,7 @@
         <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
         <button id="alertBtn" title="座りすぎ・高負荷が続いたら通知">通知: ON</button>
         <button id="relaxBtn" title="心拍・呼吸・状態を定期的に音声で読み上げ（画面OFFでも・目を閉じて把握できる）">リラックス読み上げ: OFF</button>
+        <button id="powerBtn" title="省電力: H10の加速度を間欠サンプリングしてH10/スマホの電池を節約（姿勢は約30秒ごと・歩数オフ）。OFFで連続サンプリング（姿勢・歩数フル）">省電力: ON</button>
         <div class="sep"></div>
         <button id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止">PC共有サーバー: <span id="serverLabel">OFF</span></button>
         <div id="serverUrl" class="srvurl" title="クリックでURLをコピー" style="display:none"></div>
@@ -312,9 +326,9 @@
     </div>
 
     <div class="cards">
-      <div class="card rmssd"><div class="label">RMSSD</div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div><div class="base" id="rmssdBase"></div></div>
-      <div class="card hr"><div class="label">心拍数</div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div><div class="base" id="hrBase"></div></div>
-      <div class="card resp"><div class="label">呼吸数</div><div class="value"><span id="resp">–</span><span class="unit">br/min</span></div><div class="base" id="respBase"></div></div>
+      <div class="card rmssd clickable" data-cardmetric="rmssd" title="タップで 現在→中央値→平均 を切替（選択期間で集計）"><div class="label">RMSSD<span class="cardmode" id="rmssdMode"></span></div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div><div class="base" id="rmssdBase"></div></div>
+      <div class="card hr clickable" data-cardmetric="hr" title="タップで 現在→中央値→平均 を切替（選択期間で集計）"><div class="label">心拍数<span class="cardmode" id="hrMode"></span></div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div><div class="base" id="hrBase"></div></div>
+      <div class="card resp clickable" data-cardmetric="resp" title="タップで 現在→中央値→平均 を切替（選択期間で集計）"><div class="label">呼吸数<span class="cardmode" id="respMode"></span></div><div class="value"><span id="resp">–</span><span class="unit">br/min</span></div><div class="base" id="respBase"></div></div>
       <div class="card posture"><div class="label">姿勢</div><div class="value"><span id="postureDeg">–</span><span class="unit" id="postureUnit" style="display:none">°</span></div><div class="base" id="postureBase">ACC待ち</div></div>
       <div class="card steps"><div class="label">歩数（今日）</div><div class="value"><span id="steps">0</span></div><div class="base" id="stepsBase">歩調 –</div></div>
       <div class="mini">
@@ -330,8 +344,15 @@
     </div>
 
     <div class="section">
-      <span class="section-title">直近15分・詳細（1秒）</span>
+      <span class="section-title" id="mainChartTitle">直近15分・詳細（1秒）</span>
       <span id="histInfo2" style="font-size:12px;color:#6e7681"></span>
+    </div>
+    <div class="periodSel" id="periodSel" title="表示期間（メイングラフとカードの中央値/平均で共通）">
+      <span class="flab">期間:</span>
+      <button class="pchip active" data-period="15m">15分</button>
+      <button class="pchip" data-period="3h">3時間</button>
+      <button class="pchip" data-period="6h">6時間</button>
+      <button class="pchip" data-period="12h">12時間</button>
     </div>
     <div class="metricFilter" id="metricFilter" title="表示する指標を切り替え（全グラフ共通・タップでON/OFF）">
       <span class="flab">表示:</span>
@@ -667,6 +688,7 @@
     })();
 
     function redrawFromHistory() {
+      if (selectedPeriod !== '15m') { redrawMainPeriod(); return; } // 3h/6h/12h render from 5-min buckets
       chart.data.labels = history.map((p) => new Date(p.t).toLocaleTimeString('ja-JP'));
       chart.data.datasets[0].data = history.map((p) => p.rmssd);
       chart.data.datasets[1].data = history.map((p) => p.hr);
@@ -841,7 +863,7 @@
         save(true);
       }
       return {
-        feed, redraw, rebuild, save, refreshTones, replaceBuckets,
+        feed, redraw, rebuild, save, refreshTones, replaceBuckets, series,
         setUser(u, persist = true) { if (persist) save(true); key = keyFor(u); data = load(); live = null; },
         clear() { data = []; live = null; try { localStorage.removeItem(key); } catch (_) {} },
         get data() { return data; },
@@ -956,10 +978,10 @@
         for (const p of history) { const t = toneFromVitals(p.rmssd, p.hr, curBaseline); if (t) p.tone = t; }
         saveHistory(true);
       }
-      chart.$tones = history.map((p) => toneOf(p, curBaseline));
-      chart.update('none');
       trend5.refreshTones(); trend15.refreshTones();
+      redrawFromHistory();   // period-aware: 15m repaints history (refreshed tones), else refreshed 5-min buckets
       redrawTrend();
+      renderCards();
     }
 
     const fmt = (v, d = 1) => (v == null ? '–' : Number(v).toFixed(d));
@@ -972,6 +994,103 @@
       const sign = d > 0 ? '+' : '';
       return `基準 ${fmt(base)}${unit} <span class="delta ${cls}">${arrow} ${sign}${fmt(d)}</span>`;
     }
+
+    // ---- selectable period (main chart window + card median/mean) -------------
+    // One period drives BOTH the top chart's window and the cards' 中央値/平均 (linked).
+    // 15m reads the 1-second history; 3h/6h/12h read the 5-min trend buckets (the
+    // 1-second history only spans ~15 min). Per-card click cycles 現在→中央値→平均.
+    const PERIOD_MS = { '15m': 15 * 60000, '3h': 3 * 3600000, '6h': 6 * 3600000, '12h': 12 * 3600000 };
+    const PERIOD_TITLE = { '15m': '直近15分・詳細（1秒）', '3h': '直近3時間・5分平均', '6h': '直近6時間・5分平均', '12h': '直近12時間・5分平均' };
+    let selectedPeriod = '15m';
+    try { const v = localStorage.getItem('rmssd-h10n.period.v1'); if (v && PERIOD_MS[v]) selectedPeriod = v; } catch (_) {}
+
+    // Per-card display mode. Only metrics present in BOTH the 1-second history and the
+    // 5-min buckets (rmssd/hr/resp) are togglable; SDNN/姿勢/歩数 stay live.
+    const CARD_METRICS = { rmssd: { stat: 'rmssd', dec: 1 }, hr: { stat: 'hr', dec: 0 }, resp: { stat: 'respiration', dec: 1 } };
+    const cardMode = {};
+    try { Object.assign(cardMode, JSON.parse(localStorage.getItem('rmssd-h10n.cardMode.v1') || '{}')); } catch (_) {}
+    for (const m in CARD_METRICS) if (!cardMode[m]) cardMode[m] = 'now';
+    const MODE_TAG = { now: '', median: '中央', mean: '平均' };
+    let _lastStatus = null;
+
+    const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+    const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+
+    // Values for a metric over the selected period: raw 1-second points for 15m, else
+    // the 5-min bucket means within the rolling window (includes the open live bucket).
+    function periodSeries(metric) {
+      const from = Date.now() - PERIOD_MS[selectedPeriod];
+      if (selectedPeriod === '15m')
+        return history.filter((p) => new Date(p.t).getTime() >= from && p[metric] != null).map((p) => p[metric]);
+      return trend5.series().filter((b) => b.t >= from && b[metric] != null).map((b) => b[metric]);
+    }
+    function periodBuckets() {
+      const from = Date.now() - PERIOD_MS[selectedPeriod];
+      return trend5.series().filter((b) => b.t >= from);
+    }
+    function updateMainTitle() {
+      const el = document.getElementById('mainChartTitle');
+      if (el) el.textContent = PERIOD_TITLE[selectedPeriod];
+    }
+    // Top chart for 3h/6h/12h: plot the 5-min buckets in the rolling window. (15m keeps
+    // the existing 1-second redrawFromHistory path; that function delegates here.)
+    function redrawMainPeriod() {
+      const s = periodBuckets();
+      chart.data.labels = s.map((b) => new Date(b.t).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }));
+      chart.data.datasets[0].data = s.map((b) => b.rmssd);
+      chart.data.datasets[1].data = s.map((b) => b.hr);
+      chart.data.datasets[2].data = s.map((b) => b.resp);
+      chart.data.datasets[3].data = s.map((b) => b.lean ?? null);
+      chart.$tones = s.map((b) => b.tone);
+      chart.$bodies = s.map((b) => b.body || null);
+      chart.$activitySpans = []; // per-second activity pins don't apply to the aggregated view
+      chart.update('none');
+      const info = document.getElementById('histInfo2');
+      if (info) info.textContent = s.length ? `${s.length} 区間 / 5分平均` : 'データなし';
+    }
+    // Fill the togglable cards per their mode; 'now' uses the latest status frame,
+    // 中央値/平均 are computed over the selected period.
+    function renderCards() {
+      for (const metric in CARD_METRICS) {
+        const cfg = CARD_METRICS[metric];
+        const mode = cardMode[metric] || 'now';
+        let val = null;
+        if (mode === 'now') val = _lastStatus ? _lastStatus[cfg.stat] : null;
+        else { const a = periodSeries(metric); if (a.length) val = mode === 'median' ? median(a) : mean(a); }
+        const el = document.getElementById(metric); if (el) el.textContent = fmt(val, cfg.dec);
+        const tag = document.getElementById(metric + 'Mode'); if (tag) tag.textContent = MODE_TAG[mode];
+        const card = document.querySelector('.card[data-cardmetric="' + metric + '"]'); if (card) card.classList.toggle('agg', mode !== 'now');
+      }
+    }
+    // Period chips: one selection drives the main chart window AND the card stats.
+    // At LOAD we only sync the chip UI + title — the first chart draw is done by the boot
+    // init's redrawFromHistory() (which runs AFTER `activities`/history are initialized and
+    // already respects selectedPeriod). Calling redraw here ran before `let activities`
+    // (line ~1747) was initialized → a TDZ ReferenceError that aborted boot (no engine).
+    (function () {
+      const bar = document.getElementById('periodSel');
+      if (!bar) return;
+      const syncChips = () => bar.querySelectorAll('.pchip').forEach((b) => b.classList.toggle('active', b.dataset.period === selectedPeriod));
+      bar.querySelectorAll('.pchip').forEach((b) => b.addEventListener('click', () => {
+        if (!PERIOD_MS[b.dataset.period]) return;
+        selectedPeriod = b.dataset.period;
+        try { localStorage.setItem('rmssd-h10n.period.v1', selectedPeriod); } catch (_) {}
+        syncChips(); updateMainTitle(); redrawFromHistory(); renderCards();
+      }));
+      syncChips(); updateMainTitle(); // initial draw deferred to boot init (respects selectedPeriod)
+    })();
+    // Per-card click: cycle 現在 → 中央値 → 平均 (independent per card).
+    (function () {
+      const next = { now: 'median', median: 'mean', mean: 'now' };
+      document.querySelectorAll('.card[data-cardmetric]').forEach((card) => {
+        card.addEventListener('click', () => {
+          const m = card.dataset.cardmetric;
+          cardMode[m] = next[cardMode[m] || 'now'];
+          try { localStorage.setItem('rmssd-h10n.cardMode.v1', JSON.stringify(cardMode)); } catch (_) {}
+          renderCards();
+        });
+      });
+    })();
 
     // On resume the native engine's per-second status events that were buffered
     // while backgrounded arrive as a burst; rendering each in turn made the cards
@@ -997,12 +1116,23 @@
       // The server is authoritative for the active user: when it reports a
       // different one, swap to that user's stored history and redraw.
       if (s.user != null && s.user !== currentUser) switchLocalUser(s.user);
+      _lastStatus = s;
 
       const conn = document.getElementById('conn');
       conn.textContent = s.connected ? (s.externalRecording ? '接続 · 外部録音あり' : (s.recording ? '接続 · 記録' : '接続')) : '未接続';
       conn.className = s.connected ? 'on' : '';
       const brand = document.getElementById('brand');
       if (brand) brand.classList.toggle('on', !!s.connected);
+
+      // H10 battery %; last-known is kept across a drop, so show it whenever present.
+      const batt = document.getElementById('batt');
+      if (s.battery != null && s.battery >= 0) {
+        batt.textContent = `電池 ${s.battery}%`;
+        batt.className = s.battery <= 10 ? 'low' : (s.battery <= 20 ? 'warn' : '');
+        batt.style.display = '';
+      } else {
+        batt.style.display = 'none';
+      }
 
       const calib = document.getElementById('calib');
       // A transient "full-session baseline" message owns the calib slot briefly.
@@ -1011,12 +1141,10 @@
           ? `基準値キャリブレーション中… ${Math.round(s.calibration * 100)}%` : '';
       }
 
-      document.getElementById('rmssd').textContent = fmt(s.rmssd);
-      document.getElementById('hr').textContent = fmt(s.hr, 0);
       document.getElementById('sdnn').textContent = fmt(s.sdnn);
       document.getElementById('rmssd5').textContent = s.rmssd5 != null ? fmt(s.rmssd5) : '–';
       document.getElementById('count').textContent = s.rrCount ?? '–';
-      document.getElementById('resp').textContent = fmt(s.respiration);
+      renderCards(); // RMSSD / 心拍 / 呼吸: current value, or period median/mean per each card's mode
 
       const base = s.baseline;
       // When the baseline first arrives (or changes), back-fill past state bands.
@@ -1079,9 +1207,14 @@
 
       // Steps (today's total + live cadence) from the H10 accelerometer.
       const stp = s.steps;
-      document.getElementById('steps').textContent = stp ? (stp.today || 0).toLocaleString() : '0';
-      document.getElementById('stepsBase').textContent =
-        stp && stp.walking ? `歩調 ${stp.cadence} spm` : '歩調 –';
+      if (stp && stp.disabled) {                 // ACC duty-cycle: steps intentionally omitted (not 0)
+        document.getElementById('steps').textContent = '–';
+        document.getElementById('stepsBase').textContent = '省電力中（ACC間欠）';
+      } else {
+        document.getElementById('steps').textContent = stp ? (stp.today || 0).toLocaleString() : '0';
+        document.getElementById('stepsBase').textContent =
+          stp && stp.walking ? `歩調 ${stp.cadence} spm` : '歩調 –';
+      }
 
       // Contextual body/activity state chip (活動 / 座位 / 臥位 / 睡眠の可能性).
       // When lying/asleep, append the sleep position (あおむけ等) if calibrated.
@@ -1463,6 +1596,27 @@
         let applied = false; // one-shot: re-apply once the engine is running
         RmssdBridge.onStatus(() => { if (!applied) { applied = true; apply(saved, false); } });
       }
+    })();
+
+    // Power-save mode (Android host only): duty-cycle the H10 accelerometer to save
+    // battery. ON = ACC bursts (posture ~30s, steps omitted); OFF = continuous (full
+    // posture + steps). Default ON. Persisted; re-asserted once the engine is up.
+    (function () {
+      const btn = document.getElementById('powerBtn');
+      if (!btn) return;
+      if (!RmssdBridge.nativeEngine) { btn.style.display = 'none'; return; }
+      const KEY = 'rmssd-h10n.powerSave.v1';
+      const isOn = () => { try { return localStorage.getItem(KEY) === '1'; } catch (_) { return false; } }; // default OFF (ACC continuous)
+      const render = (on) => { btn.textContent = '省電力: ' + (on ? 'ON' : 'OFF'); };
+      const apply = (on, persist) => {
+        render(on);
+        try { RmssdBridge.setPowerSave(on); } catch (_) {}
+        if (persist) { try { localStorage.setItem(KEY, on ? '1' : '0'); } catch (_) {} }
+      };
+      render(isOn());
+      btn.addEventListener('click', () => apply(!isOn(), true));
+      let applied = false; // re-assert the saved choice once the engine is running
+      RmssdBridge.onStatus(() => { if (!applied) { applied = true; apply(isOn(), false); } });
     })();
 
     document.getElementById('recalPostureBtn').addEventListener('click', async () => {

@@ -6,6 +6,10 @@ import android.os.Bundle;
 import android.util.Log;
 import android.webkit.WebView;
 
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
+
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
@@ -14,6 +18,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(LocalServerPlugin.class);
         registerPlugin(HrvNativePlugin.class);
         super.onCreate(savedInstanceState);
+        hideStatusBar(); // full-screen: drop the top status bar (immersive; swipe-down reveals it transiently)
 
         // Android 13+ requires runtime permission to show the foreground-service
         // notification that keeps background monitoring alive.
@@ -68,9 +73,25 @@ public class MainActivity extends BridgeActivity {
         if (s != null) s.nativeForegroundEntered();
     }
 
+    /** Hide the top status bar for a full-screen dashboard. Immersive: the bar
+     *  stays hidden and a swipe from the top edge reveals it transiently. The
+     *  navigation bar is left intact so navigation isn't broken. Re-applied on
+     *  focus because dialogs / permission prompts / the keyboard bring it back. */
+    private void hideStatusBar() {
+        try {
+            WindowInsetsControllerCompat c =
+                    WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+            if (c != null) {
+                c.setSystemBarsBehavior(
+                        WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                c.hide(WindowInsetsCompat.Type.statusBars());
+            }
+        } catch (Throwable ignored) {}
+    }
+
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) kickRepaint();
+        if (hasFocus) { hideStatusBar(); kickRepaint(); }
     }
 }

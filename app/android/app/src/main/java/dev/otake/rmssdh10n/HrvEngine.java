@@ -75,6 +75,7 @@ public final class HrvEngine {
     private final boolean withAcc;
     private volatile boolean connected = false;
     private volatile Integer deviceHr = null;
+    private volatile int deviceBattery = -1;     // H10 battery % (0-100); -1 = unknown. Last-known kept across a drop.
     private volatile long lastRrAt = 0;          // wall-clock of the last RR received (point-freshness gate)
     private volatile long connectedSince = 0;    // wall-clock the current BLE connection began (0 = disconnected)
     private long lastReconnectNudge = 0;         // stream-watchdog throttle (tick thread only)
@@ -97,6 +98,8 @@ public final class HrvEngine {
     // daily steps {day, total}
     private long stepDay = 0;
     private int stepTotal = 0;
+    private boolean stepsEnabled = true; // false when ACC is duty-cycled — bursts can't count steps, so omit them (no misleading undercount)
+    private volatile boolean powerSave = false; // 省電力モード: ACC間欠＋歩数オフ（dashboard toggle, default OFF=ACC連続）
     private long lastStepsSavedAt = 0;
     private Long lastPostureSavedAt = null;
 
@@ -232,6 +235,8 @@ public final class HrvEngine {
         battWindowStart = System.currentTimeMillis();
         deviceMac = mac;
         ble = new PolarBle(ctx, mac, withAcc, createBleSink());
+        ble.setAccDutyCycle(powerSave); // apply the current power-save mode to the fresh link
+        stepsEnabled = !powerSave;       // power-save ⇒ omit steps (posture still refreshes each burst)
         ble.setRecordingStore(recStore);
         ble.start();
         ticker = Executors.newSingleThreadScheduledExecutor();
@@ -257,15 +262,25 @@ public final class HrvEngine {
                 }
             }
             @Override public void onAcc(int x, int y, int z) {
-                synchronized (gate) { accSamples++; posture.add(x, y, z); steps.add(x, y, z); }
+                synchronized (gate) { accSamples++; posture.add(x, y, z); if (stepsEnabled) steps.add(x, y, z); }
             }
             @Override public void onConnected(boolean c) {
                 connected = c;
                 connectedSince = c ? System.currentTimeMillis() : 0;
-                if (!c) deviceHr = null;
+                if (!c) deviceHr = null;          // battery is kept — it doesn't change while off-wrist
             }
+            @Override public void onBattery(int level) { deviceBattery = level; }
             @Override public void log(String m) { Log.i(TAG, "[ble] " + m); }
         };
+    }
+
+    /** Dashboard 省電力 toggle: ON = ACC duty-cycle (low power, posture ~30s, steps omitted),
+     *  OFF = continuous ACC (full posture + steps). Applies live and to the next connect. */
+    public void setPowerSave(boolean on) {
+        powerSave = on;
+        stepsEnabled = !on;
+        PolarBle b = ble;
+        if (b != null) b.setAccDutyCycle(on);
     }
 
     public void stop() {
@@ -442,12 +457,16 @@ public final class HrvEngine {
             status.put("respirationConfidence", HrvJson.jn(respConf));
             status.put("respirationPreview", previewOut);
             status.put("posture", HrvJson.postureJson(p));
-            status.put("steps", new JSONObject().put("today", stepTotal).put("cadence", steps.cadence()).put("walking", steps.walking()));
+            status.put("steps", stepsEnabled
+                    ? new JSONObject().put("today", stepTotal).put("cadence", steps.cadence()).put("walking", steps.walking())
+                    : new JSONObject().put("today", JSONObject.NULL).put("disabled", true)); // ACC duty-cycle: steps omitted
+
             status.put("body", body.state);
             status.put("engine", "native");
             status.put("recording", ble != null && ble.isRecording());
             status.put("externalRecording", ble != null && ble.isExternalBlocking());
             status.put("restored", lastBackfillRestored);
+            status.put("battery", deviceBattery >= 0 ? deviceBattery : JSONObject.NULL);
             status.put("updatedAt", wall);
 
             String statusStr = status.toString();

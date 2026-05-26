@@ -43,6 +43,23 @@ public final class Rmssd {
         return (s.size() % 2 == 1) ? s.get(m) : (s.get(m - 1) + s.get(m)) / 2.0;
     }
 
+    static Double median(double[] arr) {
+        if (arr.length == 0) return null;
+        double[] s = arr.clone();
+        java.util.Arrays.sort(s);
+        int m = s.length >> 1;
+        return (s.length % 2 == 1) ? s[m] : (s[m - 1] + s[m]) / 2.0;
+    }
+
+    // Robust-RMSSD gate (see compute): a successive RR difference is excluded from
+    // the windowed RMSSD when it exceeds a physiological cap (> REL_FLOOR of mean RR
+    // — a successive change that large is an artifact/ectopic, Malik-style) and, once
+    // enough diffs exist, a Hampel/MAD outlier threshold. Keeps one bad beat from
+    // dominating the mean-of-squares and lingering in the 30 s window as a plateau.
+    private static final double ROBUST_REL_FLOOR = 0.20;
+    private static final double ROBUST_MAD_K = 4.0;
+    private static final int    ROBUST_MIN_DIFFS = 5;
+
     private final double windowMs, minRr, maxRr, maxRelJump, localTol, emaAlpha;
     private final int localN;
     private final List<Entry> entries = new ArrayList<>();
@@ -103,16 +120,43 @@ public final class Rmssd {
             return new Result(null, rmssdEma, hr, null, count, rejected);
         }
 
-        double sumSqDiff = 0;
-        for (int i = 1; i < count; i++) {
-            double diff = entries.get(i).rr - entries.get(i - 1).rr;
-            sumSqDiff += diff * diff;
-        }
-        double rmssd = Math.sqrt(sumSqDiff / (count - 1));
-
+        // Mean RR first — SDNN/HR use it, and the robust-RMSSD floor scales by it.
         double sum = 0;
         for (Entry e : entries) sum += e.rr;
         double mean = sum / count;
+
+        // RMSSD over successive RR differences, with a robustness gate so a single
+        // artifact/ectopic difference can't dominate the mean-of-squares (and then
+        // sit in the 30 s window as a plateau). RMSSD requires artifact-free RR
+        // (Task Force 1996); this is in-window correction in the spirit of Kubios.
+        // A difference is excluded when it exceeds a physiological cap (> 20 % of mean
+        // RR — a successive change that large is an artifact, Malik-style) and, once
+        // enough diffs exist, a Hampel/MAD outlier threshold. SDNN/HR stay over all
+        // beats — the beat itself is plausible, only its diff is gross.
+        int dn = count - 1;
+        double[] diff = new double[dn];
+        double[] absd = new double[dn];
+        for (int i = 1; i < count; i++) {
+            double d = entries.get(i).rr - entries.get(i - 1).rr;
+            diff[i - 1] = d;
+            absd[i - 1] = Math.abs(d);
+        }
+        double thr = ROBUST_REL_FLOOR * mean;
+        if (dn >= ROBUST_MIN_DIFFS) {
+            double med = median(absd);
+            double[] dev = new double[dn];
+            for (int i = 0; i < dn; i++) dev[i] = Math.abs(absd[i] - med);
+            double stat = med + ROBUST_MAD_K * 1.4826 * median(dev);
+            if (stat > thr) thr = stat;
+        }
+        double sumSqDiff = 0;
+        int used = 0;
+        for (int i = 0; i < dn; i++) {
+            if (absd[i] <= thr) { sumSqDiff += diff[i] * diff[i]; used++; }
+        }
+        if (used == 0) { for (int i = 0; i < dn; i++) sumSqDiff += diff[i] * diff[i]; used = dn; }
+        double rmssd = Math.sqrt(sumSqDiff / used);
+
         double varSum = 0;
         for (Entry e : entries) varSum += (e.rr - mean) * (e.rr - mean);
         double sdnn = Math.sqrt(varSum / count);

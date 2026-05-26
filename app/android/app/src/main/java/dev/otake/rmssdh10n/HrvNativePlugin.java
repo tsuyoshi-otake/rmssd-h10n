@@ -82,6 +82,16 @@ public class HrvNativePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void setPowerSave(PluginCall call) {
+        boolean on = Boolean.TRUE.equals(call.getBoolean("on", true));
+        MonitorService s = MonitorService.INSTANCE;
+        if (s != null) s.nativeSetPowerSave(on);
+        JSObject ret = new JSObject();
+        ret.put("ok", s != null);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
     public void toggleSleepLR(PluginCall call) {
         MonitorService s = MonitorService.INSTANCE;
         Boolean swap = s != null ? s.nativeToggleSleepLR() : null;

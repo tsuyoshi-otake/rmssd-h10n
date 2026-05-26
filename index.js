@@ -110,6 +110,7 @@ async function main() {
   let lastRr = null;
   let beats = 0;
   let deviceHr = null; // HR reported directly by the device (hr-rr mode)
+  let deviceBattery = null; // H10 battery % (0-100); null = unknown. Kept across a drop (last-known).
 
   let baseline = makeBaseline();
   let classifier = new StateClassifier({ minDwellMs: 45000 }); // hysteresis
@@ -312,6 +313,7 @@ async function main() {
       respiration: respOut,
       respirationConfidence: respConf,
       respirationPreview: respPreview,
+      battery: deviceBattery,
     };
     statusFile.write(status);
     if (server) {
@@ -340,7 +342,8 @@ async function main() {
     const r = status.rmssd != null ? `${status.rmssd} ms` : '–';
     const h = status.hr != null ? `${status.hr} bpm` : '–';
     const br = status.respiration != null ? `${status.respiration} br/min${respPreview ? '?' : ''}` : '–';
-    log(`RMSSD ${r}  HR ${h}  resp ${br}  [${state.label}]  (RR ${count}, beats ${beats})`);
+    const bat = status.battery != null ? `  batt ${status.battery}%` : '';
+    log(`RMSSD ${r}  HR ${h}  resp ${br}  [${state.label}]  (RR ${count}, beats ${beats})${bat}`);
   }, 1000);
 
   // Cleanup handles populated by the active source.
@@ -386,6 +389,7 @@ async function main() {
       const rr = baseRr + resp + noise;
       tMs += rr;
       lastPeakMs = tMs;
+      deviceBattery = Math.max(3, 95 - Math.floor(tMs / 4000)); // fake slow decay so the badge + low-battery colors are demoable
       handleRR(tMs, rr);
       timer = setTimeout(tick, rr);
     };
@@ -409,6 +413,7 @@ async function main() {
       },
       onRr: (rr) => { lastPeakMs = (lastPeakMs ?? 0) + rr; handleRR(lastPeakMs, rr); },
       onHr: (hr) => { deviceHr = hr; },
+      onBattery: (b) => { deviceBattery = b; },
     });
   }
   } // end startMode
@@ -416,7 +421,7 @@ async function main() {
 
 // Default path: standard HR service (0x2A37) RR intervals, with auto-reconnect
 // so the monitor survives the H10 dropping the BLE link mid-session.
-async function runHrRr(opts, log, cleanup, { setConnected, onRr, onHr }) {
+async function runHrRr(opts, log, cleanup, { setConnected, onRr, onHr, onBattery }) {
   const ble = require('./src/ble');
   let stopping = false;
   let current = null; // currently connected peripheral, if any
@@ -457,6 +462,25 @@ async function runHrRr(opts, log, cleanup, { setConnected, onRr, onHr }) {
     live = true;
     setConnected(true);
     log('Subscribed to HR Measurement (0x2A37). Reading RR intervals.');
+
+    // Battery is a bonus: read 0x2A19 once and subscribe for changes, but never
+    // let a missing/failed battery service tear down the working HR session.
+    if (onBattery) {
+      try {
+        const battChar = await withTimeout(ble.discoverBattery(peripheral), 6000, 'discoverBattery');
+        if (battChar) {
+          const apply = (b) => { if (b && b.length) onBattery(b.readUInt8(0)); };
+          let first = null;
+          try {
+            const b = await withTimeout(battChar.readAsync(), 5000, 'battery read');
+            if (b && b.length) { first = b.readUInt8(0); onBattery(first); }
+          } catch (_) {}
+          battChar.on('data', apply);            // H10 notifies on change (if supported)
+          try { await withTimeout(battChar.subscribeAsync(), 5000, 'battery subscribe'); } catch (_) {}
+          log(`Battery level: ${first != null ? first + '%' : 'n/a'} (0x2A19).`);
+        }
+      } catch (_) { /* no battery service — fine, HR keeps running */ }
+    }
   }
 
   async function connectLoop() {

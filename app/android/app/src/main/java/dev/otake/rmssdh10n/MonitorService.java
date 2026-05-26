@@ -169,6 +169,7 @@ public class MonitorService extends Service {
         if (tts == null) tts = new TtsSpeaker(getApplicationContext());
         engine.setSpeaker(tts);
         engine.setLinkStateSink(this::updateNotification); // surface a stalled link in the notification
+        engine.setPowerSave("1".equals(db().kvGet("powerSave"))); // 省電力モード（kv未設定=既定OFF=ACC連続・歩数あり）
         engine.start(mac);
         db().kvPut("engine", "native");
         db().kvPut("deviceMac", mac);
@@ -188,6 +189,8 @@ public class MonitorService extends Service {
     public void nativeForegroundEntered() { if (engine != null) engine.foregroundEntered(); }
     // Relax-mode voice readout interval (0 = off). No-op if the engine isn't running.
     public void nativeSetRelaxVoice(int sec) { if (engine != null) engine.setRelaxIntervalSec(sec); }
+    /** Power-save toggle from the dashboard: persist (survives restart/Boot) + apply live. */
+    public void nativeSetPowerSave(boolean on) { db().kvPut("powerSave", on ? "1" : "0"); if (engine != null) engine.setPowerSave(on); }
 
     private void stopEngine() {
         // Explicit (user) stop. Halt the engine/BLE worker FIRST, THEN mark the recording

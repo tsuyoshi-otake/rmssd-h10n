@@ -24,6 +24,7 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -71,6 +72,13 @@ public final class PolarBle {
     private static final long RR_CAP = 95000L;           // ~H10 RR memory limit (truncation heuristic)
     private static final long FULL_DURATION_MS = 18L * 3600 * 1000; // ~18 h
     private static final long TRUNCATE_TAIL_MS = 5L * 60 * 1000;    // unrecorded tail ⇒ memory-full auto-stop
+
+    // ACC duty-cycle (power saving): 25 Hz is the H10's MINIMUM accelerometer rate, so we
+    // lower its effective frequency by streaming in short bursts. ~17% duty ⇒ ACC on-time
+    // (and its BLE traffic) cut ~83%; posture refreshes each burst, steps omitted. The mode
+    // is a runtime toggle (accDutyCycle, set by the dashboard's 省電力 switch); default ON.
+    private static final long ACC_DUTY_ON_MS = 5000;       // stream ACC this long...
+    private static final long ACC_DUTY_PERIOD_MS = 30000;  // ...once per this period
     private static final String EX_PREFIX = "rmssd-";    // identifier prefix of recordings we own
 
     /** BLE-layer contract consumed by {@link HrvEngine} (decouples driver from engine). */
@@ -79,6 +87,7 @@ public final class PolarBle {
         void onRr(double rrMs);
         void onAcc(int x, int y, int z);
         void onConnected(boolean connected);
+        void onBattery(int level);
         void log(String msg);
     }
 
@@ -127,6 +136,8 @@ public final class PolarBle {
     private PolarBleApi api;
     private volatile Disposable hrDis;
     private volatile Disposable accDis;
+    private volatile ScheduledFuture<?> accDutyFuture; // repeating ACC duty-cycle task (null = none)
+    private volatile boolean accDutyCycle = false;     // power-save ACC mode (runtime-toggleable); true = burst-sample. Default OFF = continuous
     private volatile boolean stopping = false;
     private volatile boolean recordingActive = false;
     private volatile boolean linkConnected = false;   // BLE link up — gates PFTP ops
@@ -161,6 +172,10 @@ public final class PolarBle {
      *  start ours — surfaced to the UI rather than silently deleting it. */
     public boolean isExternalBlocking() { return externalBlocking; }
 
+    /** True when ACC is being duty-cycled for power saving — steps can't be counted
+     *  accurately from short bursts, so the engine omits them. */
+    public boolean accDutyCycled() { return withAcc && accDutyCycle; }
+
     public void start() {
         exec.execute(() -> {
             try {
@@ -173,7 +188,10 @@ public final class PolarBle {
                         // time READ, so the SDK's feature-check probe hangs 10 s and aborts ALL
                         // streams (HR included). We start-anchor backfill to our own clock, so
                         // device time is unnecessary anyway.
-                        PolarBleApi.PolarBleSdkFeature.FEATURE_DEVICE_INFO);
+                        PolarBleApi.PolarBleSdkFeature.FEATURE_DEVICE_INFO,
+                        // Battery % via batteryLevelReceived. This is a plain GATT 0x180F read,
+                        // NOT a feature-check probe like DEVICE_TIME_SETUP, so it does not hang.
+                        PolarBleApi.PolarBleSdkFeature.FEATURE_BATTERY_INFO);
                 api = PolarBleApiDefaultImpl.defaultImplementation(ctx, features);
                 api.setApiLogger(s -> Log.d(TAG, "[sdk] " + s));
                 api.setAutomaticReconnection(true);
@@ -213,7 +231,7 @@ public final class PolarBle {
             sink.log("nudge: re-subscribing streams (stale)");
             disposeStreams();
             startHr();
-            if (withAcc) startAcc();
+            beginAcc();
         });
     }
 
@@ -274,7 +292,7 @@ public final class PolarBle {
                     startHr();
                     break;
                 case FEATURE_POLAR_ONLINE_STREAMING:
-                    if (withAcc) startAcc();
+                    beginAcc();
                     break;
                 case FEATURE_POLAR_H10_EXERCISE_RECORDING:
                     if (recordingHandledThisConn.compareAndSet(false, true)) {
@@ -292,6 +310,10 @@ public final class PolarBle {
                 default:
                     break;
             }
+        }
+        @Override public void batteryLevelReceived(String identifier, int level) {
+            sink.log("battery " + level + "%");
+            sink.onBattery(level);
         }
         // Required abstract overrides for features we don't use (HTS thermometer +
         // the structured DIS-info callback); PolarBleApiCallback leaves these two open.
@@ -357,12 +379,59 @@ public final class PolarBle {
     }
 
     private void disposeStreams() {
+        cancelAccDuty();                 // stop the ACC duty cycle (if running) before tearing down
         synchronized (streamLock) {
             Disposable h = hrDis, a = accDis;
             hrDis = null; accDis = null;
             if (h != null) { try { h.dispose(); } catch (Throwable ignored) {} }
             if (a != null) { try { a.dispose(); } catch (Throwable ignored) {} }
         }
+    }
+
+    /** Dispose only the ACC stream, leaving HR running — used between duty-cycle bursts. */
+    private void disposeAcc() {
+        synchronized (streamLock) {
+            Disposable a = accDis; accDis = null;
+            if (a != null) { try { a.dispose(); } catch (Throwable ignored) {} }
+        }
+    }
+
+    /** Begin ACC sampling. 25 Hz is the H10's MINIMUM accelerometer rate, so when
+     *  {@link #accDutyCycle} is on we cut its power by streaming a short burst once per
+     *  period (posture refreshes each burst — it changes slowly; steps are omitted)
+     *  rather than continuously. HR/RR are never affected. Runtime-toggleable. */
+    private void beginAcc() {
+        if (!withAcc) return;
+        if (!accDutyCycle) { startAcc(); return; }
+        cancelAccDuty();
+        final int gen = connGen.get();
+        Runnable burst = () -> {
+            if (stopping || api == null || !linkConnected || gen != connGen.get()) return;
+            startAcc();
+            try { exec.schedule(() -> { if (gen == connGen.get()) disposeAcc(); }, ACC_DUTY_ON_MS, TimeUnit.MILLISECONDS); }
+            catch (RejectedExecutionException ignored) {}
+        };
+        try { accDutyFuture = exec.scheduleAtFixedRate(burst, 0, ACC_DUTY_PERIOD_MS, TimeUnit.MILLISECONDS); }
+        catch (RejectedExecutionException ignored) {}
+    }
+
+    private void cancelAccDuty() {
+        ScheduledFuture<?> f = accDutyFuture; accDutyFuture = null;
+        if (f != null) { try { f.cancel(false); } catch (Throwable ignored) {} }
+    }
+
+    /** Switch the ACC power mode at runtime (dashboard 省電力 toggle): true = burst/duty
+     *  (low power, posture-only), false = continuous (full posture + steps). Re-applies to
+     *  the live ACC stream without touching HR/RR. */
+    public void setAccDutyCycle(boolean on) {
+        if (accDutyCycle == on) return;
+        accDutyCycle = on;
+        execSafe(() -> {
+            if (stopping || api == null || !linkConnected || !withAcc) return;
+            cancelAccDuty();
+            disposeAcc();
+            beginAcc(); // re-reads accDutyCycle: continuous or burst
+        });
     }
 
     // --- recording lifecycle (exec thread; blocking RxJava is fine here) -----

@@ -23,6 +23,15 @@ function median(arr) {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
+// Robust-RMSSD gate (see compute): a successive RR difference is excluded from the
+// windowed RMSSD when it exceeds a physiological cap (> REL_FLOOR of mean RR — a
+// successive change that large is an artifact/ectopic, Malik-style) and, once enough
+// diffs exist, a Hampel/MAD outlier threshold. Kept numerically identical to
+// Rmssd.java so the native service and the WebView pipeline agree.
+const ROBUST_REL_FLOOR = 0.20;
+const ROBUST_MAD_K = 4.0;
+const ROBUST_MIN_DIFFS = 5;
+
 class RmssdWindow {
   /**
    * @param {object} opts
@@ -109,14 +118,37 @@ class RmssdWindow {
       };
     }
 
-    let sumSqDiff = 0;
+    // Mean RR first — SDNN/HR use it, and the robust-RMSSD floor scales by it.
+    const mean = rrs.reduce((a, b) => a + b, 0) / count;
+
+    // RMSSD over successive RR differences, with a robustness gate so a single
+    // artifact/ectopic difference can't dominate the mean-of-squares (and then sit
+    // in the 30 s window as a plateau). RMSSD requires artifact-free RR (Task Force
+    // 1996); this is in-window correction in the spirit of Kubios. A difference is
+    // excluded when it exceeds a physiological cap (> 20 % of mean RR — Malik-style)
+    // and, once enough diffs exist, a Hampel/MAD outlier threshold. SDNN/HR stay over
+    // all beats. Kept numerically identical to Rmssd.java.
+    const dn = count - 1;
+    const diff = new Array(dn);
+    const absd = new Array(dn);
     for (let i = 1; i < count; i++) {
       const d = rrs[i] - rrs[i - 1];
-      sumSqDiff += d * d;
+      diff[i - 1] = d;
+      absd[i - 1] = Math.abs(d);
     }
-    const rmssd = Math.sqrt(sumSqDiff / (count - 1));
+    let thr = ROBUST_REL_FLOOR * mean;
+    if (dn >= ROBUST_MIN_DIFFS) {
+      const med = median(absd);
+      const stat = med + ROBUST_MAD_K * 1.4826 * median(absd.map((a) => Math.abs(a - med)));
+      if (stat > thr) thr = stat;
+    }
+    let sumSqDiff = 0, used = 0;
+    for (let i = 0; i < dn; i++) {
+      if (absd[i] <= thr) { sumSqDiff += diff[i] * diff[i]; used++; }
+    }
+    if (used === 0) { for (let i = 0; i < dn; i++) sumSqDiff += diff[i] * diff[i]; used = dn; }
+    const rmssd = Math.sqrt(sumSqDiff / used);
 
-    const mean = rrs.reduce((a, b) => a + b, 0) / count;
     const variance = rrs.reduce((a, b) => a + (b - mean) * (b - mean), 0) / count;
     const sdnn = Math.sqrt(variance);
     const hr = 60000 / mean;
