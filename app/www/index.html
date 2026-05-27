@@ -347,13 +347,6 @@
       <span class="section-title" id="mainChartTitle">直近15分・詳細（1秒）</span>
       <span id="histInfo2" style="font-size:12px;color:#6e7681"></span>
     </div>
-    <div class="periodSel" id="periodSel" title="表示期間（メイングラフとカードの中央値/平均で共通）">
-      <span class="flab">期間:</span>
-      <button class="pchip active" data-period="15m">15分</button>
-      <button class="pchip" data-period="3h">3時間</button>
-      <button class="pchip" data-period="6h">6時間</button>
-      <button class="pchip" data-period="12h">12時間</button>
-    </div>
     <div class="metricFilter" id="metricFilter" title="表示する指標を切り替え（全グラフ共通・タップでON/OFF）">
       <span class="flab">表示:</span>
       <button class="mchip" data-metric="rmssd" style="--c:#58a6ff">RMSSD</button>
@@ -365,11 +358,11 @@
     <div class="chartbox"><canvas id="chart"></canvas></div>
 
     <div class="section">
-      <span class="section-title">全期間トレンド</span>
+      <span class="section-title">長期トレンド</span>
       <span class="daysel" id="daySel">
-        <button id="dayPrev" title="前の日へ">‹</button>
-        <span id="dayLabel">Today</span>
-        <button id="dayNext" title="次の日へ">›</button>
+        <button id="dayPrev" title="広い範囲・過去へ">‹</button>
+        <span id="dayLabel">当日</span>
+        <button id="dayNext" title="直近・狭い範囲へ">›</button>
       </span>
     </div>
     <div class="section sub">
@@ -382,8 +375,13 @@
       <span id="trend15Info" style="font-size:12px;color:#6e7681"></span>
     </div>
     <div class="chartbox trend"><canvas id="trend15Chart"></canvas></div>
+    <div class="section sub">
+      <span class="section-subtitle">30分平均</span>
+      <span id="trend30Info" style="font-size:12px;color:#6e7681"></span>
+    </div>
+    <div class="chartbox trend"><canvas id="trend30Chart"></canvas></div>
 
-    <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。最上段は直近15分の詳細（1秒間隔）、下段は5分平均・15分平均の全期間トレンドで、日付セレクタ（全期間／Today／Yesterday／各日）で表示を絞り込めます。いずれもこのブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。グラフ下端の細い帯は活動状態（水色=座位・橙=活動中・紫=臥位・藍=睡眠の可能性）です。</div>
+    <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。最上段は直近15分の詳細（1秒間隔）、下段は5分平均・15分平均・30分平均の全期間トレンドで、日付セレクタ（全期間／Today／Yesterday／各日）で表示を絞り込めます。いずれもこのブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。グラフ下端の細い帯は活動状態（水色=座位・橙=活動中・紫=臥位・藍=睡眠の可能性）です。</div>
   </div>
 
   <div class="modal-bg" id="actModal">
@@ -655,6 +653,7 @@
     });
     const trend5Chart = makeTrendChart('trend5Chart');
     const trend15Chart = makeTrendChart('trend15Chart');
+    const trend30Chart = makeTrendChart('trend30Chart');
 
     // ---- metric filter: chips to show/hide each series across ALL charts ------
     // Default all on; the choice persists. Dataset order is shared (index → metric):
@@ -665,7 +664,7 @@
       if (!bar) return;
       const KEY = 'rmssd-h10n.metricFilter.v1';
       const BY_INDEX = ['rmssd', 'hr', 'resp', 'lean', 'steps'];
-      const charts = [chart, trend5Chart, trend15Chart];
+      const charts = [chart, trend5Chart, trend15Chart, trend30Chart];
       let state = {};
       try { state = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (_) {}
       const on = (m) => state[m] !== false; // unset = visible (default = all shown)
@@ -688,7 +687,6 @@
     })();
 
     function redrawFromHistory() {
-      if (selectedPeriod !== '15m') { redrawMainPeriod(); return; } // 3h/6h/12h render from 5-min buckets
       chart.data.labels = history.map((p) => new Date(p.t).toLocaleTimeString('ja-JP'));
       chart.data.datasets[0].data = history.map((p) => p.rmssd);
       chart.data.datasets[1].data = history.map((p) => p.hr);
@@ -706,6 +704,7 @@
     // both. A date selector (全期間 / Today / Yesterday / 各日) filters the charts.
     const trend5KeyFor = (u) => `rmssd-h10n.trend5.v1.u${u}`;
     const trend15KeyFor = (u) => trendKeyFor(u); // existing 15-min key (back-compat)
+    const trend30KeyFor = (u) => `rmssd-h10n.trend30.v1.u${u}`;
 
     const bucketStartOf = (tms, ms) => Math.floor(tms / ms) * ms;
     const newBucket = (start) => ({ start, hrSum: 0, hrN: 0, rmssdSum: 0, rmssdN: 0, respSum: 0, respN: 0, leanSum: 0, leanN: 0, stepSum: 0, postures: {}, bodies: {}, sleepPositions: {}, tones: {} });
@@ -739,17 +738,73 @@
       tone: dominantTone(b.tones),
       n: b.hrN,
     });
+    // Combine already-finalized buckets (from a finer store) into one coarser
+    // finalized bucket, each value weighted by its sample count n. Lets a new
+    // coarser store (30-min) be seeded retroactively from the long-lived finer ones.
+    function aggBuckets(start, arr) {
+      let hrW = 0, hrN = 0, rmW = 0, rmN = 0, rsW = 0, rsN = 0, lnW = 0, lnN = 0, steps = 0;
+      const tones = {}, postures = {}, bodies = {}, sleeps = {};
+      for (const b of arr) {
+        const w = b.n || 0;
+        if (w && b.hr != null) { hrW += b.hr * w; hrN += w; }
+        if (w && b.rmssd != null) { rmW += b.rmssd * w; rmN += w; }
+        if (w && b.resp != null) { rsW += b.resp * w; rsN += w; }
+        if (w && b.lean != null) { lnW += b.lean * w; lnN += w; }
+        steps += b.steps || 0;
+        if (w && b.tone) tones[b.tone] = (tones[b.tone] || 0) + w;
+        if (w && b.posture) postures[b.posture] = (postures[b.posture] || 0) + w;
+        if (w && b.body) bodies[b.body] = (bodies[b.body] || 0) + w;
+        if (w && b.sleepPos) sleeps[b.sleepPos] = (sleeps[b.sleepPos] || 0) + w;
+      }
+      return {
+        t: start,
+        hr: hrN ? +(hrW / hrN).toFixed(1) : null,
+        rmssd: rmN ? +(rmW / rmN).toFixed(1) : null,
+        resp: rsN ? +(rsW / rsN).toFixed(1) : null,
+        lean: lnN ? +(lnW / lnN).toFixed(0) : null,
+        posture: dominantTone(postures),
+        body: dominantTone(bodies),
+        sleepPos: dominantTone(sleeps),
+        steps,
+        tone: dominantTone(tones),
+        n: hrN,
+      };
+    }
     const fmtBucketLabel = (tms) =>
       new Date(tms).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
     // ---- date selector: which day the averaged charts show -------------------
     const dayStartOf = (tms) => { const d = new Date(tms); d.setHours(0, 0, 0, 0); return d.getTime(); };
     const DAY_MS = 86400000;
-    let selectedDay = 'all'; // 'all' or a local-midnight epoch ms
-    function filterByDay(arr) {
-      if (selectedDay === 'all') return arr;
-      return arr.filter((b) => b.t >= selectedDay && b.t < selectedDay + DAY_MS);
+    // Single display range for the trend charts + card 中央値/平均, driven by the ‹ › stepper.
+    // A fixed list ordered widest→narrowest. Rolling windows ('Nd'/'Nh') look back from now;
+    // 'yesterday'/'today' are calendar days. Default 当日. Persisted as the token string.
+    const RANGE_MS = {
+      '60d': 60 * DAY_MS, '30d': 30 * DAY_MS, '14d': 14 * DAY_MS, '7d': 7 * DAY_MS,
+      '12h': 12 * 3600000, '6h': 6 * 3600000, '3h': 3 * 3600000,
+    };
+    const RANGE_LABEL = {
+      '60d': '60日間', '30d': '30日間', '14d': '二週間', '7d': '一週間',
+      yesterday: '昨日', today: '当日', '12h': '12時間', '6h': '6時間', '3h': '3時間',
+    };
+    const RANGE_LIST = ['60d', '30d', '14d', '7d', 'yesterday', 'today', '12h', '6h', '3h'];
+    let selectedRange = 'today'; // default = 当日
+    try { const v = localStorage.getItem('rmssd-h10n.range.v1'); if (RANGE_LIST.includes(v)) selectedRange = v; } catch (_) {}
+    function inRange(t) {
+      const r = selectedRange;
+      if (RANGE_MS[r]) return t >= Date.now() - RANGE_MS[r]; // rolling window (days/hours)
+      const today = dayStartOf(Date.now());
+      if (r === 'yesterday') return t >= today - DAY_MS && t < today;
+      return t >= today && t < today + DAY_MS; // 'today'
     }
+    function filterByRange(arr) { return arr.filter((b) => inRange(b.t)); }
+    function persistRange() { try { localStorage.setItem('rmssd-h10n.range.v1', selectedRange); } catch (_) {} }
+    function rangeLabelOf(r) { return RANGE_LABEL[r] || r; }
+    // Card 中央値/平均 reads the finest store that retains the whole window: 30-min for the
+    // two-week/30-/60-day ranges, else the 5-min store (covers up to ~1 week + the hours).
+    function rangeStore() { return (selectedRange === '60d' || selectedRange === '30d' || selectedRange === '14d') ? trend30 : trend5; }
+    function applyRange() { redrawTrend(); renderCards(); }
+    function setRange(r) { selectedRange = r; persistRange(); applyRange(); }
 
     // A persistent averaged-bucket store bound to one chart + info element.
     function makeTrend({ keyFor, bucketMs, max, chart, infoEl, gran }) {
@@ -806,7 +861,7 @@
         save(false);
       }
       function redraw() {
-        const s = filterByDay(series());
+        const s = filterByRange(series());
         chart.data.labels = s.map((b) => fmtBucketLabel(b.t));
         chart.data.datasets[0].data = s.map((b) => b.rmssd);
         chart.data.datasets[1].data = s.map((b) => b.hr);
@@ -864,6 +919,26 @@
       }
       return {
         feed, redraw, rebuild, save, refreshTones, replaceBuckets, series,
+        // Retroactively backfill PAST buckets from a finer store's finalized buckets
+        // (weighted by n). Skips the open bucket and slots we already hold. Idempotent.
+        seedFromBuckets(src) {
+          if (!Array.isArray(src) || !src.length) return;
+          const nowB = bucketStartOf(Date.now(), bucketMs);
+          const have = new Set(data.map((b) => b.t));
+          const groups = new Map();
+          for (const b of src) {
+            if (!b || b.t == null) continue;
+            const bs = bucketStartOf(b.t, bucketMs);
+            if (bs >= nowB || have.has(bs)) continue;
+            if (!groups.has(bs)) groups.set(bs, []);
+            groups.get(bs).push(b);
+          }
+          if (!groups.size) return;
+          for (const [bs, arr] of groups) data.push(aggBuckets(bs, arr));
+          data.sort((a, b) => a.t - b.t);
+          if (data.length > max) data = data.slice(-max);
+          save(true);
+        },
         setUser(u, persist = true) { if (persist) save(true); key = keyFor(u); data = load(); live = null; },
         clear() { data = []; live = null; try { localStorage.removeItem(key); } catch (_) {} },
         get data() { return data; },
@@ -871,16 +946,14 @@
     }
 
     const trend5 = makeTrend({ keyFor: trend5KeyFor, bucketMs: 5 * 60 * 1000, max: 4000, chart: trend5Chart, infoEl: document.getElementById('trend5Info'), gran: '5分' });
-    const trend15 = makeTrend({ keyFor: trend15KeyFor, bucketMs: 15 * 60 * 1000, max: 1500, chart: trend15Chart, infoEl: document.getElementById('trend15Info'), gran: '15分' });
+    const trend15 = makeTrend({ keyFor: trend15KeyFor, bucketMs: 15 * 60 * 1000, max: 2880, chart: trend15Chart, infoEl: document.getElementById('trend15Info'), gran: '15分' });
+    const trend30 = makeTrend({ keyFor: trend30KeyFor, bucketMs: 30 * 60 * 1000, max: 3000, chart: trend30Chart, infoEl: document.getElementById('trend30Info'), gran: '30分' });
+    // The 30-min store is new (its own localStorage starts empty), so retroactively
+    // bucket the whole past by re-aggregating the long-lived finer stores: 5-min first
+    // (~14 days, most accurate), then 15-min for any older tail. Idempotent.
+    function seedTrend30() { trend30.seedFromBuckets(trend5.data); trend30.seedFromBuckets(trend15.data); }
+    seedTrend30();
 
-    function availableDays() {
-      const set = new Set();
-      for (const b of trend15.data) set.add(dayStartOf(b.t));
-      for (const b of trend5.data) set.add(dayStartOf(b.t));
-      for (const p of history) set.add(dayStartOf(new Date(p.t).getTime()));
-      set.add(dayStartOf(Date.now())); // always offer Today
-      return ['all', ...[...set].sort((a, b) => a - b)];
-    }
     function dayLabelFor(v) {
       if (v === 'all') return '全期間';
       const today = dayStartOf(Date.now());
@@ -888,28 +961,25 @@
       if (v === today - DAY_MS) return 'Yesterday';
       return new Date(v).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric', weekday: 'short' });
     }
-    function refreshDaySelector() {
-      const days = availableDays();
-      if (!days.includes(selectedDay)) selectedDay = dayStartOf(Date.now());
-      const idx = days.indexOf(selectedDay);
-      document.getElementById('dayLabel').textContent = dayLabelFor(selectedDay);
-      document.getElementById('dayPrev').disabled = idx <= 0;        // nothing older
-      document.getElementById('dayNext').disabled = idx >= days.length - 1; // at Today
+    function refreshRangeSelector() {
+      const idx = RANGE_LIST.indexOf(selectedRange);
+      const lbl = document.getElementById('dayLabel');
+      if (lbl) lbl.textContent = rangeLabelOf(selectedRange);
+      const prev = document.getElementById('dayPrev'), next = document.getElementById('dayNext');
+      if (prev) prev.disabled = idx <= 0;                     // ‹ = wider/older (60日間 is the end)
+      if (next) next.disabled = idx >= RANGE_LIST.length - 1; // › = narrower (3時間 is the end)
     }
-    function stepDay(dir) {
-      const days = availableDays();
-      let idx = days.indexOf(selectedDay);
-      if (idx < 0) idx = days.length - 1;
-      idx = Math.max(0, Math.min(days.length - 1, idx + dir));
-      selectedDay = days[idx];
-      refreshDaySelector();
-      trend5.redraw(); trend15.redraw();
+    function stepRange(dir) {
+      let idx = RANGE_LIST.indexOf(selectedRange);
+      if (idx < 0) idx = RANGE_LIST.indexOf('today');
+      idx = Math.max(0, Math.min(RANGE_LIST.length - 1, idx + dir));
+      setRange(RANGE_LIST[idx]);                    // persists + redraws
     }
 
     // ---- wrappers that drive both granularities at once ----------------------
-    function rebuildTrendFromHistory() { trend5.rebuild(); trend15.rebuild(); }
-    function redrawTrend() { trend5.redraw(); trend15.redraw(); refreshDaySelector(); }
-    function saveTrendAll(force) { trend5.save(force); trend15.save(force); }
+    function rebuildTrendFromHistory() { trend5.rebuild(); trend15.rebuild(); trend30.rebuild(); }
+    function redrawTrend() { trend5.redraw(); trend15.redraw(); trend30.redraw(); refreshRangeSelector(); }
+    function saveTrendAll(force) { trend5.save(force); trend15.save(force); trend30.save(force); }
 
     // ---- visibility-driven battery saving ------------------------------------
     // While the page is hidden (screen off / app backgrounded) the monitor keeps
@@ -958,7 +1028,7 @@
         b.style.display = '';
         void b.offsetHeight;
         if (chart) chart.update('none');
-        trend5.redraw(); trend15.redraw();
+        trend5.redraw(); trend15.redraw(); trend30.redraw();
       };
       flush();
       // The renderer can take a beat to come back after Doze; retry a few times.
@@ -978,7 +1048,7 @@
         for (const p of history) { const t = toneFromVitals(p.rmssd, p.hr, curBaseline); if (t) p.tone = t; }
         saveHistory(true);
       }
-      trend5.refreshTones(); trend15.refreshTones();
+      trend5.refreshTones(); trend15.refreshTones(); trend30.refreshTones();
       redrawFromHistory();   // period-aware: 15m repaints history (refreshed tones), else refreshed 5-min buckets
       redrawTrend();
       renderCards();
@@ -995,14 +1065,9 @@
       return `基準 ${fmt(base)}${unit} <span class="delta ${cls}">${arrow} ${sign}${fmt(d)}</span>`;
     }
 
-    // ---- selectable period (main chart window + card median/mean) -------------
-    // One period drives BOTH the top chart's window and the cards' 中央値/平均 (linked).
-    // 15m reads the 1-second history; 3h/6h/12h read the 5-min trend buckets (the
-    // 1-second history only spans ~15 min). Per-card click cycles 現在→中央値→平均.
-    const PERIOD_MS = { '15m': 15 * 60000, '3h': 3 * 3600000, '6h': 6 * 3600000, '12h': 12 * 3600000 };
-    const PERIOD_TITLE = { '15m': '直近15分・詳細（1秒）', '3h': '直近3時間・5分平均', '6h': '直近6時間・5分平均', '12h': '直近12時間・5分平均' };
-    let selectedPeriod = '15m';
-    try { const v = localStorage.getItem('rmssd-h10n.period.v1'); if (v && PERIOD_MS[v]) selectedPeriod = v; } catch (_) {}
+    // ---- card 中央値/平均: computed over the unified display range (selectedRange). ---
+    // The main chart is always the 1-second detail (~15 min); the range control lives on
+    // the trend side. Per-card click cycles 現在→中央値→平均.
 
     // Per-card display mode. Only metrics present in BOTH the 1-second history and the
     // 5-min buckets (rmssd/hr/resp) are togglable; SDNN/姿勢/歩数 stay live.
@@ -1016,38 +1081,13 @@
     const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
     const mean = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
 
-    // Values for a metric over the selected period: raw 1-second points for 15m, else
-    // the 5-min bucket means within the rolling window (includes the open live bucket).
+    // Values for a metric over the selected range, from the appropriate trend store
+    // (30-min for the two-week/30-/60-day ranges, else 5-min). Used by the card 中央値/平均.
     function periodSeries(metric) {
-      const from = Date.now() - PERIOD_MS[selectedPeriod];
-      if (selectedPeriod === '15m')
-        return history.filter((p) => new Date(p.t).getTime() >= from && p[metric] != null).map((p) => p[metric]);
-      return trend5.series().filter((b) => b.t >= from && b[metric] != null).map((b) => b[metric]);
+      return rangeStore().series().filter((b) => inRange(b.t) && b[metric] != null).map((b) => b[metric]);
     }
-    function periodBuckets() {
-      const from = Date.now() - PERIOD_MS[selectedPeriod];
-      return trend5.series().filter((b) => b.t >= from);
-    }
-    function updateMainTitle() {
-      const el = document.getElementById('mainChartTitle');
-      if (el) el.textContent = PERIOD_TITLE[selectedPeriod];
-    }
-    // Top chart for 3h/6h/12h: plot the 5-min buckets in the rolling window. (15m keeps
-    // the existing 1-second redrawFromHistory path; that function delegates here.)
-    function redrawMainPeriod() {
-      const s = periodBuckets();
-      chart.data.labels = s.map((b) => new Date(b.t).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }));
-      chart.data.datasets[0].data = s.map((b) => b.rmssd);
-      chart.data.datasets[1].data = s.map((b) => b.hr);
-      chart.data.datasets[2].data = s.map((b) => b.resp);
-      chart.data.datasets[3].data = s.map((b) => b.lean ?? null);
-      chart.$tones = s.map((b) => b.tone);
-      chart.$bodies = s.map((b) => b.body || null);
-      chart.$activitySpans = []; // per-second activity pins don't apply to the aggregated view
-      chart.update('none');
-      const info = document.getElementById('histInfo2');
-      if (info) info.textContent = s.length ? `${s.length} 区間 / 5分平均` : 'データなし';
-    }
+    // (The former 3h/6h/12h main-chart view was removed — the range control now lives on
+    // the trend side and drives the 3 trend charts + card stats, not the detail chart.)
     // Fill the togglable cards per their mode; 'now' uses the latest status frame,
     // 中央値/平均 are computed over the selected period.
     function renderCards() {
@@ -1062,23 +1102,9 @@
         const card = document.querySelector('.card[data-cardmetric="' + metric + '"]'); if (card) card.classList.toggle('agg', mode !== 'now');
       }
     }
-    // Period chips: one selection drives the main chart window AND the card stats.
-    // At LOAD we only sync the chip UI + title — the first chart draw is done by the boot
-    // init's redrawFromHistory() (which runs AFTER `activities`/history are initialized and
-    // already respects selectedPeriod). Calling redraw here ran before `let activities`
-    // (line ~1747) was initialized → a TDZ ReferenceError that aborted boot (no engine).
-    (function () {
-      const bar = document.getElementById('periodSel');
-      if (!bar) return;
-      const syncChips = () => bar.querySelectorAll('.pchip').forEach((b) => b.classList.toggle('active', b.dataset.period === selectedPeriod));
-      bar.querySelectorAll('.pchip').forEach((b) => b.addEventListener('click', () => {
-        if (!PERIOD_MS[b.dataset.period]) return;
-        selectedPeriod = b.dataset.period;
-        try { localStorage.setItem('rmssd-h10n.period.v1', selectedPeriod); } catch (_) {}
-        syncChips(); updateMainTitle(); redrawFromHistory(); renderCards();
-      }));
-      syncChips(); updateMainTitle(); // initial draw deferred to boot init (respects selectedPeriod)
-    })();
+    // The ‹ › stepper (wired to dayPrev/dayNext below) is the sole range control. The first
+    // trend draw is left to the boot init's redrawTrend() → refreshRangeSelector(); doing it
+    // here, before `let activities` is initialized, would TDZ-abort boot (no engine).
     // Per-card click: cycle 現在 → 中央値 → 平均 (independent per card).
     (function () {
       const next = { now: 'median', median: 'mean', mean: 'now' };
@@ -1258,7 +1284,7 @@
       history.push({ t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone,
         lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null, step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
       if (history.length > MAX_POINTS) history.shift();
-      trend5.feed(p); trend15.feed(p); // fold into the trend buckets (data only)
+      trend5.feed(p); trend15.feed(p); trend30.feed(p); // fold into the trend buckets (data only)
       saveHistory(false);
       // Drawing is skipped while hidden — the chart is rebuilt from `history` on
       // return; while visible we coalesce repaints to one per frame.
@@ -1274,7 +1300,8 @@
     function switchLocalUser(n) {
       // Persist the outgoing user's data before swapping keys.
       saveHistory(true);
-      trend5.setUser(n); trend15.setUser(n); // saves outgoing, loads incoming
+      trend5.setUser(n); trend15.setUser(n); trend30.setUser(n); // saves outgoing, loads incoming
+      seedTrend30();
       currentUser = n;
       STORAGE_KEY = histKeyFor(n);
       ACT_KEY = actKeyFor(n);
@@ -1308,8 +1335,8 @@
 
     // Date selector: ‹ older / › newer (toward Today). 'all' sits before the
     // oldest day. Filters both averaged charts to the chosen day.
-    document.getElementById('dayPrev').addEventListener('click', () => stepDay(-1));
-    document.getElementById('dayNext').addEventListener('click', () => stepDay(+1));
+    document.getElementById('dayPrev').addEventListener('click', () => stepRange(-1));
+    document.getElementById('dayNext').addEventListener('click', () => stepRange(+1));
 
     // ---- remote view + reload-from-snapshot (used by the remote bridge) ----
     // The phone's server pushes a snapshot (history/trend/activities for the
@@ -1318,7 +1345,8 @@
     window.__reloadFromStorage = (u) => {
       currentUser = u;
       STORAGE_KEY = histKeyFor(u); ACT_KEY = actKeyFor(u);
-      trend5.setUser(u, false); trend15.setUser(u, false); // load fresh, no save-out
+      trend5.setUser(u, false); trend15.setUser(u, false); trend30.setUser(u, false); // load fresh, no save-out
+      seedTrend30();
       history = loadHistory(); activities = loadActivities();
       lastSaved = 0;
       curBaseline = null; lastBaselineKey = '';
@@ -1344,7 +1372,7 @@
     const SERVER_KEY = 'rmssd-h10n.server.v1'; // persisted ON/OFF (device-wide)
     let snapTimer = null, serverBusy = false;
     const pushSnapshot = () => {
-      try { RmssdBridge.setSnapshot(JSON.stringify({ user: currentUser, history, trend: trend15.data, trend5: trend5.data, activities })); } catch (_) {}
+      try { RmssdBridge.setSnapshot(JSON.stringify({ user: currentUser, history, trend: trend15.data, trend5: trend5.data, trend30: trend30.data, activities })); } catch (_) {}
     };
     const setServerUi = (info) => {
       const running = info && info.running;
@@ -1396,7 +1424,7 @@
         history.push({ t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone,
           lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null,
           step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
-        trend5.feed(p); trend15.feed(p);
+        trend5.feed(p); trend15.feed(p); trend30.feed(p);
       }
       while (history.length > MAX_POINTS) history.shift();
       saveHistory(true); saveTrendAll(true);
@@ -1417,7 +1445,7 @@
       }
       history = [...byT.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).slice(-MAX_POINTS);
       saveHistory(true);
-      trend5.replaceBuckets(pts); trend15.replaceBuckets(pts);
+      trend5.replaceBuckets(pts); trend15.replaceBuckets(pts); trend30.replaceBuckets(pts);
       saveTrendAll(true);
       if (!pageHidden) { redrawFromHistory(); redrawTrend(); }
       // Brief, unobtrusive confirmation in the calibration message slot.
@@ -1436,7 +1464,7 @@
     document.getElementById('clearBtn').addEventListener('click', () => {
       if (!confirm('保存した履歴（詳細・長期トレンド）をすべて消去しますか？')) return;
       history = [];
-      trend5.clear(); trend15.clear();
+      trend5.clear(); trend15.clear(); trend30.clear();
       try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
       redrawFromHistory();
       redrawTrend();
@@ -1459,7 +1487,7 @@
 
     document.getElementById('exportBtn').addEventListener('click', async () => {
       const btn = document.getElementById('exportBtn');
-      if (!history.length && !trend15.data.length && !trend5.data.length && !activities.length) {
+      if (!history.length && !trend15.data.length && !trend5.data.length && !trend30.data.length && !activities.length) {
         alert('エクスポートするデータがまだありません。'); return;
       }
       const orig = btn.querySelector('.lbl-full').textContent;
@@ -1478,6 +1506,10 @@
           { name: `rmssd-u${u}-trend15m-${stamp}.csv`, mime: 'text/csv',
             content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
               trend15.data.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
+                b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) },
+          { name: `rmssd-u${u}-trend30m-${stamp}.csv`, mime: 'text/csv',
+            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
+              trend30.data.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
                 b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) },
           { name: `rmssd-u${u}-activities-${stamp}.csv`, mime: 'text/csv',
             content: toCsv(['type', 'label', 'category', 'start', 'end', 'duration_sec'],
