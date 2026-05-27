@@ -79,7 +79,7 @@ pwsh -NoProfile -Command "Get-NetTCPConnection -State Listen | Where-Object {$_.
 - **状態(気分)**: `StateClassifier`が **lnRMSSD差分 + HRデッドバンド** で分類し、**45sのヒステリシス**でラベルのバタつきを抑制。区分: リラックス・回復 / 回復傾向 / 平常・安定 / 集中 / ストレス・緊張↑ / 高負荷・興奮。状態判定にはRMSSDの**EMA平滑値**を使う。**HRV推定であって診断ではない**。
 - **呼吸数**: RSA + **Welch PSD**（60s窓50%オーバーラップ平均）。探索帯0.10–0.50Hz。confidenceは `peak/ノイズフロア(中央値)` のSNRとピーク鋭さの合成＝**信号品質**（確率ではない）。約30–60秒は`preview`（暫定）、60秒以上で正規。直近5推定の中央値で時間平滑。低RMSSD(弱RSA)では「正しく低品質」になり得る。
 - **タイムライン目安**: 計測待ち解消 約1–2秒 / 呼吸数 暫定 約30秒・正規 約60秒 / baseline確定(状態表示) 約60秒。
-- **長期トレンド**: ダッシュボード下部に **15分平均**のRMSSD/HR/呼吸グラフ。詳細履歴とは別キー `rmssd-h10n.trend.v1`（最大1500区間≒約15日）でlocalStorage永続化し、日をまたいで蓄積。読込時は詳細履歴から過去バケットを再構築し、以降はライブ点を現在バケットに加算→15分境界で確定。
+- **長期トレンド**: ダッシュボード下部に **5分／15分／30分平均**のRMSSD/HR/呼吸グラフ（3段、共通 `makeTrend` ファクトリ）。各粒度は独立キーでlocalStorage永続化（`rmssd-h10n.trend5.v1`／`.trend.v1`(15分・back-compat)／`.trend30.v1`、最大4000/1500/800区間）し、日をまたいで蓄積。読込時は詳細履歴から過去バケットを再構築し、以降はライブ点を現在バケットに加算→各境界で確定。**穴埋め再計算の再取得窓 `WIDE`（`app.js`）は最広バケット幅=30分**（30分バケットを完全にカバーしないと部分集計で平均が壊れる）。
 - **状態カラー帯**: WS `point` に `tone` を乗せ、Chart.jsプラグイン（`stateBandPlugin`）で両グラフ背景を状態色で塗る。トレンドはバケット最多トーン。過去データ（tone未記録）は `toneFromVitals()`（クライアント版classifyRaw）でRMSSD/HRから遡って再計算（現baseline適用・ヒステリシス無し）。`refreshBands()`はbaseline確定時に発火。
 - **UI規約**: 絵文字は使わない（色インジケータ＋テキストで表現）。ダッシュボードの詳細履歴は **localStorage** に保存（`rmssd-h10n.history.v1`、最大約3600点）、「履歴をクリア」で詳細・長期トレンド両方を消去。
 
@@ -140,7 +140,7 @@ app/src/app.js + app/www/index.html    ダッシュボード（esbuild: src→ww
 - **H10電池残量**: Polar SDK `batteryLevelReceived`（接続時＋変化時／`FEATURE_BATTERY_INFO`）→ Sink `onBattery` → status `battery` → 接続バッジ隣に「電池 NN%」（≤20%黄/≤10%赤、切断中も last-known 保持）。Node CLI は標準 Battery Service `0x180F`/`0x2A19` を接続時 read（`src/ble.js discoverBattery`）。
 - **全画面表示**: `MainActivity.hideStatusBar()` が `WindowInsetsControllerCompat` で**上のステータスバーのみ** immersive 非表示（ナビバーは残置／スワイプで一時表示）。`onCreate`＋`onWindowFocusChanged` で再適用。
 - **RMSSDロバスト窓化**（`Rmssd.java`＋`src/rmssd.js`、数値等価）: 窓内の successive-difference を **「平均RRの20%超(Malik流)」かつ Hampel/MAD 外れ値**でゲートし、単一の期外収縮/アーティファクト差分が30s窓を支配する**段差/針**を防ぐ。**拍は捨てない**＝HR/SDNN不変、2拍以上で必ず非null。RMSSDは補正済みRR前提（Task Force 1996／Kubios）。
-- **期間セレクタ＋カード集計**: メイングラフ上に **15分/3時間/6時間/12時間**（`selectedPeriod`、localStorage永続）。15分=1秒履歴、3/6/12時間=**trend5(5分バケット)**から描画（1秒履歴は~15分しかない）。カード（RMSSD/心拍/呼吸）タップで **現在→中央値→平均**（カードごと独立、選択期間で集計）。**初期描画は boot 初期化に任せる**——`activities`(let) 初期化前にグラフ再描画(`redrawFromHistory`→`activitySpans`)を呼ぶと **TDZ で boot が落ち `RmssdBridge.start()` に到達せずエンジン未起動**になる（重要なハマりどころ）。
+- **範囲セレクタ＋カード集計**: 長期トレンド見出しの **`‹ ›` ステッパー1つ**が表示範囲を統括（`selectedRange`、`rmssd-h10n.range.v1`永続）。固定9段を広い→狭い順に順送り: **60日間/30日間/二週間/一週間/昨日/当日/12時間/6時間/3時間**（既定=当日）。`Nd`/`Nh`はnowからのローリング窓、`昨日`/`当日`はカレンダー日。**メイングラフは常に1秒詳細(~15分)固定**（旧 `selectedPeriod`＋メイン期間チップ＋`redrawMainPeriod`は撤去）。範囲は **5分/15分/30分の3トレンドグラフ**と**カード中央値/平均**に連動。カード（RMSSD/心拍/呼吸）タップで **現在→中央値→平均**（カードごと独立）。カード集計は `rangeStore()` が範囲に応じ最適ストア選択（**二週間/30日/60日=30分、それ未満=5分**）。長期範囲のため保持拡張: **trend15 max2880(≈30日)/trend30 max3000(≈62日)**。**初期描画は boot 初期化に任せる**——`activities`(let) 初期化前にトレンド再描画(`redrawTrend`等)を呼ぶと **TDZ で boot が落ち `RmssdBridge.start()` に到達せずエンジン未起動**になる（重要なハマりどころ）。
 - **ACC間欠/省電力トグル**（`設定→省電力`、既定 **OFF**＝ACC連続）: 25Hz は H10 ACC の**最小レート**なので、ON時は ACC を **5s/30s の間欠**にして稼働を~83%削減（`PolarBle.setAccDutyCycle`／`HrvEngine.setPowerSave`／kv `powerSave` 永続）。ON中は **姿勢~30s更新・歩数オミット**（status `steps.disabled`→「省電力中」表示）。**RR/HR は別系統(0x2A37)で連続＝間欠化しない**が、ACC の start/stop が単一BLEリンク上で **RR を間接的に乱しうる**割の悪いトレードオフ→**既定OFF**（実機検証まで非推奨）。
 
 ## トレンド分析

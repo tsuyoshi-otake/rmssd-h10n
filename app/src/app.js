@@ -180,7 +180,7 @@ async function nativeCatchUp() {
 // correct even though they arrive after newer live data.
 async function nativeBackfillMerge(fromMs, toMs, truncated) {
   if (!useNative) return;
-  const WIDE = 15 * 60 * 1000; // widest trend bucket — covers both 5- and 15-min stores
+  const WIDE = 30 * 60 * 1000; // widest trend bucket — covers 5-, 15- and 30-min stores
   const lo = Math.floor(fromMs / WIDE) * WIDE;
   const hi = Math.floor(toMs / WIDE) * WIDE + WIDE;
   const pts = [];
@@ -359,6 +359,7 @@ function makeRemoteBridge() {
       if (snap.history) localStorage.setItem(`rmssd-h10n.history.v1.u${u}`, JSON.stringify(snap.history));
       if (snap.trend) localStorage.setItem(`rmssd-h10n.trend.v1.u${u}`, JSON.stringify(snap.trend));
       if (snap.trend5) localStorage.setItem(`rmssd-h10n.trend5.v1.u${u}`, JSON.stringify(snap.trend5));
+      if (snap.trend30) localStorage.setItem(`rmssd-h10n.trend30.v1.u${u}`, JSON.stringify(snap.trend30));
       if (snap.activities) localStorage.setItem(`rmssd-h10n.activities.v1.u${u}`, JSON.stringify(snap.activities));
     } catch (_) {}
     if (window.__reloadFromStorage) window.__reloadFromStorage(u);
