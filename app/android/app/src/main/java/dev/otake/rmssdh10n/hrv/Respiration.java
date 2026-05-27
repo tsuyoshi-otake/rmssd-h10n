@@ -5,32 +5,52 @@ import java.util.Arrays;
 import java.util.List;
 
 /**
- * Respiration-rate estimation from RR intervals via RSA (Welch PSD). Java port
- * of src/respiration.js, numerically equivalent so the native engine reports the
- * same breaths/min the WebView pipeline does. Pure DSP: linear resample to 4 Hz,
- * 2nd-order polynomial detrend, Hann-windowed Welch periodogram over the search
- * band, peak vs median-floor SNR + sharpness → signal-quality confidence.
+ * Respiration-rate estimation from RR intervals via RSA (Welch PSD). Originally a
+ * port of src/respiration.js; the native engine is now Android's only compute
+ * path, so this has DIVERGED from the JS reference on purpose to cut dropouts:
+ *   - scan band extended down to 0.10 Hz so slow/relaxed breathing (6–9/min at
+ *     rest, while coding, asleep) is no longer rejected as out-of-band. The
+ *     0.10–0.15 Hz "slow" sub-band overlaps the Mayer wave (~0.1 Hz baroreflex),
+ *     so it is admitted only under a stricter SNR + sharpness gate and reported
+ *     at lower confidence (Task Force 1996 HF=0.15–0.40; Julien 2006 Mayer wave;
+ *     HRV-biofeedback resonance ≈ 6/min = 0.1 Hz).
+ *   - MIN_SNR lowered 2.5→2.0: a low-confidence number beats a blank (the UI
+ *     shows signal quality separately). Natarajan 2021 gates RSA peaks by SNR.
+ * The per-failure blanking is handled by the consumer (HrvEngine holds the last
+ * good value and decays confidence). Pure DSP otherwise: linear resample to 4 Hz,
+ * 2nd-order polynomial detrend, Hann-windowed Welch periodogram, peak vs
+ * median-floor SNR + sharpness → signal-quality confidence.
  */
 public final class Respiration {
     private static final double FS = 4;
-    private static final double SEARCH_MIN = 0.15, SEARCH_MAX = 0.45, MAYER_MAX = 0.16, STEP = 0.005;
+    // SCAN_MIN is how low we look; SEARCH_MIN is the normal (HF) full-confidence
+    // lower bound. [SCAN_MIN, SEARCH_MIN) is the gated slow-breathing sub-band.
+    private static final double SCAN_MIN = 0.10, SEARCH_MIN = 0.15, SEARCH_MAX = 0.45, STEP = 0.005;
     private static final double SEG_SEC = 60, OVERLAP = 0.5;
     private static final double PREVIEW_SPAN_MS = 30000, MIN_SPAN_MS = 60000;
     private static final int MIN_ENTRIES = 20;
-    private static final double MIN_SNR = 2.5;
+    private static final double MIN_SNR = 2.0;          // normal band
+    private static final double SLOW_SNR = 4.0;         // slow band: stricter (Mayer guard)
+    private static final double SLOW_MAX_WIDTH = 0.04;  // slow band: peak must be sharp
 
     public static final class Result {
         public final Double breathsPerMin; // null when no estimate
         public final Double confidence;     // signal quality 0..1
         public final boolean valid, preview;
         public final String reason;
-        Result(Double br, Double conf, boolean valid, boolean preview, String reason) {
+        public final Double snr, freqHz, peakWidthHz; // diagnostics (null on fail)
+        public final boolean slow;                     // peak fell in the slow sub-band
+        Result(Double br, Double conf, boolean valid, boolean preview, String reason,
+               Double snr, Double freqHz, Double peakWidthHz, boolean slow) {
             this.breathsPerMin = br; this.confidence = conf; this.valid = valid;
             this.preview = preview; this.reason = reason;
+            this.snr = snr; this.freqHz = freqHz; this.peakWidthHz = peakWidthHz; this.slow = slow;
         }
     }
 
-    private static Result fail(String reason) { return new Result(null, 0.0, false, false, reason); }
+    private static Result fail(String reason) {
+        return new Result(null, 0.0, false, false, reason, null, null, null, false);
+    }
 
     /** entries ascending by tMs (artifact-cleaned NN beats). */
     public static Result estimate(double[] xs, double[] ys) {
@@ -44,41 +64,92 @@ public final class Respiration {
         double[] sig = detrendPoly2(grid);
 
         List<Double> freqs = new ArrayList<>();
-        for (double f = SEARCH_MIN; f <= SEARCH_MAX + 1e-9; f += STEP) freqs.add(f);
+        for (double f = SCAN_MIN; f <= SEARCH_MAX + 1e-9; f += STEP) freqs.add(f);
 
         int segLen = (int) Math.round(SEG_SEC * FS);
         int hop = Math.max(1, (int) Math.round(segLen * (1 - OVERLAP)));
         double[] psd = welch(sig, FS, freqs, segLen, hop);
 
-        double peakP = -1; int peakK = -1;
-        for (int k = 0; k < psd.length; k++) if (psd[k] > peakP) { peakP = psd[k]; peakK = k; }
         double floor = median(psd);
-        double snr = floor > 0 ? peakP / floor : 0;
+
+        // Pick the strongest LOCAL maximum (not the global max) over the whole
+        // band: a genuine oscillation is a bump (a bin above both neighbours)
+        // whose fundamental dominates its harmonics, while the Mayer wave (~0.1 Hz
+        // baroreflex) leaks only a monotonically-decaying tail into the low end —
+        // which is NOT a local max and so is excluded by construction (it would
+        // otherwise win as the global max and be reported as a bogus ~6/min
+        // "breath", as seen live with snr≈52 at exactly 0.10 Hz).
+        int peakK = bestLocalMax(psd, freqs, SCAN_MIN, SEARCH_MAX + 1e-9);
+        if (peakK < 0) {
+            double gf = freqs.get(argmax(psd));
+            return new Result(null, 0.0, false, false, "no_clear_peak",
+                    null, Math.round(gf * 1000) / 1000.0, null, false);
+        }
+        double snr = floor > 0 ? psd[peakK] / floor : 0;
         double peakF = freqs.get(peakK);
+        double peakWidthHz = widthAt(psd, peakK);
 
-        if (snr < MIN_SNR) return fail("no_clear_peak");
-        if (peakK <= 0 || peakK >= psd.length - 1) return fail("peak_at_band_edge");
-
-        double half = peakP / 2;
-        int lo = peakK, hi = peakK;
-        while (lo > 0 && psd[lo] > half) lo--;
-        while (hi < psd.length - 1 && psd[hi] > half) hi++;
-        double peakWidthHz = (hi - lo) * STEP;
+        // Classify by frequency. The slow sub-band (0.10–0.15 Hz) overlaps the
+        // Mayer wave, so it is admitted only under a strict SNR + sharpness gate
+        // and reported at lower confidence; the HF band uses the normal gate.
+        boolean slow = peakF < SEARCH_MIN;
+        if (slow) {
+            if (snr < SLOW_SNR || peakWidthHz > SLOW_MAX_WIDTH) {
+                return new Result(null, 0.0, false, false, "slow_unconfirmed",
+                        Math.round(snr * 10) / 10.0, Math.round(peakF * 1000) / 1000.0,
+                        Math.round(peakWidthHz * 1000) / 1000.0, true);
+            }
+        } else if (snr < MIN_SNR) {
+            return new Result(null, 0.0, false, false, "no_clear_peak",
+                    Math.round(snr * 10) / 10.0, Math.round(peakF * 1000) / 1000.0,
+                    Math.round(peakWidthHz * 1000) / 1000.0, false);
+        }
 
         double snrScore = clamp01((snr - MIN_SNR) / (12 - MIN_SNR));
         double widthScore = clamp01(1 - peakWidthHz / 0.08);
         double confidence = 0.7 * snrScore + 0.3 * widthScore;
-        if (peakF < MAYER_MAX && snr < 6) confidence *= 0.4;
+        if (slow) confidence *= 0.5; // honest: slow band is harder to separate from LF
 
         boolean preview = span < MIN_SPAN_MS;
         if (preview) confidence *= 0.6;
 
         double br = Math.round(peakF * 60 * 10) / 10.0;
         double conf = Math.round(clamp01(confidence) * 100) / 100.0;
-        return new Result(br, conf, !preview, preview, preview ? "preview" : "ok");
+        String reason = preview ? "preview" : (slow ? "ok_slow" : "ok");
+        return new Result(br, conf, !preview, preview, reason,
+                Math.round(snr * 10) / 10.0, Math.round(peakF * 1000) / 1000.0,
+                Math.round(peakWidthHz * 1000) / 1000.0, slow);
     }
 
     private static double clamp01(double v) { return Math.max(0, Math.min(1, v)); }
+
+    /** Strongest interior local maximum whose frequency is in [fLo, fHi), or -1.
+     *  A local max (psd[k] above both neighbours) is a real oscillatory bump; a
+     *  monotonic LF tail leaking into the band is excluded by construction. */
+    private static int bestLocalMax(double[] psd, List<Double> freqs, double fLo, double fHi) {
+        int best = -1; double bestP = -1;
+        for (int k = 1; k < psd.length - 1; k++) {
+            double f = freqs.get(k);
+            if (f < fLo || f >= fHi) continue;
+            if (psd[k] > psd[k - 1] && psd[k] >= psd[k + 1] && psd[k] > bestP) { bestP = psd[k]; best = k; }
+        }
+        return best;
+    }
+
+    /** -3 dB (half-power) width around bin k, in Hz. */
+    private static double widthAt(double[] psd, int k) {
+        double half = psd[k] / 2;
+        int lo = k, hi = k;
+        while (lo > 0 && psd[lo] > half) lo--;
+        while (hi < psd.length - 1 && psd[hi] > half) hi++;
+        return (hi - lo) * STEP;
+    }
+
+    private static int argmax(double[] a) {
+        int idx = 0; double m = a.length > 0 ? a[0] : 0;
+        for (int i = 1; i < a.length; i++) if (a[i] > m) { m = a[i]; idx = i; }
+        return idx;
+    }
 
     private static double[] resampleLinear(double[] xs, double[] ys, double fs, double t0, double tEnd) {
         double dtMs = 1000 / fs;

@@ -124,4 +124,18 @@ async function discoverHr(peripheral) {
   return { hrm };
 }
 
-module.exports = { noble, scanAndConnect, discoverPmd, discoverHr, disconnectWithTimeout };
+/**
+ * Discover the standard Battery Level characteristic (0x2A19, Battery Service
+ * 0x180F). Optional: returns null when the device doesn't expose it, so a
+ * missing/failed battery service never breaks the HR session.
+ * @returns {Promise<any|null>} the battery-level characteristic, or null
+ */
+async function discoverBattery(peripheral) {
+  const { characteristics } = await peripheral.discoverSomeServicesAndCharacteristicsAsync(
+    [pmd.BATTERY_SERVICE],
+    [pmd.BATTERY_LEVEL]
+  );
+  return characteristics.find((c) => c.uuid === pmd.BATTERY_LEVEL) || null;
+}
+
+module.exports = { noble, scanAndConnect, discoverPmd, discoverHr, discoverBattery, disconnectWithTimeout };

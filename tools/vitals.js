@@ -35,6 +35,7 @@ function render(s) {
     `HR        : ${f(s.hr, 'bpm')}`,
     `SDNN      : ${f(s.sdnn, 'ms')}`,
     `RR window : ${s.rrCount ?? '–'}  (total beats ${s.beatsTotal ?? '–'}, rejected ${s.rejected ?? '–'})`,
+    `battery   : ${s.battery != null ? `${s.battery}%` : '–'}`,
     `updated   : ${s.updatedAt || '?'}`,
   ].join('\n');
 }

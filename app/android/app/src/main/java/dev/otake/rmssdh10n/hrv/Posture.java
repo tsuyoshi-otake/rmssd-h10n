@@ -46,12 +46,13 @@ public final class Posture {
         public final Integer leanDeg;    // null when not calibrated/receiving
         public final Integer activity;   // null when not receiving
         public final String sleepPos;    // supine|prone|left|right, only when lying
+        public final String leanDir;     // forward|back when leaning (needs supineRef), else null
 
         Result(boolean receiving, boolean calibrated, String state, Integer leanDeg,
-               Integer activity, boolean moving, String sleepPos) {
+               Integer activity, boolean moving, String sleepPos, String leanDir) {
             this.receiving = receiving; this.calibrated = calibrated; this.state = state;
             this.leanDeg = leanDeg; this.activity = activity; this.moving = moving;
-            this.sleepPos = sleepPos;
+            this.sleepPos = sleepPos; this.leanDir = leanDir;
         }
     }
 
@@ -98,7 +99,14 @@ public final class Posture {
         return ref.copy();
     }
 
-    public Vec setReference() { return setRefInternal(); }
+    // Manual upright calibration. Reject while moving so a press mid-motion can't
+    // lock in a garbage reference (the auto path already rest-gates); the caller
+    // tells the user to hold still and try again.
+    public Vec setReference() {
+        if (g == null) return null;
+        if (activity > REST_ACTIVITY) return null;
+        return setRefInternal();
+    }
 
     public Vec setSupineReference() {
         if (g == null || ref == null) return null;
@@ -122,17 +130,33 @@ public final class Posture {
         return aLat > 0 ? "right" : "left";
     }
 
+    /** Front/back lean direction while sitting/standing: project the off-upright
+     *  part of gravity onto the posterior axis (supineRef ⊥ upright). +ve = the
+     *  back tilts down (reclining onto a backrest), -ve = the chest tilts down
+     *  (slouching forward). Returns "forward" | "back", or null without supineRef.
+     *  This is what a chest accelerometer needs to tell 前のめり from もたれ — the
+     *  lean *angle* alone is the same for both. */
+    public String leanDir() {
+        if (g == null || ref == null || supineRef == null) return null;
+        Vec Lh = norm(ref);
+        if (Lh == null) return null;
+        Vec Ph = norm(sub(supineRef, scale(Lh, dot(supineRef, Lh))));
+        if (Ph == null) return null;
+        Vec gp = sub(g, scale(Lh, dot(g, Lh)));
+        return dot(gp, Ph) > 0 ? "back" : "forward";
+    }
+
     public Result compute() { return compute(System.currentTimeMillis()); }
 
     public Result compute(long nowMs) {
         boolean receiving = g != null && (nowMs - lastSampleAt) < 3000;
         if (g == null || !receiving) {
-            return new Result(false, ref != null, "nosignal", null, null, false, null);
+            return new Result(false, ref != null, "nosignal", null, null, false, null, null);
         }
         int act = (int) Math.round(activity);
         boolean moving = act > MOVE_ACTIVITY;
         if (ref == null) {
-            return new Result(true, false, "uncal", null, act, moving, null);
+            return new Result(true, false, "uncal", null, act, moving, null, null);
         }
         int leanDeg = (int) Math.round(angleBetween(g, ref));
         String state;
@@ -141,6 +165,8 @@ public final class Posture {
         else if (leanDeg <= LEAN_RECLINED) state = "reclined";
         else state = "lying";
         String sp = state.equals("lying") ? sleepPos() : null;
-        return new Result(true, true, state, leanDeg, act, moving, sp);
+        // Forward vs back only matters while sitting/standing and leaning enough.
+        String dir = (!state.equals("lying") && leanDeg > LEAN_UPRIGHT) ? leanDir() : null;
+        return new Result(true, true, state, leanDeg, act, moving, sp, dir);
     }
 }

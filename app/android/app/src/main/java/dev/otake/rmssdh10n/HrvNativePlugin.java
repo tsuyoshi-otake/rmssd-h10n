@@ -36,6 +36,7 @@ public class HrvNativePlugin extends Plugin {
         MonitorService.registerEmitter(new HrvEngine.Emitter() {
             @Override public void status(String json) { emit("hrvStatus", json); }
             @Override public void point(String json) { emit("hrvPoint", json); }
+            @Override public void backfill(String json) { emit("hrvBackfill", json); }
         });
     }
 
@@ -81,12 +82,64 @@ public class HrvNativePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void setPowerSave(PluginCall call) {
+        boolean on = Boolean.TRUE.equals(call.getBoolean("on", true));
+        MonitorService s = MonitorService.INSTANCE;
+        if (s != null) s.nativeSetPowerSave(on);
+        JSObject ret = new JSObject();
+        ret.put("ok", s != null);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
     public void toggleSleepLR(PluginCall call) {
         MonitorService s = MonitorService.INSTANCE;
         Boolean swap = s != null ? s.nativeToggleSleepLR() : null;
         JSObject ret = new JSObject();
         ret.put("ok", swap != null);
         ret.put("swap", swap != null && swap);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void resetBaseline(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        boolean ok = s != null && s.nativeResetBaseline();
+        JSObject ret = new JSObject();
+        ret.put("ok", ok);
+        ret.put("applied", ok);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void setBaseline(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        Double r = call.getDouble("rmssd");
+        Double h = call.getDouble("hr");
+        boolean ok = s != null && r != null && h != null && s.nativeSetBaseline(r, h);
+        JSObject ret = new JSObject();
+        ret.put("ok", ok);
+        call.resolve(ret);
+    }
+
+    /** Relax-mode voice readout interval in seconds (0 = off; e.g. 60 or 30). */
+    @PluginMethod
+    public void setRelaxVoice(PluginCall call) {
+        int sec = call.getInt("sec", 0);
+        MonitorService s = MonitorService.INSTANCE;
+        if (s != null) s.nativeSetRelaxVoice(sec);
+        JSObject ret = new JSObject();
+        ret.put("ok", s != null);
+        ret.put("sec", sec);
+        call.resolve(ret);
+    }
+
+    /** Recent raw RR beats (JSON array string) for the Kubios/Elite-HRV export. */
+    @PluginMethod
+    public void getRrLog(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        JSObject ret = new JSObject();
+        ret.put("log", s != null ? s.nativeRrLog() : "[]");
         call.resolve(ret);
     }
 
@@ -122,6 +175,26 @@ public class HrvNativePlugin extends Plugin {
         ret.put("count", page.count);
         ret.put("hasMore", page.hasMore);
         ret.put("lastT", String.valueOf(page.lastT));
+        call.resolve(ret);
+    }
+
+    /** Unmerged backfill import ranges (JSON array string of {id,fromMs,toMs,restored,
+     *  truncated}). The WebView drains these on load/resume and re-fetches each range from
+     *  the DB — so a gap restored while no WebView was attached is still surfaced. This is
+     *  the reliable catch-up path; the live hrvBackfill event is just a low-latency nudge. */
+    @PluginMethod
+    public void getUnmergedImports(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("imports", db().unmergedImportsJson());
+        call.resolve(ret);
+    }
+
+    /** Flag import ids (CSV of integers) as merged so they are not merged again. */
+    @PluginMethod
+    public void markImportsMerged(PluginCall call) {
+        db().markImportsMerged(call.getString("ids", ""));
+        JSObject ret = new JSObject();
+        ret.put("ok", true);
         call.resolve(ret);
     }
 }

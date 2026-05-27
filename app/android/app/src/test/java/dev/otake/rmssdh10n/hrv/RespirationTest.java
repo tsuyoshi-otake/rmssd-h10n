@@ -41,4 +41,16 @@ public class RespirationTest {
         Respiration.Result r = Respiration.estimate(s[0], s[1]);
         assertTrue(!r.valid);
     }
+
+    /** Slow breathing (8/min ≈ 0.133 Hz) with a strong, sharp peak is now admitted
+     *  via the gated slow sub-band — previously rejected as out-of-band. */
+    @Test
+    public void slowBreathingAdmittedUnderGate() {
+        double[][] s = synth(8, 150, 40, 1000, 5);
+        Respiration.Result r = Respiration.estimate(s[0], s[1]);
+        assertTrue("valid slow", r.valid);
+        assertTrue("flagged slow", r.slow);
+        assertEquals("rate", 8.0, r.breathsPerMin, 1.5);
+    }
+
 }

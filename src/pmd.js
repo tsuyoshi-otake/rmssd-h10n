@@ -9,6 +9,10 @@ const PMD_DATA = 'fb005c8202e7f3871cad8acd2d8df0c8'; // notify
 const HR_SERVICE = '180d';
 const HR_MEASUREMENT = '2a37';
 
+// Standard Battery service — battery level % (0x180F / 0x2A19, single uint8 0-100).
+const BATTERY_SERVICE = '180f';
+const BATTERY_LEVEL = '2a19';
+
 // ECG settings: sample rate 130 Hz, resolution 14 bit.
 // Frame layout of the start command (see Polar SDK PMD spec):
 //   0x02            = REQUEST_MEASUREMENT_START
@@ -61,6 +65,8 @@ module.exports = {
   PMD_DATA,
   HR_SERVICE,
   HR_MEASUREMENT,
+  BATTERY_SERVICE,
+  BATTERY_LEVEL,
   ECG_START_COMMAND,
   ECG_STOP_COMMAND,
   ECG_SAMPLE_RATE,

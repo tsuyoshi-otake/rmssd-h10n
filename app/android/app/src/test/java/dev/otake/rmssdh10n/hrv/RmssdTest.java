@@ -54,4 +54,30 @@ public class RmssdTest {
         assertNull(r.rmssd);
         assertEquals(60.0, r.hr, 1e-9);
     }
+
+    @Test
+    public void robustGateIgnoresSingleEctopicDiff() {
+        // Steady ~800 ms RR (very low RMSSD) with ONE accepted outlier beat that
+        // squeaks past the ±25 % accept gate (990 = +23.75 % off median 800), like a
+        // compensatory pause. Its two ~190 ms successive diffs would otherwise put a
+        // ~55 ms plateau into the 30 s window; the robust gate must exclude them.
+        Rmssd w = new Rmssd(600000);
+        for (int i = 0; i < 12; i++) w.add(i, 800);
+        assertTrue(w.add(12, 990));            // accepted as a beat (level within 25 %)
+        for (int i = 13; i < 25; i++) w.add(i, 800);
+        Rmssd.Result r = w.compute(null);
+        assertEquals(25, r.count);             // beat kept — HR/SDNN intact
+        assertEquals(0, r.corrected);          // not rejected, only its diffs are gated
+        assertTrue("robust rmssd should collapse to ~0, got " + r.rmssd, r.rmssd < 5.0);
+    }
+
+    @Test
+    public void robustGateKeepsGenuineVariability() {
+        // Alternating 800/860 → every successive diff is 60 ms of REAL variability
+        // (60 < 20 % of the ~830 mean ≈ 166), so none may be gated.
+        Rmssd w = new Rmssd(600000);
+        for (int i = 0; i < 20; i++) w.add(i, (i % 2 == 0) ? 800 : 860);
+        Rmssd.Result r = w.compute(null);
+        assertEquals(60.0, r.rmssd, 1e-6);     // unchanged: all diffs retained
+    }
 }
