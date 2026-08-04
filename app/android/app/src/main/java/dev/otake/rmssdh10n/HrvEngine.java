@@ -76,7 +76,8 @@ public final class HrvEngine {
     private volatile boolean connected = false;
     private volatile Integer deviceHr = null;
     private volatile int deviceBattery = -1;     // H10 battery % (0-100); -1 = unknown. Last-known kept across a drop.
-    private volatile long lastRrAt = 0;          // wall-clock of the last RR received (point-freshness gate)
+    private volatile long lastRrAt = 0;          // wall-clock of the last accepted RR (data-freshness gate)
+    private volatile long lastRrReceivedAt = 0;  // last physiologically plausible RR (link watchdog)
     private volatile long connectedSince = 0;    // wall-clock the current BLE connection began (0 = disconnected)
     private long lastReconnectNudge = 0;         // stream-watchdog throttle (tick thread only)
     private int  staleForceReconnects = 0;       // forced reconnects this stale episode (tick thread only)
@@ -84,6 +85,7 @@ public final class HrvEngine {
     private volatile Speaker speaker;            // relax-mode TTS sink (null = silent)
     private volatile int relaxIntervalSec = 0;   // 0 = off; else read out every N s
     private long lastSpokenAt = 0;               // tick-thread throttle for the readout
+    private final BreathingAlert breathingAlert = new BreathingAlert();
     private volatile LinkStateSink linkStateSink; // foreground-notification link hint (null = none)
     private boolean linkStaleShown = false;       // last reported link-stale state (tick thread only)
     private double lastPeakMs = 0;
@@ -145,6 +147,12 @@ public final class HrvEngine {
         Log.i(TAG, "[relax] interval=" + relaxIntervalSec + "s");
         Speaker sp = speaker;
         if (sp != null) sp.speak(relaxIntervalSec > 0 ? "リラックス読み上げを開始します。" : "読み上げを停止します。");
+    }
+
+    /** Voice warning for sustained low RMSSD + fast/shallow breathing. */
+    public void setBreathingAlertVoice(boolean enabled) {
+        breathingAlert.setEnabled(enabled);
+        Log.i(TAG, "[breathing-alert] enabled=" + enabled);
     }
 
     public void setUser(int u) { this.user = u; }
@@ -250,15 +258,26 @@ public final class HrvEngine {
         return new PolarBle.Sink() {
             @Override public void onHr(int hr) { deviceHr = hr; }
             @Override public void onRr(double rrMs) {
-                lastRrAt = System.currentTimeMillis();
+                long receivedAt = System.currentTimeMillis();
+                if (!Double.isFinite(rrMs) || rrMs < 300 || rrMs > 2000) {
+                    synchronized (gate) {
+                        rrLog.add(new double[]{ receivedAt, rrMs, 0 });
+                        if (rrLog.size() > 2500) rrLog.remove(0);
+                    }
+                    return; // invalid input must not advance the beat timeline or freshness
+                }
+                lastRrReceivedAt = receivedAt;
                 synchronized (gate) {
                     lastPeakMs += rrMs;
                     beats++;
                     boolean accepted = win.add(lastPeakMs, rrMs);
                     win5.add(lastPeakMs, rrMs);
-                    rrLog.add(new double[]{ System.currentTimeMillis(), rrMs, accepted ? 1 : 0 });
+                    rrLog.add(new double[]{ receivedAt, rrMs, accepted ? 1 : 0 });
                     if (rrLog.size() > 2500) rrLog.remove(0);
-                    if (accepted) respiration.addAcceptedBeat(lastPeakMs, rrMs);
+                    if (accepted) {
+                        lastRrAt = receivedAt;
+                        respiration.addAcceptedBeat(lastPeakMs, rrMs);
+                    }
                 }
             }
             @Override public void onAcc(int x, int y, int z) {
@@ -294,7 +313,7 @@ public final class HrvEngine {
     /** Explicit (user) stop: mark the H10 recording discarded so the next launch does
      *  NOT auto-recover it. Distinct from an OS kill, which leaves it 'active'. */
     public void markUserStopped() {
-        try { db.recordingMarkDiscardedByUser(); } catch (Throwable t) { Log.w(TAG, "markUserStopped", t); }
+        try { db.recordingMarkDiscardedByUser(user); } catch (Throwable t) { Log.w(TAG, "markUserStopped", t); }
     }
 
     /** App returned to foreground — let the BLE driver restart its scan if needed. */
@@ -350,8 +369,8 @@ public final class HrvEngine {
         // orphan a re-subscribe can't fix → force a clean reconnect, bounded per episode so the
         // churn can't wedge the scanner. The force budget resets as soon as RR flows again.
         long cs = connectedSince;
-        if (lastRrAt > 0 && now - lastRrAt < POINT_FRESH_MS) staleForceReconnects = 0;
-        if (connected && cs > 0 && now - cs > STALE_STREAM_MS && lastRrAt < cs
+        if (lastRrReceivedAt > 0 && now - lastRrReceivedAt < POINT_FRESH_MS) staleForceReconnects = 0;
+        if (connected && cs > 0 && now - cs > STALE_STREAM_MS && lastRrReceivedAt < cs
                 && now - lastReconnectNudge > STALE_ACTION_MS) {
             PolarBle b = ble;
             if (b != null) {
@@ -372,10 +391,10 @@ public final class HrvEngine {
         // post-force-stop orphan the watchdog can't always clear from the phone side, or a
         // mid-session stall). Surface "re-attach H10"; only RR actually resuming clears it, so
         // the brief blip of a forced reconnect doesn't make it flap.
-        boolean delivering = lastRrAt > 0 && now - lastRrAt < POINT_FRESH_MS;
+        boolean delivering = lastRrReceivedAt > 0 && now - lastRrReceivedAt < POINT_FRESH_MS;
         boolean quiet = !delivering && (
-                (cs > 0 && lastRrAt < cs && now - cs > NOTIF_STALE_MS)     // connected, never delivered (orphan)
-             || (lastRrAt > 0 && now - lastRrAt > NOTIF_STALE_MS));        // delivered before, now silent (stall)
+                (cs > 0 && lastRrReceivedAt < cs && now - cs > NOTIF_STALE_MS)     // connected, never delivered (orphan)
+             || (lastRrReceivedAt > 0 && now - lastRrReceivedAt > NOTIF_STALE_MS)); // delivered before, now silent
         if (delivering && linkStaleShown) { linkStaleShown = false; notifyLinkStale(false); }
         else if (quiet && !linkStaleShown) { linkStaleShown = true; notifyLinkStale(true); }
 
@@ -387,6 +406,7 @@ public final class HrvEngine {
         Analysis.State state;
         BodyState.Result body;
         Analysis.Base base;
+        boolean fresh = connected && lastRrAt > 0 && (now - lastRrAt) < POINT_FRESH_MS;
         synchronized (gate) {
             r = win.compute(lastPeakMs);
             r5 = win5.compute(lastPeakMs);
@@ -397,9 +417,10 @@ public final class HrvEngine {
             Integer effHrInner = deviceHr != null ? deviceHr : (r.hr != null ? (int) Math.round(r.hr) : null);
             Double hrInner = effHrInner != null ? (double) effHrInner : null;
 
-            if (connected) baseline.add(rmssdSmInner, hrInner);
+            if (fresh) baseline.add(rmssdSmInner, hrInner);
             base = baseline.get();
-            state = classifier.update(rmssdSmInner, hrInner, base, now);
+            state = fresh ? classifier.update(rmssdSmInner, hrInner, base, now)
+                    : Analysis.classifyRaw(null, null, base);
 
             // Respiration (RSA): Welch recompute throttled inside the tracker + last-good hold.
             RespirationTracker.Result resp = respiration.compute(now, tickCount);
@@ -441,20 +462,20 @@ public final class HrvEngine {
             status.put("connected", connected);
             status.put("user", user);
             status.put("mode", "hr-rr");
-            status.put("hr", HrvJson.jn(hrVal));
-            status.put("rmssd", HrvJson.jn(rmssd));
-            status.put("rmssd5", HrvJson.jn(rmssd5));
-            status.put("rmssdSmoothed", HrvJson.jn(rmssdSm));
-            status.put("sdnn", HrvJson.jn(sdnn));
-            status.put("rrCount", r.count);
+            status.put("hr", HrvJson.jn(fresh ? hrVal : null));
+            status.put("rmssd", HrvJson.jn(fresh ? rmssd : null));
+            status.put("rmssd5", HrvJson.jn(fresh ? rmssd5 : null));
+            status.put("rmssdSmoothed", HrvJson.jn(fresh ? rmssdSm : null));
+            status.put("sdnn", HrvJson.jn(fresh ? sdnn : null));
+            status.put("rrCount", fresh ? r.count : 0);
             status.put("beatsTotal", beats);
             status.put("rejected", r.corrected);
             status.put("corrected", r.corrected);
             status.put("baseline", base != null ? new JSONObject().put("rmssd", round1(base.rmssd)).put("hr", round1(base.hr)) : JSONObject.NULL);
             status.put("calibration", round2(baseline.progress()));
             status.put("state", HrvJson.stateJson(state));
-            status.put("respiration", HrvJson.jn(respOut));
-            status.put("respirationConfidence", HrvJson.jn(respConf));
+            status.put("respiration", HrvJson.jn(fresh ? respOut : null));
+            status.put("respirationConfidence", HrvJson.jn(fresh ? respConf : null));
             status.put("respirationPreview", previewOut);
             status.put("posture", HrvJson.postureJson(p));
             status.put("steps", stepsEnabled
@@ -467,20 +488,35 @@ public final class HrvEngine {
             status.put("externalRecording", ble != null && ble.isExternalBlocking());
             status.put("restored", lastBackfillRestored);
             status.put("battery", deviceBattery >= 0 ? deviceBattery : JSONObject.NULL);
+            status.put("dataFresh", fresh);
+            status.put("sampleAt", lastRrAt > 0 ? HrvTime.localIso(lastRrAt) : JSONObject.NULL);
+            status.put("sampleAgeMs", lastRrAt > 0 ? now - lastRrAt : JSONObject.NULL);
             status.put("updatedAt", wall);
 
             String statusStr = status.toString();
-            db.setStatus(statusStr, now);
+            db.setStatus(user, statusStr, now);
             Emitter e = emitter;
             if (e != null) e.status(statusStr);
+
+            Speaker sp = speaker;
+            boolean warningSpoken = false;
+            if (sp != null) {
+                String warning = breathingAlert.update(now, fresh, rmssdSm,
+                        base != null ? base.rmssd : null, respOut, respConf, previewOut);
+                if (warning != null) {
+                    warningSpoken = true;
+                    lastSpokenAt = now; // prevent the periodic readout from replacing the warning in this tick
+                    Log.i(TAG, "[breathing-alert] " + warning);
+                    sp.speak(warning);
+                }
+            }
 
             // Relax-mode voice readout. Runs in the service tick, so it speaks with the
             // screen off / phone in a pocket (the WebView's JS timer would be throttled).
             // Only on a fresh live reading; silent while disconnected (no nagging).
             int rint = relaxIntervalSec;
-            Speaker sp = speaker;
-            if (rint > 0 && sp != null && hrVal != null
-                    && connected && lastRrAt > 0 && (now - lastRrAt) < POINT_FRESH_MS
+            if (!warningSpoken && rint > 0 && sp != null && hrVal != null
+                    && fresh
                     && now - lastSpokenAt >= rint * 1000L) {
                 lastSpokenAt = now;
                 String readout = RelaxReadout.format(hrVal, respOut, respConf, rmssd, rmssdSm,
@@ -492,14 +528,13 @@ public final class HrvEngine {
             // Persist a chart point only with a FRESH live reading (connected + an RR
             // arrived within POINT_FRESH_MS). t is floored to the whole second so a
             // backfilled point for the same second shares the primary key (dedup).
-            boolean fresh = connected && lastRrAt > 0 && (now - lastRrAt) < POINT_FRESH_MS;
             if (fresh && (hrVal != null || rmssd != null)) {
                 long tSec = (now / 1000L) * 1000L;
                 Integer leanOut = (p.calibrated && p.receiving && p.leanDeg != null) ? p.leanDeg : null;
                 String pointStr = HrvJson.buildPointJson(HrvTime.localIso(tSec), rmssd, hrVal, respOut,
                         state != null ? state.tone : null,
                         leanOut, p.state, p.leanDir, p.activity, stepDelta, body.state, p.sleepPos);
-                db.addPoint(tSec, pointStr);
+                db.addPoint(user, tSec, pointStr);
                 if (e != null) e.point(pointStr);
             }
         } catch (Exception ex) { Log.e(TAG, "json", ex); }

@@ -37,6 +37,7 @@
     header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .01em; white-space: nowrap; }
     #conn { font-size: 12px; color: var(--muted); white-space: nowrap; }
     #conn.on { color: var(--hrv); }
+    #conn.stale { color: var(--warn, #fbbf24); }
     #batt { font-size: 12px; color: var(--muted); white-space: nowrap; }
     #batt.warn { color: var(--tense); }
     #batt.low { color: var(--high); font-weight: 600; }
@@ -52,10 +53,10 @@
       border: 1px solid var(--line); border-radius: var(--pill); padding: 3px; }
     .users .lbl { display: none; }
     .lbl-short { display: none; }
-    .users button { border: none; background: transparent; padding: 5px 10px; min-width: 30px;
-      border-radius: var(--pill); color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
-    .users button:hover { background: var(--raised); color: var(--text); }
-    .users button.active { background: var(--accent); border-color: var(--accent); color: #04121c; font-weight: 700; }
+    .users .current { display: inline-flex; align-items: center; justify-content: center;
+      min-width: 30px; padding: 5px 10px; border-radius: var(--pill);
+      background: var(--accent); color: #04121c; font-variant-numeric: tabular-nums;
+      font-size: 12px; font-weight: 700; cursor: pointer; }
     /* settings menu */
     .srvurl { font-family: var(--mono); font-size: 11px; color: var(--hrv);
       cursor: pointer; padding: 2px 12px 8px; word-break: break-all; }
@@ -115,6 +116,26 @@
     .state.high    { --tone: var(--high); }
     .state.wait    { --tone: var(--wait); }
 
+    /* daily/range stress report */
+    .report { margin: 2px 0 12px; padding: 12px 14px; background: #0f141b; border: 1px solid #1f2630; border-radius: 12px; }
+    .report-empty { font-size: 13px; color: var(--muted); }
+    .rep-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+    .rep-num { font-size: 34px; font-weight: 700; line-height: 1; }
+    .rep-den { font-size: 13px; color: var(--muted); }
+    .rep-band { margin-left: auto; align-self: center; font-size: 13px; font-weight: 700; padding: 2px 12px; border-radius: 999px; border: 1px solid currentColor; }
+    .rep-gauge { height: 8px; border-radius: 999px; background: #1b2230; overflow: hidden; margin-bottom: 10px; }
+    .rep-gauge-fill { height: 100%; border-radius: 999px; transition: width .3s ease; }
+    .rep-rows { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+    .rep-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
+    .rep-row .rep-k { color: var(--muted); }
+    .rep-row .rep-v em { font-style: normal; color: #c9d3df; margin-left: 6px; }
+    .rep-dist { display: flex; height: 10px; border-radius: 6px; overflow: hidden; background: #1b2230; margin-bottom: 6px; }
+    .rep-dist > span { height: 100%; }
+    .rep-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+    .rep-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+    .rep-peaks { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12px; color: #c9d3df; margin-bottom: 6px; }
+    .rep-foot { font-size: 11px; color: var(--muted); }
+
     .cards { display: grid; grid-template-columns: repeat(5, 1fr) minmax(140px, .66fr); gap: 14px; margin-bottom: 14px; align-items: stretch; }
     .card {
       position: relative; background: var(--surface); border: 1px solid var(--line);
@@ -150,6 +171,7 @@
     .pchip.active { border-color: var(--accent); color: var(--text); background: rgba(56,189,248,.12); font-weight: 600; }
     .card.clickable { cursor: pointer; }
     .card.clickable:active { transform: scale(.99); }
+    .card.clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
     .card.agg { background: rgba(56,189,248,.05); }
     .cardmode { font-size: 10px; font-weight: 700; color: var(--accent); margin-left: 5px; letter-spacing: .03em; }
     canvas { display: block; }
@@ -165,6 +187,7 @@
     .daysel button:disabled { opacity: .35; cursor: default; }
     .daysel #dayLabel { font-size: 12px; font-weight: 600; min-width: 78px; text-align: center;
       font-variant-numeric: tabular-nums; }
+    .zoom-open { margin-left: auto; padding: 3px 9px; font-size: 12px; border-radius: 8px; }
     .note { font-size: 11px; color: var(--faint); margin-top: 12px; line-height: 1.6; }
 
     /* Landscape (phone/tablet held sideways): compress the chrome — the header is
@@ -176,7 +199,7 @@
       header h1 { font-size: 14px; }
       #conn, #calib { font-size: 11px; }
       #histInfo { display: none; }
-      .users button { padding: 4px 9px; min-width: 27px; }
+      .users .current { padding: 4px 9px; min-width: 27px; }
       .wrap { padding: 12px 16px; }
       .state { padding: 14px 16px 14px 18px; gap: 16px; margin-bottom: 12px; grid-template-columns: 1fr minmax(140px, 182px); }
       .state .label { font-size: 19px; }
@@ -201,7 +224,7 @@
       header h1 .lbl-full { display: none; } header h1 .lbl-short { display: inline; }
       #conn { display: none; } /* connection shown by the brand mark to save width */
       #histInfo { display: none; }
-      .users button { padding: 5px 9px; min-width: 28px; }
+      .users .current { padding: 5px 9px; min-width: 28px; }
       .wrap { padding: 13px; }
       .state { grid-template-columns: 1fr; gap: 14px; padding: 16px 18px; margin-bottom: 12px; }
       .state .label { font-size: 21px; }
@@ -240,6 +263,41 @@
     .modal .dayhead .cnt { font-size: 11px; color: var(--faint); margin-left: 6px; }
     .modal .dayhead button { padding: 2px 8px; font-size: 11px; color: var(--muted); }
     .modal .close { float: right; }
+    .zoom-modal { width: min(1080px, 100%); max-height: 94vh; overflow: hidden; display: flex; flex-direction: column; }
+    .zoom-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+    .zoom-head h2 { flex: none; }
+    .zoom-info { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .zoom-chartbox { height: min(70vh, 620px); min-height: 320px; background: var(--surface);
+      border: 1px solid var(--line); border-radius: var(--r); padding: 14px; touch-action: pan-y; }
+    .zoom-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+    .zoom-controls button { width: 32px; height: 32px; padding: 0; border-radius: 8px; font-size: 18px; line-height: 1; }
+    .zoom-controls .all { width: auto; padding: 0 11px; font-size: 12px; }
+    .zoom-controls input[type="range"] { flex: 1 1 180px; min-width: 0; accent-color: var(--accent); }
+    .zoom-controls input[type="range"]:disabled { opacity: .35; }
+    .zoom-controls .range-label { min-width: 78px; text-align: right; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    @media (orientation: landscape) {
+      .modal-bg { padding: 8px; }
+      .zoom-modal { width: 100%; height: calc(100vh - 16px); max-height: none; padding: 10px 12px; overflow: hidden; }
+      .zoom-head { margin-bottom: 6px; gap: 8px; }
+      .zoom-head h2 { font-size: 14px; }
+      .zoom-info { font-size: 11px; }
+      .zoom-chartbox { flex: 1 1 auto; height: auto; min-height: 0; padding: 8px; }
+      .zoom-controls { flex: none; margin-top: 8px; gap: 6px; }
+      .zoom-controls button { width: 34px; height: 30px; font-size: 17px; }
+      .zoom-controls .all { padding: 0 10px; }
+      .zoom-controls input[type="range"] { flex-basis: 160px; }
+      .zoom-controls .range-label { min-width: 54px; font-size: 11px; }
+    }
+    .data-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
+    .data-field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+    .data-field select { width: 100%; background: var(--surface-2); color: var(--text);
+      border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font: inherit; }
+    .data-check { display: flex; align-items: center; gap: 8px; margin: 8px 0 14px; font-size: 13px; color: var(--text); }
+    .data-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 14px; }
+    .data-actions .danger { border-color: var(--high); color: var(--high); }
+    .data-stats { display: grid; gap: 6px; margin-top: 12px; font-size: 12px; color: var(--muted); }
+    .data-stat { display: flex; justify-content: space-between; gap: 8px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+    .data-stat b { color: var(--text); font-weight: 650; }
     .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
     .grid button { padding: 12px 6px; border-radius: 10px; border-left: 4px solid var(--faint); text-align: center; line-height: 1.3; }
     .recent-row { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--line-soft); font-size: 13px; }
@@ -264,7 +322,7 @@
     /* remote (PC) view is read-only: hide control buttons, but keep the settings
        menu reachable so export (CSV) still works from the browser. */
     .remote-view #recalibBtn, .remote-view #recalibFullBtn, .remote-view #editBaseBtn, .remote-view #recalPostureBtn, .remote-view #supineBtn, .remote-view #sleepLRBtn,
-    .remote-view #clearBtn, .remote-view #orientBtn, .remote-view #serverBtn, .remote-view .srvurl,
+    .remote-view #clearBtn, .remote-view #dataManageBtn, .remote-view #orientBtn, .remote-view #serverBtn, .remote-view .srvurl,
     .remote-view #userSel, .remote-view #actStartBtn, .remote-view #settingsMenu .sep { display: none !important; }
     @media (max-width: 520px) { .grid { grid-template-columns: repeat(3, 1fr); } }
     @media (orientation: landscape) { .grid { grid-template-columns: repeat(5, 1fr); } }
@@ -277,7 +335,7 @@
     <span id="batt" style="display:none"></span>
     <span id="calib"></span>
     <span class="spacer"></span>
-    <span class="users" id="userSel" title="計測対象のユーザーを切り替え（基準値・記録は個別）">
+    <span class="users" id="userSel" title="現在のユーザー（変更は 設定 → データ管理）">
       <span class="lbl">ユーザー</span>
     </span>
     <span id="histInfo" style="display:none"></span>
@@ -291,15 +349,17 @@
         <button id="supineBtn" title="あおむけで横になった状態を寝姿勢の基準として登録">あおむけで基準を取る</button>
         <button id="sleepLRBtn" title="寝姿勢の左右が逆に出るとき押す">寝姿勢の左右を反転</button>
         <div class="sep"></div>
-        <button id="exportBtn" title="履歴・トレンド・アクティビティ・基準値をCSVで書き出して共有"><span class="lbl-full">エクスポート (CSV)</span></button>
+        <button id="exportBtn" title="表示中の期間の 履歴・トレンド・アクティビティ・基準値 を CSVで書き出して共有"><span class="lbl-full">エクスポート (CSV)</span></button>
         <button id="orientBtn" title="画面の向きを切り替え（自動 → 縦 → 横）">画面: 自動</button>
         <button id="alertBtn" title="座りすぎ・高負荷が続いたら通知">通知: ON</button>
         <button id="relaxBtn" title="心拍・呼吸・状態を定期的に音声で読み上げ（画面OFFでも・目を閉じて把握できる）">リラックス読み上げ: OFF</button>
+        <button id="breathAlertBtn" title="RMSSDが基準以下で呼吸数が高めの状態が続いたら音声で警告">浅い呼吸警告: ON</button>
         <button id="powerBtn" title="省電力: H10の加速度を間欠サンプリングしてH10/スマホの電池を節約（姿勢は約30秒ごと・歩数オフ）。OFFで連続サンプリング（姿勢・歩数フル）">省電力: ON</button>
         <div class="sep"></div>
         <button id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止">PC共有サーバー: <span id="serverLabel">OFF</span></button>
         <div id="serverUrl" class="srvurl" title="クリックでURLをコピー" style="display:none"></div>
         <div class="sep"></div>
+        <button id="dataManageBtn" title="ユーザー別データの統合・完全クリア">データ管理</button>
         <button id="clearBtn" title="保存した履歴を消去">履歴をクリア</button>
       </div>
     </div>
@@ -326,9 +386,9 @@
     </div>
 
     <div class="cards">
-      <div class="card rmssd clickable" data-cardmetric="rmssd" title="タップで 現在→中央値→平均 を切替（選択期間で集計）"><div class="label">RMSSD<span class="cardmode" id="rmssdMode"></span></div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div><div class="base" id="rmssdBase"></div></div>
-      <div class="card hr clickable" data-cardmetric="hr" title="タップで 現在→中央値→平均 を切替（選択期間で集計）"><div class="label">心拍数<span class="cardmode" id="hrMode"></span></div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div><div class="base" id="hrBase"></div></div>
-      <div class="card resp clickable" data-cardmetric="resp" title="タップで 現在→中央値→平均 を切替（選択期間で集計）"><div class="label">呼吸数<span class="cardmode" id="respMode"></span></div><div class="value"><span id="resp">–</span><span class="unit">br/min</span></div><div class="base" id="respBase"></div></div>
+      <div class="card rmssd clickable" data-cardmetric="rmssd" role="button" tabindex="0" title="タップまたはEnterで 現在→中央値→平均 を切替（選択期間で集計）"><div class="label">RMSSD<span class="cardmode" id="rmssdMode"></span></div><div class="value"><span id="rmssd">–</span><span class="unit">ms</span></div><div class="base" id="rmssdBase"></div></div>
+      <div class="card hr clickable" data-cardmetric="hr" role="button" tabindex="0" title="タップまたはEnterで 現在→中央値→平均 を切替（選択期間で集計）"><div class="label">心拍数<span class="cardmode" id="hrMode"></span></div><div class="value"><span id="hr">–</span><span class="unit">bpm</span></div><div class="base" id="hrBase"></div></div>
+      <div class="card resp clickable" data-cardmetric="resp" role="button" tabindex="0" title="タップまたはEnterで 現在→中央値→平均 を切替（選択期間で集計）"><div class="label">呼吸数<span class="cardmode" id="respMode"></span></div><div class="value"><span id="resp">–</span><span class="unit">br/min</span></div><div class="base" id="respBase"></div></div>
       <div class="card posture"><div class="label">姿勢</div><div class="value"><span id="postureDeg">–</span><span class="unit" id="postureUnit" style="display:none">°</span></div><div class="base" id="postureBase">ACC待ち</div></div>
       <div class="card steps"><div class="label">歩数（今日）</div><div class="value"><span id="steps">0</span></div><div class="base" id="stepsBase">歩調 –</div></div>
       <div class="mini">
@@ -366,22 +426,24 @@
       </span>
     </div>
     <div class="section sub">
+      <span class="section-subtitle">ストレスレポート</span>
+      <span id="reportNote" style="font-size:12px;color:#6e7681"></span>
+    </div>
+    <div id="stressReport" class="report"></div>
+    <div class="section sub">
       <span class="section-subtitle">5分平均</span>
       <span id="trend5Info" style="font-size:12px;color:#6e7681"></span>
+      <button class="zoom-open" id="zoomTrend5Btn" title="5分平均を拡大表示">拡大</button>
     </div>
     <div class="chartbox trend"><canvas id="trend5Chart"></canvas></div>
     <div class="section sub">
-      <span class="section-subtitle">15分平均</span>
-      <span id="trend15Info" style="font-size:12px;color:#6e7681"></span>
-    </div>
-    <div class="chartbox trend"><canvas id="trend15Chart"></canvas></div>
-    <div class="section sub">
       <span class="section-subtitle">30分平均</span>
       <span id="trend30Info" style="font-size:12px;color:#6e7681"></span>
+      <button class="zoom-open" id="zoomTrend30Btn" title="30分平均を拡大表示">拡大</button>
     </div>
     <div class="chartbox trend"><canvas id="trend30Chart"></canvas></div>
 
-    <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。最上段は直近15分の詳細（1秒間隔）、下段は5分平均・15分平均・30分平均の全期間トレンドで、日付セレクタ（全期間／Today／Yesterday／各日）で表示を絞り込めます。いずれもこのブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。グラフ下端の細い帯は活動状態（水色=座位・橙=活動中・紫=臥位・藍=睡眠の可能性）です。</div>
+    <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。最上段は直近15分の詳細（1秒間隔）、下段は5分平均・30分平均の全期間トレンドで、日付セレクタで表示を絞り込めます。いずれもこのブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。グラフ下端の細い帯は活動状態（水色=座位・橙=活動中・紫=臥位・藍=睡眠の可能性）です。</div>
   </div>
 
   <div class="modal-bg" id="actModal">
@@ -405,6 +467,49 @@
         <div class="basefld"><label>心拍数 (bpm)</label><input type="number" id="baseHrIn" step="1" min="30" max="220" inputmode="numeric"></div>
       </div>
       <div class="baseactions"><button id="baseSave" class="start">保存</button><button id="baseCancel">取消</button></div>
+    </div>
+  </div>
+
+  <div class="modal-bg" id="dataModal">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="dataModalTitle">
+      <button id="dataClose" class="close">閉じる</button>
+      <h2 id="dataModalTitle">データ管理</h2>
+      <div class="sub">ユーザー別データ</div>
+      <div class="data-row">
+        <label class="data-field">現在ユーザー<select id="activeUserSelect"></select></label>
+        <div class="data-field"><span>&nbsp;</span><button id="switchActiveUserBtn">このユーザーに切替</button></div>
+      </div>
+      <div class="data-row">
+        <label class="data-field">統合元<select id="mergeFrom"></select></label>
+        <label class="data-field">統合先<select id="mergeTo"></select></label>
+      </div>
+      <label class="data-check"><input type="checkbox" id="mergeDeleteSource"> 統合後に元データを削除</label>
+      <div class="data-actions">
+        <button id="mergeUsersBtn" class="start">統合</button>
+        <button id="clearCurrentDataBtn">表示キャッシュを削除</button>
+        <button id="clearAllDataBtn" class="danger">完全クリア</button>
+      </div>
+      <div id="dataStats" class="data-stats"></div>
+    </div>
+  </div>
+
+  <div class="modal-bg" id="zoomModal">
+    <div class="modal zoom-modal">
+      <button id="zoomClose" class="close">閉じる</button>
+      <div class="zoom-head">
+        <h2 id="zoomTitle">グラフ</h2>
+        <span id="zoomInfo" class="zoom-info"></span>
+      </div>
+      <div class="zoom-chartbox" id="zoomChartBox"><canvas id="zoomTrendChart"></canvas></div>
+      <div class="zoom-controls">
+        <button id="zoomOutBtn" title="表示幅を広げる">-</button>
+        <button id="zoomInBtn" title="表示幅を狭める">＋</button>
+        <button id="zoomLeftBtn" title="過去へ移動">‹</button>
+        <input type="range" id="zoomPan" min="0" max="1000" value="1000" title="表示位置">
+        <button id="zoomRightBtn" title="直近へ移動">›</button>
+        <button id="zoomAllBtn" class="all" title="選択期間全体を表示">全体</button>
+        <span id="zoomRangeLabel" class="range-label"></span>
+      </div>
     </div>
   </div>
 
@@ -439,6 +544,19 @@
     // ---- history persistence (localStorage) ----
     let history = loadHistory();      // [{ t, rmssd, hr, resp }]
     let lastSaved = 0;
+    let lastStorageWarning = 0;
+
+    function reportStorageFailure(error) {
+      console.warn('[storage] display cache write failed', error);
+      const now = Date.now();
+      if (now - lastStorageWarning < 10000) return;
+      lastStorageWarning = now;
+      const calib = document.getElementById('calib');
+      if (calib) {
+        calib.textContent = '表示キャッシュを保存できません。計測データは端末DBに保持されています。';
+        baselineMsgUntil = now + 6000;
+      }
+    }
 
     function loadHistory() {
       try {
@@ -450,8 +568,10 @@
     function saveHistory(force) {
       const now = Date.now();
       if (!force && now - lastSaved < SAVE_EVERY_MS) return;
-      lastSaved = now;
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(history)); } catch (_) {}
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
+        lastSaved = now;
+      } catch (e) { reportStorageFailure(e); }
     }
     function updateHistInfo() {
       const txt = history.length ? `${history.length} 点` : '';
@@ -623,8 +743,11 @@
       },
     });
 
-    // Both averaged charts (5-min, 15-min) share the same configuration.
-    const makeTrendChart = (canvasId) => new Chart(document.getElementById(canvasId), {
+    // Visible averaged charts share the same configuration.
+    const makeTrendChart = (canvasId) => {
+      const canvas = document.getElementById(canvasId);
+      if (!canvas) return null;
+      return new Chart(canvas, {
       type: 'line',
       plugins: [stateBandPlugin, bodyBandPlugin],
       data: {
@@ -650,10 +773,12 @@
         },
         plugins: { legend: { labels: { color: '#e6edf3' } } },
       },
-    });
+      });
+    };
     const trend5Chart = makeTrendChart('trend5Chart');
     const trend15Chart = makeTrendChart('trend15Chart');
     const trend30Chart = makeTrendChart('trend30Chart');
+    const zoomTrendChart = makeTrendChart('zoomTrendChart');
 
     // ---- metric filter: chips to show/hide each series across ALL charts ------
     // Default all on; the choice persists. Dataset order is shared (index → metric):
@@ -664,7 +789,7 @@
       if (!bar) return;
       const KEY = 'rmssd-h10n.metricFilter.v1';
       const BY_INDEX = ['rmssd', 'hr', 'resp', 'lean', 'steps'];
-      const charts = [chart, trend5Chart, trend15Chart, trend30Chart];
+      const charts = [chart, trend5Chart, trend15Chart, trend30Chart, zoomTrendChart].filter(Boolean);
       let state = {};
       try { state = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (_) {}
       const on = (m) => state[m] !== false; // unset = visible (default = all shown)
@@ -800,6 +925,42 @@
     function filterByRange(arr) { return arr.filter((b) => inRange(b.t)); }
     function persistRange() { try { localStorage.setItem('rmssd-h10n.range.v1', selectedRange); } catch (_) {} }
     function rangeLabelOf(r) { return RANGE_LABEL[r] || r; }
+    const SMOOTH_MS = { '7d': 6 * 3600000, '14d': 12 * 3600000, '30d': DAY_MS, '60d': DAY_MS };
+    function smoothWindowMs() { return SMOOTH_MS[selectedRange] || 0; }
+    function smoothLabel(ms) {
+      if (!ms) return '';
+      return ms >= DAY_MS ? `${Math.round(ms / DAY_MS)}日移動平均` : `${Math.round(ms / 3600000)}時間移動平均`;
+    }
+    function movingAverage(rows, metric, windowMs, decimals = 1) {
+      if (!windowMs || rows.length < 3) return rows.map((b) => b[metric]);
+      const half = windowMs / 2;
+      const vals = [];
+      let left = 0, right = 0, sum = 0, n = 0;
+      const add = (b) => { if (b[metric] != null) { sum += b[metric]; n++; } };
+      const remove = (b) => { if (b[metric] != null) { sum -= b[metric]; n--; } };
+      for (let i = 0; i < rows.length; i++) {
+        const lo = rows[i].t - half, hi = rows[i].t + half;
+        while (right < rows.length && rows[right].t <= hi) add(rows[right++]);
+        while (left < rows.length && rows[left].t < lo) remove(rows[left++]);
+        vals.push(rows[i][metric] == null || !n ? null : +(sum / n).toFixed(decimals));
+      }
+      return vals;
+    }
+    function drawTrendChart(target, rows, smoothMs) {
+      if (!target) return;
+      target.data.labels = rows.map((b) => fmtBucketLabel(b.t));
+      target.data.datasets[0].data = movingAverage(rows, 'rmssd', smoothMs);
+      target.data.datasets[1].data = movingAverage(rows, 'hr', smoothMs);
+      target.data.datasets[2].data = movingAverage(rows, 'resp', smoothMs);
+      target.data.datasets[3].data = movingAverage(rows, 'lean', smoothMs, 0);
+      const stepVals = rows.map((b) => b.steps || 0);
+      target.data.datasets[4].data = stepVals;
+      const maxSteps = Math.max(1, ...stepVals);
+      target.options.scales.y4.max = maxSteps * 3;
+      target.$tones = rows.map((b) => b.tone);
+      target.$bodies = rows.map((b) => b.body || null);
+      target.update('none');
+    }
     // Card 中央値/平均 reads the finest store that retains the whole window: 30-min for the
     // two-week/30-/60-day ranges, else the 5-min store (covers up to ~1 week + the hours).
     function rangeStore() { return (selectedRange === '60d' || selectedRange === '30d' || selectedRange === '14d') ? trend30 : trend5; }
@@ -812,20 +973,41 @@
       let data = load();
       let live = null;
       let lastSaved = 0;
+      let batchDepth = 0;
+      let batchDirty = false;
       function load() {
         try { const a = JSON.parse(localStorage.getItem(key) || '[]'); return Array.isArray(a) ? a.slice(-max) : []; }
         catch (_) { return []; }
       }
       function save(force) {
+        if (batchDepth > 0) { batchDirty = true; return; }
         const now = Date.now();
         if (!force && now - lastSaved < SAVE_EVERY_MS) return;
-        lastSaved = now;
-        try { localStorage.setItem(key, JSON.stringify(data)); } catch (_) {}
+        try {
+          localStorage.setItem(key, JSON.stringify(data));
+          lastSaved = now;
+          batchDirty = false;
+        } catch (e) { reportStorageFailure(e); }
+      }
+      function beginBatch() { batchDepth++; }
+      function endBatch(persist = true) {
+        if (batchDepth > 0) batchDepth--;
+        if (batchDepth === 0 && persist && batchDirty) save(true);
       }
       function series() {
-        const all = data.slice();
-        if (live && (live.hrN || live.rmssdN)) all.push(finalizeBucket(live));
-        return all;
+        const byT = new Map(data.map((b) => [b.t, b]));
+        if (live && (live.hrN || live.rmssdN)) {
+          const b = finalizeBucket(live);
+          byT.set(b.t, b);
+        }
+        return [...byT.values()].sort((a, b) => a.t - b.t);
+      }
+      function mergeNative(rows) {
+        if (!Array.isArray(rows) || !rows.length) return;
+        const byT = new Map(data.map((b) => [b.t, b]));
+        for (const row of rows) if (row && Number.isFinite(Number(row.t))) byT.set(Number(row.t), row);
+        data = [...byT.values()].sort((a, b) => a.t - b.t).slice(-max);
+        save(true);
       }
       // Rebuild from the detail history: finalise buckets newer than the store's
       // last one and reconstruct the open bucket.
@@ -862,21 +1044,11 @@
       }
       function redraw() {
         const s = filterByRange(series());
-        chart.data.labels = s.map((b) => fmtBucketLabel(b.t));
-        chart.data.datasets[0].data = s.map((b) => b.rmssd);
-        chart.data.datasets[1].data = s.map((b) => b.hr);
-        chart.data.datasets[2].data = s.map((b) => b.resp);
-        chart.data.datasets[3].data = s.map((b) => b.lean ?? null);
-        const stepVals = s.map((b) => b.steps || 0);
-        chart.data.datasets[4].data = stepVals;
-        // Keep step bars confined to the lower ~third of the plot so they read as
-        // a context band under the HRV/HR lines rather than dominating the chart.
-        const maxSteps = Math.max(1, ...stepVals);
-        chart.options.scales.y4.max = maxSteps * 3;
-        chart.$tones = s.map((b) => b.tone);
-        chart.$bodies = s.map((b) => b.body || null);
-        chart.update('none');
-        infoEl.textContent = s.length ? `${s.length} 区間 / ${gran}` : 'データなし';
+        const smoothMs = smoothWindowMs();
+        if (!chart) return;
+        drawTrendChart(chart, s, smoothMs);
+        const sm = smoothLabel(smoothMs);
+        if (infoEl) infoEl.textContent = s.length ? `${s.length} 区間 / ${gran}${sm ? ' / ' + sm : ''}` : 'データなし';
       }
       function recomputeMissingTones() {
         const acc = new Map();
@@ -918,7 +1090,7 @@
         save(true);
       }
       return {
-        feed, redraw, rebuild, save, refreshTones, replaceBuckets, series,
+        feed, redraw, rebuild, save, refreshTones, replaceBuckets, series, mergeNative, beginBatch, endBatch,
         // Retroactively backfill PAST buckets from a finer store's finalized buckets
         // (weighted by n). Skips the open bucket and slots we already hold. Idempotent.
         seedFromBuckets(src) {
@@ -942,6 +1114,9 @@
         setUser(u, persist = true) { if (persist) save(true); key = keyFor(u); data = load(); live = null; },
         clear() { data = []; live = null; try { localStorage.removeItem(key); } catch (_) {} },
         get data() { return data; },
+        get bucketMs() { return bucketMs; },
+        get chart() { return chart; },
+        get gran() { return gran; },
       };
     }
 
@@ -953,6 +1128,171 @@
     // (~14 days, most accurate), then 15-min for any older tail. Idempotent.
     function seedTrend30() { trend30.seedFromBuckets(trend5.data); trend30.seedFromBuckets(trend15.data); }
     seedTrend30();
+
+    // ---- expanded trend viewer: zoom + horizontal pan ----------------------
+    const ZOOM_WIDTHS = [3 * 3600000, 6 * 3600000, 12 * 3600000, DAY_MS, 2 * DAY_MS, 3 * DAY_MS, 7 * DAY_MS, 14 * DAY_MS, 30 * DAY_MS, 60 * DAY_MS];
+    const zoomState = { trend: null, label: '', windowMs: null, startMs: null, dragX: null };
+    function durationLabel(ms) {
+      if (!ms) return '全体';
+      if (ms >= DAY_MS) return `${Math.round(ms / DAY_MS)}日`;
+      if (ms >= 3600000) return `${Math.round(ms / 3600000)}時間`;
+      return `${Math.round(ms / 60000)}分`;
+    }
+    function selectedRangeSpanMs() {
+      if (RANGE_MS[selectedRange]) return RANGE_MS[selectedRange];
+      return DAY_MS;
+    }
+    function defaultZoomWindowMs() {
+      const span = selectedRangeSpanMs();
+      if (span >= 60 * DAY_MS) return 7 * DAY_MS;
+      if (span >= 30 * DAY_MS) return 3 * DAY_MS;
+      if (span >= 14 * DAY_MS) return 2 * DAY_MS;
+      if (span >= 7 * DAY_MS) return DAY_MS;
+      if (span >= 12 * 3600000) return 6 * 3600000;
+      if (span >= 6 * 3600000) return 3 * 3600000;
+      return span;
+    }
+    function zoomRows() {
+      return zoomState.trend ? filterByRange(zoomState.trend.series()).sort((a, b) => a.t - b.t) : [];
+    }
+    function zoomBounds(rows) {
+      if (!rows.length) return null;
+      const bucket = zoomState.trend ? zoomState.trend.bucketMs : 0;
+      const min = rows[0].t, max = rows[rows.length - 1].t + bucket;
+      return { min, max, span: Math.max(bucket, max - min), bucket };
+    }
+    function clampZoomStart(rows) {
+      const b = zoomBounds(rows);
+      if (!b) return;
+      if (!zoomState.windowMs || zoomState.windowMs >= b.span) { zoomState.startMs = b.min; return; }
+      const maxStart = Math.max(b.min, b.max - zoomState.windowMs);
+      if (zoomState.startMs == null) zoomState.startMs = maxStart;
+      zoomState.startMs = Math.max(b.min, Math.min(maxStart, zoomState.startMs));
+    }
+    function zoomSlice(rows) {
+      const b = zoomBounds(rows);
+      if (!b) return [];
+      if (!zoomState.windowMs || zoomState.windowMs >= b.span) return rows;
+      clampZoomStart(rows);
+      const end = zoomState.startMs + zoomState.windowMs;
+      const s = rows.filter((r) => r.t >= zoomState.startMs && r.t < end);
+      return s.length ? s : rows.slice(-1);
+    }
+    function fmtZoomTime(t) {
+      return new Date(t).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+    function renderZoom() {
+      const modal = document.getElementById('zoomModal');
+      if (!zoomState.trend || !modal || !modal.classList.contains('open')) return;
+      const rows = zoomRows();
+      const shown = zoomSlice(rows);
+      const b = zoomBounds(rows);
+      const info = document.getElementById('zoomInfo');
+      const pan = document.getElementById('zoomPan');
+      const label = document.getElementById('zoomRangeLabel');
+      const title = document.getElementById('zoomTitle');
+      if (title) title.textContent = `${zoomState.label} / ${rangeLabelOf(selectedRange)}`;
+      if (zoomTrendChart && zoomState.trend.chart) {
+        zoomState.trend.chart.data.datasets.forEach((ds, i) => {
+          if (zoomTrendChart.data.datasets[i]) zoomTrendChart.data.datasets[i].hidden = ds.hidden;
+        });
+      }
+      drawTrendChart(zoomTrendChart, shown, smoothWindowMs());
+      if (!rows.length || !b) {
+        if (info) info.textContent = 'データなし';
+        if (pan) pan.disabled = true;
+        if (label) label.textContent = '';
+        return;
+      }
+      const isAll = !zoomState.windowMs || zoomState.windowMs >= b.span;
+      if (pan) {
+        pan.disabled = isAll;
+        if (isAll) pan.value = '1000';
+        else {
+          const maxStart = Math.max(b.min, b.max - zoomState.windowMs);
+          const v = maxStart === b.min ? 1000 : Math.round((zoomState.startMs - b.min) / (maxStart - b.min) * 1000);
+          pan.value = String(Math.max(0, Math.min(1000, v)));
+        }
+      }
+      if (label) label.textContent = isAll ? '全体' : durationLabel(zoomState.windowMs);
+      if (info) {
+        const first = shown[0], last = shown[shown.length - 1];
+        const sm = smoothLabel(smoothWindowMs());
+        info.textContent = `${shown.length}/${rows.length} 区間 / ${fmtZoomTime(first.t)} - ${fmtZoomTime(last.t)}${sm ? ' / ' + sm : ''}`;
+      }
+      setTimeout(() => { try { zoomTrendChart.resize(); zoomTrendChart.update('none'); } catch (_) {} }, 0);
+    }
+    function openZoom(trend, label) {
+      const rows = filterByRange(trend.series()).sort((a, b) => a.t - b.t);
+      const b = rows.length ? { min: rows[0].t, max: rows[rows.length - 1].t + trend.bucketMs } : null;
+      const span = b ? Math.max(trend.bucketMs, b.max - b.min) : 0;
+      zoomState.trend = trend;
+      zoomState.label = label;
+      zoomState.windowMs = span ? Math.min(defaultZoomWindowMs(), span) : null;
+      zoomState.startMs = b && zoomState.windowMs ? Math.max(b.min, b.max - zoomState.windowMs) : null;
+      const modal = document.getElementById('zoomModal');
+      if (modal) modal.classList.add('open');
+      renderZoom();
+    }
+    function zoomSetWindow(nextMs) {
+      const rows = zoomRows(), b = zoomBounds(rows);
+      if (!b) return;
+      const current = (!zoomState.windowMs || zoomState.windowMs >= b.span) ? b.span : zoomState.windowMs;
+      const center = (zoomState.startMs == null ? b.max - current : zoomState.startMs + current / 2);
+      zoomState.windowMs = nextMs && nextMs < b.span ? nextMs : null;
+      const width = zoomState.windowMs || b.span;
+      zoomState.startMs = center - width / 2;
+      clampZoomStart(rows);
+      renderZoom();
+    }
+    function zoomStepWindow(dir) {
+      const rows = zoomRows(), b = zoomBounds(rows);
+      if (!b) return;
+      const current = (!zoomState.windowMs || zoomState.windowMs >= b.span) ? b.span : zoomState.windowMs;
+      const widths = ZOOM_WIDTHS.filter((w) => w < b.span);
+      let next = null;
+      if (dir > 0) {
+        next = widths.filter((w) => w < current).pop() || current;
+      } else {
+        next = widths.find((w) => w > current) || null;
+      }
+      zoomSetWindow(next);
+    }
+    function zoomPanBy(frac) {
+      const rows = zoomRows(), b = zoomBounds(rows);
+      if (!b || !zoomState.windowMs || zoomState.windowMs >= b.span) return;
+      zoomState.startMs = (zoomState.startMs == null ? b.max - zoomState.windowMs : zoomState.startMs) + zoomState.windowMs * frac;
+      clampZoomStart(rows);
+      renderZoom();
+    }
+    (function setupZoomModal() {
+      document.getElementById('zoomTrend5Btn').addEventListener('click', () => openZoom(trend5, '5分平均'));
+      document.getElementById('zoomTrend30Btn').addEventListener('click', () => openZoom(trend30, '30分平均'));
+      const modal = document.getElementById('zoomModal');
+      document.getElementById('zoomClose').addEventListener('click', () => modal.classList.remove('open'));
+      modal.addEventListener('click', (e) => { if (e.target.id === 'zoomModal') modal.classList.remove('open'); });
+      document.getElementById('zoomInBtn').addEventListener('click', () => zoomStepWindow(+1));
+      document.getElementById('zoomOutBtn').addEventListener('click', () => zoomStepWindow(-1));
+      document.getElementById('zoomAllBtn').addEventListener('click', () => zoomSetWindow(null));
+      document.getElementById('zoomLeftBtn').addEventListener('click', () => zoomPanBy(-0.75));
+      document.getElementById('zoomRightBtn').addEventListener('click', () => zoomPanBy(0.75));
+      document.getElementById('zoomPan').addEventListener('input', (e) => {
+        const rows = zoomRows(), b = zoomBounds(rows);
+        if (!b || !zoomState.windowMs || zoomState.windowMs >= b.span) return;
+        const maxStart = Math.max(b.min, b.max - zoomState.windowMs);
+        zoomState.startMs = b.min + (maxStart - b.min) * (Number(e.target.value) / 1000);
+        renderZoom();
+      });
+      const box = document.getElementById('zoomChartBox');
+      box.addEventListener('pointerdown', (e) => { zoomState.dragX = e.clientX; });
+      box.addEventListener('pointerup', (e) => {
+        if (zoomState.dragX == null) return;
+        const dx = e.clientX - zoomState.dragX;
+        zoomState.dragX = null;
+        if (Math.abs(dx) > 24) zoomPanBy(dx < 0 ? 0.55 : -0.55);
+      });
+      box.addEventListener('pointercancel', () => { zoomState.dragX = null; });
+    })();
 
     function dayLabelFor(v) {
       if (v === 'all') return '全期間';
@@ -978,7 +1318,7 @@
 
     // ---- wrappers that drive both granularities at once ----------------------
     function rebuildTrendFromHistory() { trend5.rebuild(); trend15.rebuild(); trend30.rebuild(); }
-    function redrawTrend() { trend5.redraw(); trend15.redraw(); trend30.redraw(); refreshRangeSelector(); }
+    function redrawTrend() { trend5.redraw(); trend15.redraw(); trend30.redraw(); refreshRangeSelector(); renderZoom(); }
     function saveTrendAll(force) { trend5.save(force); trend15.save(force); trend30.save(force); }
 
     // ---- visibility-driven battery saving ------------------------------------
@@ -1095,12 +1435,71 @@
         const cfg = CARD_METRICS[metric];
         const mode = cardMode[metric] || 'now';
         let val = null;
-        if (mode === 'now') val = _lastStatus ? _lastStatus[cfg.stat] : null;
+        if (mode === 'now') val = (_lastStatus && _lastStatus.dataFresh !== false) ? _lastStatus[cfg.stat] : null;
         else { const a = periodSeries(metric); if (a.length) val = mode === 'median' ? median(a) : mean(a); }
         const el = document.getElementById(metric); if (el) el.textContent = fmt(val, cfg.dec);
         const tag = document.getElementById(metric + 'Mode'); if (tag) tag.textContent = MODE_TAG[mode];
         const card = document.querySelector('.card[data-cardmetric="' + metric + '"]'); if (card) card.classList.toggle('agg', mode !== 'now');
       }
+      renderStressReport();
+    }
+
+    // ---- daily/range stress report (RMSSD+HR → arousal over the selected range) ----
+    // Reuses analysis.classifyRaw's arousal (50 + hrΔ*2.2 − dLnRMSSD*35): HR above and RMSSD
+    // below the personal baseline both raise it. RMSSD/SD1 is the established vagal marker;
+    // HR vs baseline is framed as load (no clean time-domain sympathetic marker). Estimate, not Dx.
+    function arousalFromVitals(rmssd, hr, base) {
+      if (rmssd == null || hr == null || !base || !base.rmssd) return null;
+      const dLn = (base.rmssd > 0 && rmssd > 0) ? Math.log(rmssd / base.rmssd) : 0;
+      return Math.max(0, Math.min(100, Math.round(50 + (hr - base.hr) * 2.2 - dLn * 35)));
+    }
+    const TONE_LABEL = { calm: 'リラックス', recover: '回復', neutral: '平常', focus: '集中', tense: '緊張', high: '高負荷' };
+    const TONE_ORDER = ['calm', 'recover', 'neutral', 'focus', 'tense', 'high'];
+    function renderStressReport() {
+      const box = document.getElementById('stressReport');
+      if (!box) return;
+      const note = document.getElementById('reportNote');
+      if (note) note.textContent = rangeLabelOf(selectedRange);
+      const base = curBaseline;
+      if (!base || !base.rmssd) { box.innerHTML = '<div class="report-empty">基準値の確定後にレポートします（接続後 約1分）。</div>'; return; }
+      let wSum = 0, aSum = 0; const rmssds = [], hrs = []; const toneW = {}; let peak = null, trough = null;
+      for (const b of rangeStore().series()) {
+        if (b.rmssd == null || b.hr == null || !inRange(b.t)) continue;
+        const a = arousalFromVitals(b.rmssd, b.hr, base);
+        if (a == null) continue;
+        const w = b.n || 1;
+        wSum += w; aSum += a * w; rmssds.push(b.rmssd); hrs.push(b.hr);
+        const tone = b.tone || toneFromVitals(b.rmssd, b.hr, base) || 'neutral';
+        toneW[tone] = (toneW[tone] || 0) + w;
+        if (!peak || a > peak.a) peak = { a, t: b.t };
+        if (!trough || a < trough.a) trough = { a, t: b.t };
+      }
+      if (!wSum) { box.innerHTML = '<div class="report-empty">この範囲のデータがまだありません。</div>'; return; }
+      const score = Math.round(aSum / wSum);
+      const col = score >= 67 ? STATE_COLORS.high : score >= 34 ? STATE_COLORS.tense : STATE_COLORS.calm;
+      const bandLabel = score >= 67 ? '高' : score >= 34 ? '中' : '低';
+      const medRm = Math.round(median(rmssds) * 10) / 10, medHr = Math.round(median(hrs));
+      const rmPct = base.rmssd > 0 ? Math.round((medRm / base.rmssd - 1) * 100) : 0;
+      const hrD = Math.round(medHr - base.hr);
+      const minutes = Math.round(wSum / 60);
+      const cov = minutes >= 60 ? `${Math.floor(minutes / 60)}時間${minutes % 60}分` : `${minutes}分`;
+      const multiDay = ['7d', '14d', '30d', '60d'].includes(selectedRange);
+      const fmtT = (t) => new Date(t).toLocaleString('ja-JP', multiDay ? { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' } : { hour: '2-digit', minute: '2-digit' });
+      const dist = TONE_ORDER.filter((t) => toneW[t]).map((t) => ({ t, pct: Math.round(toneW[t] / wSum * 100) }));
+      const seg = dist.map((d) => `<span style="width:${d.pct}%;background:${STATE_COLORS[d.t]}"></span>`).join('');
+      const legend = dist.map((d) => `<span><i style="background:${STATE_COLORS[d.t]}"></i>${TONE_LABEL[d.t]} ${d.pct}%</span>`).join('');
+      const sgn = (n, u) => `${n >= 0 ? '+' : ''}${n}${u}`;
+      box.innerHTML =
+        `<div class="rep-top"><span class="rep-num" style="color:${col}">${score}</span><span class="rep-den">/100</span>`
+        + `<span class="rep-band" style="color:${col}">${bandLabel}</span></div>`
+        + `<div class="rep-gauge"><div class="rep-gauge-fill" style="width:${score}%;background:${col}"></div></div>`
+        + `<div class="rep-rows">`
+        + `<div class="rep-row"><span class="rep-k">回復（副交感・RMSSD）</span><span class="rep-v">${medRm}ms<em>基準比 ${sgn(rmPct, '%')}</em></span></div>`
+        + `<div class="rep-row"><span class="rep-k">負荷（心拍）</span><span class="rep-v">${medHr}bpm<em>基準比 ${sgn(hrD, 'bpm')}</em></span></div>`
+        + `</div>`
+        + (dist.length ? `<div class="rep-dist">${seg}</div><div class="rep-legend">${legend}</div>` : '')
+        + (peak ? `<div class="rep-peaks"><span>最高ストレス ${fmtT(peak.t)} <b style="color:${STATE_COLORS.high}">${peak.a}</b></span><span>最低 ${fmtT(trough.t)} <b style="color:${STATE_COLORS.calm}">${trough.a}</b></span></div>` : '')
+        + `<div class="rep-foot">計測 ${cov}・RMSSD/HR からの推定（医療診断ではありません）</div>`;
     }
     // The ‹ › stepper (wired to dayPrev/dayNext below) is the sole range control. The first
     // trend draw is left to the boot init's redrawTrend() → refreshRangeSelector(); doing it
@@ -1109,11 +1508,17 @@
     (function () {
       const next = { now: 'median', median: 'mean', mean: 'now' };
       document.querySelectorAll('.card[data-cardmetric]').forEach((card) => {
-        card.addEventListener('click', () => {
+        const cycle = () => {
           const m = card.dataset.cardmetric;
           cardMode[m] = next[cardMode[m] || 'now'];
           try { localStorage.setItem('rmssd-h10n.cardMode.v1', JSON.stringify(cardMode)); } catch (_) {}
           renderCards();
+        };
+        card.addEventListener('click', cycle);
+        card.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          cycle();
         });
       });
     })();
@@ -1145,8 +1550,11 @@
       _lastStatus = s;
 
       const conn = document.getElementById('conn');
-      conn.textContent = s.connected ? (s.externalRecording ? '接続 · 外部録音あり' : (s.recording ? '接続 · 記録' : '接続')) : '未接続';
-      conn.className = s.connected ? 'on' : '';
+      const dataFresh = s.dataFresh !== false;
+      conn.textContent = s.connected
+        ? (!dataFresh ? '接続 · RRデータ待ち' : (s.externalRecording ? '接続 · 外部録音あり' : (s.recording ? '接続 · 記録' : '接続')))
+        : '未接続';
+      conn.className = s.connected ? (dataFresh ? 'on' : 'stale') : '';
       const brand = document.getElementById('brand');
       if (brand) brand.classList.toggle('on', !!s.connected);
 
@@ -1163,8 +1571,10 @@
       const calib = document.getElementById('calib');
       // A transient "full-session baseline" message owns the calib slot briefly.
       if (Date.now() >= baselineMsgUntil) {
-        calib.textContent = (s.connected && s.calibration != null && s.calibration < 1)
-          ? `基準値キャリブレーション中… ${Math.round(s.calibration * 100)}%` : '';
+        calib.textContent = (s.connected && !dataFresh)
+          ? `RRデータ待機中${s.sampleAgeMs != null ? ` · 最終正常値 ${Math.round(s.sampleAgeMs / 1000)}秒前` : ''}`
+          : ((s.connected && s.calibration != null && s.calibration < 1)
+            ? `基準値キャリブレーション中… ${Math.round(s.calibration * 100)}%` : '');
       }
 
       document.getElementById('sdnn').textContent = fmt(s.sdnn);
@@ -1182,8 +1592,8 @@
           refreshBands();
         }
       }
-      document.getElementById('rmssdBase').innerHTML = deltaHtml(s.rmssd, base ? base.rmssd : null, 'ms');
-      document.getElementById('hrBase').innerHTML = deltaHtml(s.hr, base ? base.hr : null, '');
+      document.getElementById('rmssdBase').innerHTML = deltaHtml(dataFresh ? s.rmssd : null, base ? base.rmssd : null, 'ms');
+      document.getElementById('hrBase').innerHTML = deltaHtml(dataFresh ? s.hr : null, base ? base.hr : null, '');
       document.getElementById('respBase').innerHTML =
         s.respirationConfidence != null && s.respiration != null
           ? `信号品質 ${Math.round(s.respirationConfidence * 100)}%${s.respirationPreview ? ' · 暫定' : ''}`
@@ -1293,9 +1703,8 @@
 
     // ---- user switching (client side: swap stored history, redraw) ----
     function highlightUser(n) {
-      for (const b of document.querySelectorAll('#userSel button')) {
-        b.classList.toggle('active', Number(b.dataset.user) === n);
-      }
+      const badge = document.getElementById('currentUserLabel');
+      if (badge) badge.textContent = n;
     }
     function switchLocalUser(n) {
       // Persist the outgoing user's data before swapping keys.
@@ -1315,21 +1724,13 @@
       renderActbar();
       highlightUser(n);
     }
-    (function buildUserButtons() {
+    (function buildUserIndicator() {
       const sel = document.getElementById('userSel');
-      for (let n = 1; n <= 5; n++) {
-        const b = document.createElement('button');
-        b.textContent = n;
-        b.dataset.user = n;
-        b.title = `ユーザー ${n} に切り替え`;
-        b.addEventListener('click', async () => {
-          if (n === currentUser) return;
-          for (const x of sel.querySelectorAll('button')) x.disabled = true;
-          try { RmssdBridge.switchUser(n); } catch (_) {}
-          setTimeout(() => { for (const x of sel.querySelectorAll('button')) x.disabled = false; }, 1200);
-        });
-        sel.appendChild(b);
-      }
+      const badge = document.createElement('span');
+      badge.className = 'current';
+      badge.id = 'currentUserLabel';
+      badge.setAttribute('aria-label', '現在のユーザー');
+      sel.appendChild(badge);
       highlightUser(currentUser);
     })();
 
@@ -1416,26 +1817,52 @@
     // seed its watermark after a reload so it doesn't re-fetch the whole DB.
     window.__latestPointT = () => history.reduce((m, p) => { const e = Date.parse(p.t); return e > m ? e : m; }, 0);
 
+    window.__mergeNativeTrends = function (rows) {
+      if (!rows) return;
+      trend5.mergeNative(rows.trend5);
+      trend15.mergeNative(rows.trend15);
+      trend30.mergeNative(rows.trend30);
+      redrawTrend();
+    };
+
     // Bulk-replay points the native engine recorded while the page was hidden:
     // append to history + trend without per-point redraw, then one repaint.
-    window.__pushPointsBulk = function (pts) {
+    window.__pushPointsBulk = function (pts, opts = {}) {
       if (!pts || !pts.length) return;
-      for (const p of pts) {
-        history.push({ t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone,
-          lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null,
-          step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
-        trend5.feed(p); trend15.feed(p); trend30.feed(p);
+      const trends = [trend5, trend15, trend30];
+      if (!opts.preview) for (const trend of trends) trend.beginBatch();
+      try {
+        const byT = new Map(history.map((h) => [Date.parse(h.t), h]));
+        for (const p of pts) {
+          const t = Date.parse(p.t);
+          if (!Number.isFinite(t)) continue;
+          byT.set(t, { t: p.t, rmssd: p.rmssd, hr: p.hr, resp: p.resp, tone: p.tone,
+            lean: p.lean ?? null, posture: p.posture ?? null, act: p.activity ?? null,
+            step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
+          if (!opts.preview) for (const trend of trends) trend.feed(p);
+        }
+        history = [...byT.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).slice(-MAX_POINTS);
+      } finally {
+        if (!opts.preview) for (const trend of trends) trend.endBatch(false);
       }
-      while (history.length > MAX_POINTS) history.shift();
-      saveHistory(true); saveTrendAll(true);
-      redrawFromHistory(); redrawTrend();
+      if (!opts.deferPersist) {
+        saveHistory(true);
+        if (!opts.preview) saveTrendAll(true);
+      }
+      if (!opts.deferDraw) { redrawFromHistory(); redrawTrend(); }
+    };
+
+    window.__finishPointsBulk = function () {
+      saveHistory(true);
+      saveTrendAll(true);
+      if (!pageHidden) { redrawFromHistory(); redrawTrend(); }
     };
 
     // Merge backfill points (a gap recovered from H10 onboard memory) that carry
     // PAST timestamps. history is rebuilt sorted + deduped by t (the detail line
     // stays monotonic); the touched trend buckets are recomputed from these points.
     // Idempotent, so it is safe to run alongside the resume catch-up.
-    window.__mergeBackfill = function (pts) {
+    window.__mergeBackfill = function (pts, opts = {}) {
       if (!pts || !pts.length) return;
       const byT = new Map(history.map((h) => [Date.parse(h.t), h]));
       for (const p of pts) {
@@ -1444,10 +1871,15 @@
           step: p.step || 0, body: p.body || null, sleepPos: p.sleepPos || null });
       }
       history = [...byT.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]).slice(-MAX_POINTS);
-      saveHistory(true);
-      trend5.replaceBuckets(pts); trend15.replaceBuckets(pts); trend30.replaceBuckets(pts);
-      saveTrendAll(true);
-      if (!pageHidden) { redrawFromHistory(); redrawTrend(); }
+      const trends = [trend5, trend15, trend30];
+      for (const trend of trends) trend.beginBatch();
+      try {
+        trend5.replaceBuckets(pts); trend15.replaceBuckets(pts); trend30.replaceBuckets(pts);
+      } finally {
+        for (const trend of trends) trend.endBatch(false);
+      }
+      if (!opts.deferPersist) { saveHistory(true); saveTrendAll(true); }
+      if (!opts.deferDraw && !pageHidden) { redrawFromHistory(); redrawTrend(); }
       // Brief, unobtrusive confirmation in the calibration message slot.
       try {
         const mins = Math.max(1, Math.round((Date.parse(pts[pts.length - 1].t) - Date.parse(pts[0].t)) / 60000));
@@ -1461,18 +1893,265 @@
       } catch (_) {}
     };
 
+    // ---- user data management --------------------------------------------
+    const DATA_USERS = [1, 2, 3, 4, 5];
+    const dataKeysFor = (u) => ({
+      history: histKeyFor(u),
+      trend5: trend5KeyFor(u),
+      trend15: trend15KeyFor(u),
+      trend30: trend30KeyFor(u),
+      activities: `rmssd-h10n.activities.v1.u${u}`,
+      histSamples: `rmssd-h10n.histsamples.v1.u${u}`,
+      baseline: `rmssd-h10n.baseline.v1.u${u}`,
+      posture: `rmssd-h10n.posture.v1.u${u}`,
+      supine: `rmssd-h10n.supine.v1.u${u}`,
+      sleepLR: `rmssd-h10n.sleeplr.v1.u${u}`,
+      stepsDay: `rmssd-h10n.stepsday.v1.u${u}`,
+    });
+    function readJsonKey(key, fallback) {
+      try {
+        const raw = localStorage.getItem(key);
+        return raw == null ? fallback : JSON.parse(raw);
+      } catch (_) { return fallback; }
+    }
+    function writeJsonKey(key, value) {
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) {}
+    }
+    function removeKey(key) {
+      try { localStorage.removeItem(key); } catch (_) {}
+    }
+    const arrFromKey = (key) => {
+      const a = readJsonKey(key, []);
+      return Array.isArray(a) ? a : [];
+    };
+    const msOf = (v) => {
+      const t = v && v.t != null ? v.t : (v && v.start != null ? v.start : null);
+      const ms = typeof t === 'number' ? t : Date.parse(t);
+      return Number.isFinite(ms) ? ms : null;
+    };
+    function mergeRowsByTime(target, source, cap) {
+      const by = new Map();
+      for (const p of source) { const ms = msOf(p); by.set(ms != null ? String(ms) : JSON.stringify(p), p); }
+      for (const p of target) { const ms = msOf(p); by.set(ms != null ? String(ms) : JSON.stringify(p), p); }
+      return [...by.values()].sort((a, b) => (msOf(a) || 0) - (msOf(b) || 0)).slice(-cap);
+    }
+    function weighted(a, b, metric, na, nb) {
+      if (a[metric] == null) return b[metric] ?? null;
+      if (b[metric] == null) return a[metric] ?? null;
+      const w = Math.max(1, na) + Math.max(1, nb);
+      return +((a[metric] * Math.max(1, na) + b[metric] * Math.max(1, nb)) / w).toFixed(metric === 'lean' ? 0 : 1);
+    }
+    function combineTrendRow(target, source) {
+      const nt = target.n || 0, ns = source.n || 0;
+      return {
+        ...source, ...target,
+        hr: weighted(target, source, 'hr', nt, ns),
+        rmssd: weighted(target, source, 'rmssd', nt, ns),
+        resp: weighted(target, source, 'resp', nt, ns),
+        lean: weighted(target, source, 'lean', nt, ns),
+        steps: (target.steps || 0) + (source.steps || 0),
+        n: nt + ns,
+      };
+    }
+    function mergeTrendRows(target, source, cap) {
+      const by = new Map();
+      for (const b of source) if (b && b.t != null) by.set(String(b.t), b);
+      for (const b of target) {
+        if (!b || b.t == null) continue;
+        const k = String(b.t);
+        by.set(k, by.has(k) ? combineTrendRow(b, by.get(k)) : b);
+      }
+      return [...by.values()].sort((a, b) => a.t - b.t).slice(-cap);
+    }
+    function mergeActivities(target, source) {
+      const by = new Map();
+      const key = (a) => a.id || `${a.type || ''}|${a.start || ''}|${a.label || ''}`;
+      for (const a of source) by.set(key(a), a);
+      for (const a of target) by.set(key(a), a);
+      return [...by.values()].sort((a, b) => (msOf(a) || 0) - (msOf(b) || 0)).slice(-500);
+    }
+    function mergeStepsDay(target, source) {
+      if (!target) return source || null;
+      if (!source) return target;
+      if (target.day === source.day) return { day: target.day, total: (target.total || 0) + (source.total || 0) };
+      return target;
+    }
+    function copyIfTargetMissing(targetKey, sourceKey) {
+      try {
+        if (localStorage.getItem(targetKey) == null) {
+          const v = localStorage.getItem(sourceKey);
+          if (v != null) localStorage.setItem(targetKey, v);
+        }
+      } catch (_) {}
+    }
+    function clearUserData(u) {
+      const k = dataKeysFor(u);
+      for (const key of Object.values(k)) removeKey(key);
+    }
+    function mergeUserData(from, to, deleteSource) {
+      const src = dataKeysFor(from), dst = dataKeysFor(to);
+      writeJsonKey(dst.history, mergeRowsByTime(arrFromKey(dst.history), arrFromKey(src.history), MAX_POINTS));
+      writeJsonKey(dst.trend5, mergeTrendRows(arrFromKey(dst.trend5), arrFromKey(src.trend5), 4000));
+      writeJsonKey(dst.trend15, mergeTrendRows(arrFromKey(dst.trend15), arrFromKey(src.trend15), 2880));
+      writeJsonKey(dst.trend30, mergeTrendRows(arrFromKey(dst.trend30), arrFromKey(src.trend30), 3000));
+      writeJsonKey(dst.activities, mergeActivities(arrFromKey(dst.activities), arrFromKey(src.activities)));
+      writeJsonKey(dst.histSamples, mergeRowsByTime(arrFromKey(dst.histSamples), arrFromKey(src.histSamples), 14 * 24 * 60));
+      copyIfTargetMissing(dst.baseline, src.baseline);
+      copyIfTargetMissing(dst.posture, src.posture);
+      copyIfTargetMissing(dst.supine, src.supine);
+      copyIfTargetMissing(dst.sleepLR, src.sleepLR);
+      writeJsonKey(dst.stepsDay, mergeStepsDay(readJsonKey(dst.stepsDay, null), readJsonKey(src.stepsDay, null)));
+      if (deleteSource) clearUserData(from);
+      if (from === currentUser || to === currentUser) reloadCurrentUserData();
+      renderDataStats();
+      try { pushSnapshot(); } catch (_) {}
+    }
+    function reloadCurrentUserData() {
+      STORAGE_KEY = histKeyFor(currentUser);
+      history = loadHistory();
+      trend5.setUser(currentUser, false); trend15.setUser(currentUser, false); trend30.setUser(currentUser, false);
+      seedTrend30();
+      ACT_KEY = actKeyFor(currentUser);
+      activities = loadActivities();
+      curBaseline = null; lastBaselineKey = '';
+      redrawFromHistory(); rebuildTrendFromHistory(); redrawTrend(); renderCards(); renderActbar();
+      const b = readJsonKey(dataKeysFor(currentUser).baseline, null);
+      if (b && b.rmssd != null && b.hr != null) {
+        try { RmssdBridge.setBaseline(Number(b.rmssd), Number(b.hr)); } catch (_) {}
+      }
+    }
+    async function renderDataStats() {
+      const box = document.getElementById('dataStats');
+      if (!box) return;
+      box.innerHTML = '';
+      if (RmssdBridge.getDataDiagnostics) {
+        try {
+          const d = await RmssdBridge.getDataDiagnostics();
+          if (d) {
+            const nativeLine = document.createElement('div');
+            nativeLine.className = 'data-stat';
+            const p = d.points || {}, legacy = d.legacyUnassigned || {};
+            nativeLine.innerHTML = `<b>端末DB</b><span>現在ユーザー ${p.count || 0}点 / 未割当の旧データ ${legacy.count || 0}点 / 未反映復元 ${d.unmergedImports || 0}件 / 隔離録音 ${d.quarantinedRecordings || 0}件</span>`;
+            box.appendChild(nativeLine);
+          }
+        } catch (_) {}
+      }
+      for (const u of DATA_USERS) {
+        const k = dataKeysFor(u);
+        const line = document.createElement('div');
+        line.className = 'data-stat';
+        const base = localStorage.getItem(k.baseline) != null ? ' / 基準あり' : '';
+        line.innerHTML = `<b>U${u}</b><span>詳細 ${arrFromKey(k.history).length} / 5分 ${arrFromKey(k.trend5).length} / 30分 ${arrFromKey(k.trend30).length} / 活動 ${arrFromKey(k.activities).length}${base}</span>`;
+        box.appendChild(line);
+      }
+    }
+    function resetRuntimeAfterFullClear() {
+      currentUser = 1;
+      STORAGE_KEY = histKeyFor(currentUser);
+      history = [];
+      trend5.setUser(currentUser, false); trend15.setUser(currentUser, false); trend30.setUser(currentUser, false);
+      trend5.clear(); trend15.clear(); trend30.clear();
+      ACT_KEY = actKeyFor(currentUser);
+      activities = [];
+      curBaseline = null; lastBaselineKey = '';
+      selectedRange = 'today';
+      redrawFromHistory(); redrawTrend(); renderCards(); renderActbar(); highlightUser(currentUser);
+      renderDataStats();
+    }
+    function removeAllRmssdStorage() {
+      try {
+        const keys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (k && k.startsWith('rmssd-h10n.')) keys.push(k);
+        }
+        for (const k of keys) localStorage.removeItem(k);
+      } catch (_) {}
+    }
+    (function setupDataModal() {
+      const modal = document.getElementById('dataModal');
+      const active = document.getElementById('activeUserSelect');
+      const from = document.getElementById('mergeFrom');
+      const to = document.getElementById('mergeTo');
+      for (const sel of [active, from, to]) {
+        for (const u of DATA_USERS) {
+          const o = document.createElement('option');
+          o.value = String(u); o.textContent = `ユーザー ${u}`;
+          sel.appendChild(o);
+        }
+      }
+      document.getElementById('dataManageBtn').addEventListener('click', () => {
+        active.value = String(currentUser);
+        from.value = String(currentUser === 1 ? 2 : 1);
+        to.value = String(currentUser);
+        document.getElementById('mergeDeleteSource').checked = false;
+        renderDataStats();
+        modal.classList.add('open');
+        document.getElementById('dataClose').focus();
+      });
+      const userBadge = document.getElementById('currentUserLabel');
+      if (userBadge) userBadge.addEventListener('click', () => document.getElementById('dataManageBtn').click());
+      const closeDataModal = () => {
+        modal.classList.remove('open');
+        document.getElementById('menuBtn').focus();
+      };
+      document.getElementById('dataClose').addEventListener('click', closeDataModal);
+      modal.addEventListener('click', (e) => { if (e.target.id === 'dataModal') closeDataModal(); });
+      modal.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDataModal(); });
+      document.getElementById('switchActiveUserBtn').addEventListener('click', async () => {
+        const n = Number(active.value);
+        if (n === currentUser) return;
+        if (!confirm(`現在ユーザーを ${currentUser} から ${n} に切り替えますか？`)) return;
+        try { await RmssdBridge.switchUser(n); } catch (_) {}
+        switchLocalUser(n);
+        from.value = String(n === 1 ? 2 : 1);
+        to.value = String(n);
+        renderDataStats();
+        try { pushSnapshot(); } catch (_) {}
+      });
+      document.getElementById('mergeUsersBtn').addEventListener('click', () => {
+        const f = Number(from.value), t = Number(to.value);
+        if (f === t) { alert('統合元と統合先を分けてください。'); return; }
+        const del = document.getElementById('mergeDeleteSource').checked;
+        if (!confirm(`ユーザー ${f} のデータをユーザー ${t} に統合しますか？${del ? '\\n統合元は削除されます。' : ''}`)) return;
+        mergeUserData(f, t, del);
+      });
+      document.getElementById('clearCurrentDataBtn').addEventListener('click', () => {
+        if (!confirm(`ユーザー ${currentUser} の表示キャッシュを削除しますか？\n端末DBの計測データは削除されません。`)) return;
+        clearUserData(currentUser);
+        reloadCurrentUserData();
+        try { RmssdBridge.resetBaseline && RmssdBridge.resetBaseline(); } catch (_) {}
+        renderDataStats();
+        try { pushSnapshot(); } catch (_) {}
+      });
+      document.getElementById('clearAllDataBtn').addEventListener('click', async () => {
+        if (!confirm('全ユーザーの保存データを完全に削除しますか？')) return;
+        if (!confirm('この操作は戻せません。ネイティブDBの履歴も削除します。')) return;
+        removeAllRmssdStorage();
+        try { if (RmssdBridge.clearAllData) await RmssdBridge.clearAllData(); } catch (_) {}
+        resetRuntimeAfterFullClear();
+        const calib = document.getElementById('calib');
+        if (calib) { calib.textContent = '全データを削除しました'; baselineMsgUntil = Date.now() + 4000; }
+        try { pushSnapshot(); } catch (_) {}
+      });
+    })();
+
     document.getElementById('clearBtn').addEventListener('click', () => {
-      if (!confirm('保存した履歴（詳細・長期トレンド）をすべて消去しますか？')) return;
+      if (!confirm('現在ユーザーの履歴（詳細・長期トレンド）を消去しますか？')) return;
       history = [];
       trend5.clear(); trend15.clear(); trend30.clear();
       try { localStorage.removeItem(STORAGE_KEY); } catch (_) {}
       redrawFromHistory();
       redrawTrend();
+      try { pushSnapshot(); } catch (_) {}
     });
 
-    // ---- CSV export (detail history / 15-min trend / activities / baseline) ----
+    // ---- CSV export (detail history / 5-/15-/30-min trend / activities / baseline) ----
     // Each dataset gets its own CSV (different schemas); RmssdBridge.exportFiles
     // shares them via the system sheet on Android, or downloads them in a browser.
+    // Every time-series CSV is **restricted to the currently selected display
+    // range** (the ‹ › stepper: 60日間/30日間/二週間/一週間/昨日/当日/12時間/6時間/3時間).
+    // Baseline is current-state, not time-bound, so it always exports as-is.
     function csvCell(v) {
       if (v == null) return '';
       const s = String(v);
@@ -1487,45 +2166,54 @@
 
     document.getElementById('exportBtn').addEventListener('click', async () => {
       const btn = document.getElementById('exportBtn');
-      if (!history.length && !trend15.data.length && !trend5.data.length && !trend30.data.length && !activities.length) {
-        alert('エクスポートするデータがまだありません。'); return;
+      // `history` / activities / rr-log carry ISO strings; trend buckets carry ms.
+      const toMs = (v) => typeof v === 'string' ? new Date(v).getTime() : v;
+      const inRangeAny = (v) => v != null && inRange(toMs(v));
+      const histR = history.filter((p) => inRangeAny(p.t));
+      const t5R = trend5.data.filter((b) => inRange(b.t));
+      const t15R = trend15.data.filter((b) => inRange(b.t));
+      const t30R = trend30.data.filter((b) => inRange(b.t));
+      const actR = activities.filter((a) => inRangeAny(a.start));
+      if (!histR.length && !t5R.length && !t15R.length && !t30R.length && !actR.length) {
+        alert('選択中の期間（' + rangeLabelOf(selectedRange) + '）にエクスポートできるデータがありません。'); return;
       }
       const orig = btn.querySelector('.lbl-full').textContent;
       btn.disabled = true; btn.querySelector('.lbl-full').textContent = '出力中…';
       try {
-        const u = currentUser, stamp = exportStamp();
-        const files = [
-          { name: `rmssd-u${u}-detail-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'state', 'lean_deg', 'posture', 'activity_mg', 'steps', 'body', 'sleep_pos'],
-              history.map((p) => [p.t, p.rmssd, p.hr, p.resp, toneOf(p, curBaseline) || '',
-                p.lean ?? '', p.posture || '', p.act ?? '', p.step || 0, p.body || '', p.sleepPos || ''])) },
-          { name: `rmssd-u${u}-trend5m-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
-              trend5.data.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
-                b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) },
-          { name: `rmssd-u${u}-trend15m-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
-              trend15.data.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
-                b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) },
-          { name: `rmssd-u${u}-trend30m-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
-              trend30.data.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
-                b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) },
-          { name: `rmssd-u${u}-activities-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['type', 'label', 'category', 'start', 'end', 'duration_sec'],
-              activities.map((a) => [a.type, a.label, a.cat, a.start, a.end || '',
-                a.end ? Math.round((new Date(a.end) - new Date(a.start)) / 1000) : ''])) },
-          { name: `rmssd-u${u}-baseline-${stamp}.csv`, mime: 'text/csv',
-            content: toCsv(['rmssd_ms', 'hr_bpm'],
-              curBaseline ? [[curBaseline.rmssd, curBaseline.hr]] : []) },
-        ];
+        const u = currentUser, stamp = exportStamp(), rk = selectedRange;
+        const files = [];
+        if (histR.length) files.push({ name: `rmssd-u${u}-detail-${rk}-${stamp}.csv`, mime: 'text/csv',
+          content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'state', 'lean_deg', 'posture', 'activity_mg', 'steps', 'body', 'sleep_pos'],
+            histR.map((p) => [p.t, p.rmssd, p.hr, p.resp, toneOf(p, curBaseline) || '',
+              p.lean ?? '', p.posture || '', p.act ?? '', p.step || 0, p.body || '', p.sleepPos || ''])) });
+        if (t5R.length) files.push({ name: `rmssd-u${u}-trend5m-${rk}-${stamp}.csv`, mime: 'text/csv',
+          content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
+            t5R.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
+              b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) });
+        if (t15R.length) files.push({ name: `rmssd-u${u}-trend15m-${rk}-${stamp}.csv`, mime: 'text/csv',
+          content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
+            t15R.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
+              b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) });
+        if (t30R.length) files.push({ name: `rmssd-u${u}-trend30m-${rk}-${stamp}.csv`, mime: 'text/csv',
+          content: toCsv(['t', 'rmssd_ms', 'hr_bpm', 'resp_brpm', 'samples', 'state', 'lean_deg', 'posture', 'steps', 'body', 'sleep_pos'],
+            t30R.map((b) => [RmssdBridge.iso(b.t), b.rmssd, b.hr, b.resp, b.n, b.tone || '',
+              b.lean ?? '', b.posture || '', b.steps || 0, b.body || '', b.sleepPos || ''])) });
+        if (actR.length) files.push({ name: `rmssd-u${u}-activities-${rk}-${stamp}.csv`, mime: 'text/csv',
+          content: toCsv(['type', 'label', 'category', 'start', 'end', 'duration_sec'],
+            actR.map((a) => [a.type, a.label, a.cat, a.start, a.end || '',
+              a.end ? Math.round((new Date(a.end) - new Date(a.start)) / 1000) : ''])) });
+        // Baseline is current-state (one row) — emitted regardless of range.
+        files.push({ name: `rmssd-u${u}-baseline-${stamp}.csv`, mime: 'text/csv',
+          content: toCsv(['rmssd_ms', 'hr_bpm'],
+            curBaseline ? [[curBaseline.rmssd, curBaseline.hr]] : []) });
         // Raw RR intervals (host only) — feed this into Kubios / Elite HRV for
         // gold-standard 5-min-window HRV. `accepted=0` marks artifact-rejected beats.
         try {
           const rr = RmssdBridge.getRrLog ? await RmssdBridge.getRrLog() : [];
-          if (rr && rr.length) {
-            files.push({ name: `rmssd-u${u}-rr-${stamp}.csv`, mime: 'text/csv',
-              content: toCsv(['wallClock', 'rr_ms', 'accepted'], rr.map((b) => [b.wall, b.rr, b.accepted])) });
+          const rrR = (rr || []).filter((b) => inRangeAny(b.wall));
+          if (rrR.length) {
+            files.push({ name: `rmssd-u${u}-rr-${rk}-${stamp}.csv`, mime: 'text/csv',
+              content: toCsv(['wallClock', 'rr_ms', 'accepted'], rrR.map((b) => [b.wall, b.rr, b.accepted])) });
           }
         } catch (_) {}
         const r = await RmssdBridge.exportFiles(files);
@@ -1628,6 +2316,27 @@
         let applied = false; // one-shot: re-apply once the engine is running
         RmssdBridge.onStatus(() => { if (!applied) { applied = true; apply(saved, false); } });
       }
+    })();
+
+    // Low-RMSSD + shallow-breathing voice warning (Android host only). The native
+    // service watches the live values with the screen off and speaks after the
+    // condition persists. Default ON; this toggle lets the user silence it.
+    (function () {
+      const btn = document.getElementById('breathAlertBtn');
+      if (!btn) return;
+      if (!RmssdBridge.nativeEngine) { btn.style.display = 'none'; return; }
+      const KEY = 'rmssd-h10n.breathAlert.v1';
+      const isOn = () => { try { return localStorage.getItem(KEY) !== '0'; } catch (_) { return true; } };
+      const render = (on) => { btn.textContent = '浅い呼吸警告: ' + (on ? 'ON' : 'OFF'); };
+      const apply = (on, persist) => {
+        render(on);
+        try { RmssdBridge.setBreathingAlert(on); } catch (_) {}
+        if (persist) { try { localStorage.setItem(KEY, on ? '1' : '0'); } catch (_) {} }
+      };
+      render(isOn());
+      btn.addEventListener('click', () => apply(!isOn(), true));
+      let applied = false;
+      RmssdBridge.onStatus(() => { if (!applied) { applied = true; apply(isOn(), false); } });
     })();
 
     // Power-save mode (Android host only): duty-cycle the H10 accelerometer to save

@@ -31,6 +31,8 @@ function median(arr) {
 const ROBUST_REL_FLOOR = 0.20;
 const ROBUST_MAD_K = 4.0;
 const ROBUST_MIN_DIFFS = 5;
+const MIN_USED_DIFFS = 3;
+const STARTUP_MIN_USED_DIFFS = 8;
 
 class RmssdWindow {
   /**
@@ -42,10 +44,12 @@ class RmssdWindow {
    * @param {number} opts.localTol reject RR deviating > this fraction from the local median
    * @param {number} opts.localN number of recent accepted beats forming the local median
    * @param {number} opts.emaTau RMSSD EMA time constant in seconds (for state classification)
+   * @param {number} opts.startupMinUsedDiffs clean successive differences needed before the first RMSSD output
    */
   constructor({
     windowMs = 30000, minRr = 300, maxRr = 2000,
     maxRelJump = 0.25, localTol = 0.25, localN = 7, emaTau = 20,
+    startupMinUsedDiffs = STARTUP_MIN_USED_DIFFS,
   } = {}) {
     this.windowMs = windowMs;
     this.minRr = minRr;
@@ -54,6 +58,7 @@ class RmssdWindow {
     this.localTol = localTol;
     this.localN = localN;
     this.emaAlpha = 1 / (emaTau + 1); // ~time constant at the 1 Hz reporting rate
+    this.startupMinUsedDiffs = startupMinUsedDiffs;
     this.entries = []; // { tMs, rr }
     this.recent = []; // last N accepted RR (ms) for the local-median test
     this.lastAccepted = null;
@@ -146,12 +151,19 @@ class RmssdWindow {
     for (let i = 0; i < dn; i++) {
       if (absd[i] <= thr) { sumSqDiff += diff[i] * diff[i]; used++; }
     }
-    if (used === 0) { for (let i = 0; i < dn; i++) sumSqDiff += diff[i] * diff[i]; used = dn; }
-    const rmssd = Math.sqrt(sumSqDiff / used);
-
     const variance = rrs.reduce((a, b) => a + (b - mean) * (b - mean), 0) / count;
     const sdnn = Math.sqrt(variance);
     const hr = 60000 / mean;
+
+    // Do not publish RMSSD from too few usable successive differences. Strap
+    // attach/re-wet often produces valid-looking but non-NN beats; the first
+    // RMSSD value is held until enough clean diffs exist, then later short
+    // dropouts use the smaller floor so the display can recover quickly.
+    const needed = this.rmssdEma == null ? this.startupMinUsedDiffs : MIN_USED_DIFFS;
+    if (used < needed) {
+      return { rmssd: null, rmssdEma: this.rmssdEma, hr, sdnn, count, corrected: this.rejected };
+    }
+    const rmssd = Math.sqrt(sumSqDiff / used);
 
     // Exponentially-smoothed RMSSD: low-RMSSD windows are noisy second-to-second,
     // so the state classifier reads this slower signal rather than the raw value.

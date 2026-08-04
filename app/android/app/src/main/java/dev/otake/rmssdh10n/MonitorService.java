@@ -33,6 +33,7 @@ public class MonitorService extends Service {
 
     public static final String ACTION_START_ENGINE = "dev.otake.rmssdh10n.START_ENGINE";
     public static final String ACTION_STOP_ENGINE  = "dev.otake.rmssdh10n.STOP_ENGINE";
+    public static final String ACTION_SWITCH_USER  = "dev.otake.rmssdh10n.SWITCH_USER";
     public static final String EXTRA_MAC  = "mac";
     public static final String EXTRA_ACC  = "acc";
     public static final String EXTRA_USER = "user";
@@ -132,6 +133,14 @@ public class MonitorService extends Service {
             stopEngine();
             return;
         }
+        if (ACTION_SWITCH_USER.equals(action)) {
+            String mac = intent.getStringExtra(EXTRA_MAC);
+            boolean acc = intent.getBooleanExtra(EXTRA_ACC, false);
+            int user = intent.getIntExtra(EXTRA_USER, 1);
+            stopEngine();
+            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user, intent.getStringExtra(EXTRA_SEED));
+            return;
+        }
         if (ACTION_START_ENGINE.equals(action)) {
             String mac = intent.getStringExtra(EXTRA_MAC);
             boolean acc = intent.getBooleanExtra(EXTRA_ACC, false);
@@ -170,6 +179,7 @@ public class MonitorService extends Service {
         engine.setSpeaker(tts);
         engine.setLinkStateSink(this::updateNotification); // surface a stalled link in the notification
         engine.setPowerSave("1".equals(db().kvGet("powerSave"))); // 省電力モード（kv未設定=既定OFF=ACC連続・歩数あり）
+        engine.setBreathingAlertVoice(!"0".equals(db().kvGet("breathingAlertVoice"))); // 既定ON。設定でOFF可
         engine.start(mac);
         db().kvPut("engine", "native");
         db().kvPut("deviceMac", mac);
@@ -189,8 +199,12 @@ public class MonitorService extends Service {
     public void nativeForegroundEntered() { if (engine != null) engine.foregroundEntered(); }
     // Relax-mode voice readout interval (0 = off). No-op if the engine isn't running.
     public void nativeSetRelaxVoice(int sec) { if (engine != null) engine.setRelaxIntervalSec(sec); }
+    /** Voice warning for low RMSSD + shallow breathing: persist + apply live. */
+    public void nativeSetBreathingAlertVoice(boolean on) { db().kvPut("breathingAlertVoice", on ? "1" : "0"); if (engine != null) engine.setBreathingAlertVoice(on); }
     /** Power-save toggle from the dashboard: persist (survives restart/Boot) + apply live. */
     public void nativeSetPowerSave(boolean on) { db().kvPut("powerSave", on ? "1" : "0"); if (engine != null) engine.setPowerSave(on); }
+    /** Destructive full reset from the dashboard; the WebView restarts the engine after this returns. */
+    public void nativeClearAllData() { stopEngine(); db().clearAllData(); stopSelf(); }
 
     private void stopEngine() {
         // Explicit (user) stop. Halt the engine/BLE worker FIRST, THEN mark the recording

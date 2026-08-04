@@ -102,7 +102,12 @@ if (isAndroid) statusListeners.push(makeAlertEngine());
 const useNative = isAndroid;
 let currentUser = 1;
 let nativeSubs = [];
-let lastNativeT = '0'; // watermark (epoch ms as string) for DB catch-up
+let durableCatchUpT = '0'; // advances only after a DB page has been merged successfully
+let liveLatestT = '0';     // observation only; never allowed to skip durable catch-up
+let catchUpPromise = null;
+let backfillDrainPromise = null;
+const NATIVE_PAGE = 2000;
+const LATEST_WINDOW = 900; // main chart is ~15 minutes at 1 Hz
 
 async function startNativeEngine() {
   for (const s of nativeSubs) { try { (await s).remove(); } catch (_) {} }
@@ -111,7 +116,7 @@ async function startNativeEngine() {
     for (const cb of statusListeners) cb(s); hostBroadcast('status', s);
   });
   const sPoint = HrvNative.addListener('hrvPoint', (p) => {
-    if (p && p.t) { const e = Date.parse(p.t); if (e) lastNativeT = String(e); }
+    if (p && p.t) { const e = Date.parse(p.t); if (e) liveLatestT = String(e); }
     for (const cb of pointListeners) cb(p); hostBroadcast('point', p);
   });
   const sBackfill = HrvNative.addListener('hrvBackfill', () => {
@@ -137,40 +142,111 @@ function buildNativeSeed(u) {
 // Switch the active user: restart the native engine on the new user's refs/baseline.
 async function switchUserNative(n) {
   currentUser = n;
-  try { await HrvNative.stop(); } catch (_) {}
-  await startNativeEngine();
+  durableCatchUpT = '0';
+  liveLatestT = '0';
+  try { await HrvNative.switchUser({ acc: true, user: currentUser, seed: buildNativeSeed(currentUser) }); }
+  catch (e) {
+    console.error('[native] switch user failed', e);
+    try { await HrvNative.stop(); } catch (_) {}
+    await startNativeEngine();
+  }
 }
 
 // Replay points the native engine recorded while the dashboard was hidden.
 // Show the current value first (instant), then backfill the gap in ONE batch so
 // a long backlog doesn't render the chart in visible chunks or delay "now".
-async function nativeCatchUp() {
-  if (!useNative) return;
-  // After a page reload lastNativeT is "0"; seed it from the newest point the
-  // dashboard already holds so we don't re-fetch (and double-count into the trend
-  // buckets) the entire DB. Live points then advance it forward as usual.
-  if (lastNativeT === '0') {
-    try { const lt = window.__latestPointT && window.__latestPointT(); if (lt) lastNativeT = String(lt); } catch (_) {}
+function nativeCatchUp() {
+  if (!useNative) return Promise.resolve();
+  if (catchUpPromise) return catchUpPromise;
+  catchUpPromise = runNativeCatchUp().finally(() => { catchUpPromise = null; });
+  return catchUpPromise;
+}
+
+async function runNativeCatchUp() {
+  let start = durableCatchUpT;
+  if (start === '0') {
+    try { const lt = window.__latestPointT && window.__latestPointT(); if (lt) start = String(lt); } catch (_) {}
   }
   // 1) Apply the latest snapshot immediately so the cards jump to current.
   try {
-    const st = await HrvNative.getStatus();
+    const st = await HrvNative.getStatus({ user: currentUser });
     if (st && st.value) { const s = JSON.parse(st.value); for (const cb of statusListeners) cb(s); }
   } catch (_) {}
-  // 2) Accumulate every page, then a single bulk insert + one repaint.
-  let since = lastNativeT;
-  const all = [];
-  for (let guard = 0; guard < 50; guard++) {
-    let r;
-    try { r = await HrvNative.getPointsSince({ since, limit: 5000 }); } catch (_) { break; }
-    let arr = [];
-    try { arr = JSON.parse(r.points || '[]'); } catch (_) {}
-    if (arr.length) for (const p of arr) all.push(p);
-    if (r.lastT) { since = r.lastT; lastNativeT = r.lastT; }
-    if (!r || !r.hasMore) break;
+
+  // 2) Paint the finite latest window before processing any older backlog.
+  const latest = await HrvNative.getLatestPoints({ user: currentUser, limit: LATEST_WINDOW });
+  const latestPoints = JSON.parse((latest && latest.points) || '[]');
+  if (!Array.isArray(latestPoints)) throw new Error('native latest points is not an array');
+  if (latestPoints.length) {
+    if (!window.__pushPointsBulk) throw new Error('dashboard bulk hook is not ready');
+    window.__pushPointsBulk(latestPoints, { preview: true });
   }
-  if (all.length && window.__pushPointsBulk) window.__pushPointsBulk(all);
+  const snapshotT = Number(latest && latest.lastT);
+  await loadNativeAggregates(Number.isFinite(snapshotT) && snapshotT > 0 ? snapshotT : Date.now());
+  if (!Number.isFinite(snapshotT) || snapshotT <= 0) {
+    await drainBackfillImports();
+    return;
+  }
+
+  // A cold cache needs only the finite renderer window. SQLite remains the source of truth;
+  // long-range data is loaded by bounded range/backfill paths instead of replaying the DB.
+  if (start === '0') {
+    durableCatchUpT = String(snapshotT);
+    await drainBackfillImports();
+    return;
+  }
+
+  // 3) Merge a forward gap page-by-page with a fixed upper bound. Memory is O(page), not
+  // O(total history), and live events cannot move this durable cursor past an unmerged row.
+  let cursor = Number(start);
+  if (!Number.isFinite(cursor) || cursor < 0) cursor = 0;
+  const toExclusive = String(snapshotT + 1);
+  let complete = cursor >= snapshotT;
+  let deferredBulk = false;
+  try {
+    for (let guard = 0; !complete && guard < 1000; guard++) {
+      const r = await HrvNative.getPointsRange({ user: currentUser, after: String(cursor), toExclusive, limit: NATIVE_PAGE });
+      const arr = JSON.parse((r && r.points) || '[]');
+      if (!Array.isArray(arr)) throw new Error('native catch-up page is not an array');
+      if (arr.length) {
+        if (!window.__pushPointsBulk) throw new Error('dashboard bulk hook is not ready');
+        window.__pushPointsBulk(arr, { deferPersist: true, deferDraw: true });
+        deferredBulk = true;
+      }
+      const next = Number(r && r.lastT);
+      if (arr.length && (!Number.isFinite(next) || next <= cursor)) throw new Error('native catch-up cursor did not advance');
+      if (Number.isFinite(next) && next > cursor) {
+        cursor = next;
+        durableCatchUpT = String(cursor); // only after the page hook returned successfully
+      }
+      complete = !r || !r.hasMore || cursor >= snapshotT;
+      if (!complete && guard % 4 === 3) await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  } finally {
+    if (deferredBulk && window.__finishPointsBulk) window.__finishPointsBulk();
+  }
+  if (!complete) throw new Error('native catch-up page guard exceeded');
   await drainBackfillImports(); // merge any service-only gap restore (past timestamps)
+}
+
+async function loadNativeAggregates(nowMs) {
+  if (!HrvNative.getAggregates || !window.__mergeNativeTrends) return;
+  const specs = [
+    ['trend5', 5 * 60 * 1000, 14 * 24 * 3600 * 1000, 4000],
+    ['trend15', 15 * 60 * 1000, 31 * 24 * 3600 * 1000, 2880],
+    ['trend30', 30 * 60 * 1000, 63 * 24 * 3600 * 1000, 3000],
+  ];
+  const rows = {};
+  await Promise.all(specs.map(async ([name, widthMs, retainMs, limit]) => {
+    const r = await HrvNative.getAggregates({
+      user: currentUser, widthMs: String(widthMs), fromMs: String(nowMs - retainMs),
+      toMs: String(nowMs + widthMs), limit,
+    });
+    const arr = JSON.parse((r && r.buckets) || '[]');
+    if (!Array.isArray(arr)) throw new Error(`native ${name} aggregates is not an array`);
+    rows[name] = arr;
+  }));
+  window.__mergeNativeTrends(rows);
 }
 
 // A backfilled gap has PAST timestamps, so it can't ride the forward-only watermark
@@ -179,23 +255,43 @@ async function nativeCatchUp() {
 // sorted+deduped and only the touched buckets are recomputed from source, which is
 // correct even though they arrive after newer live data.
 async function nativeBackfillMerge(fromMs, toMs, truncated) {
-  if (!useNative) return;
+  if (!useNative || !window.__mergeBackfill) return false;
   const WIDE = 30 * 60 * 1000; // widest trend bucket — covers 5-, 15- and 30-min stores
   const lo = Math.floor(fromMs / WIDE) * WIDE;
   const hi = Math.floor(toMs / WIDE) * WIDE + WIDE;
-  const pts = [];
-  let since = String(lo - 1);
-  for (let guard = 0; guard < 50; guard++) {
-    let r;
-    try { r = await HrvNative.getPointsSince({ since, limit: 5000 }); } catch (_) { break; }
-    let arr = [];
-    try { arr = JSON.parse(r.points || '[]'); } catch (_) {}
-    let stop = false;
-    for (const p of arr) { const e = Date.parse(p.t); if (e >= hi) { stop = true; break; } pts.push(p); }
-    if (r && r.lastT) since = r.lastT;
-    if (stop || !r || !r.hasMore) break;
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi <= lo) return false;
+  try {
+    let deferredBulk = false;
+    for (let bucket = lo; bucket < hi; bucket += WIDE) {
+      const end = Math.min(bucket + WIDE, hi);
+      const pts = [];
+      let cursor = bucket - 1;
+      let complete = false;
+      for (let guard = 0; !complete && guard < 4; guard++) {
+        const r = await HrvNative.getPointsRange({
+          user: currentUser, after: String(cursor), toExclusive: String(end), limit: NATIVE_PAGE,
+        });
+        const arr = JSON.parse((r && r.points) || '[]');
+        if (!Array.isArray(arr)) throw new Error('native backfill page is not an array');
+        pts.push(...arr);
+        const next = Number(r && r.lastT);
+        if (arr.length && (!Number.isFinite(next) || next <= cursor)) throw new Error('backfill cursor did not advance');
+        if (Number.isFinite(next) && next > cursor) cursor = next;
+        complete = !r || !r.hasMore;
+      }
+      if (!complete) throw new Error('backfill bucket page guard exceeded');
+      if (pts.length) {
+        window.__mergeBackfill(pts, { truncated: !!truncated, deferPersist: true, deferDraw: true });
+        deferredBulk = true;
+      }
+    }
+    if (deferredBulk && window.__finishPointsBulk) window.__finishPointsBulk();
+    return true;
+  } catch (e) {
+    if (window.__finishPointsBulk) window.__finishPointsBulk();
+    console.error('[native] backfill merge failed', e);
+    return false;
   }
-  if (pts.length && window.__mergeBackfill) window.__mergeBackfill(pts, { truncated: !!truncated });
 }
 
 // WebView-independent backfill catch-up: drain the native import ledger (gap ranges
@@ -203,23 +299,31 @@ async function nativeBackfillMerge(fromMs, toMs, truncated) {
 // app/OS restart) and merge each touched trend-bucket range. The live hrvBackfill
 // event is just a nudge to run this; it is idempotent and guarded until the chart
 // hooks exist, so it is safe to call on load, on resume, and on the event.
-async function drainBackfillImports() {
-  if (!useNative || !HrvNative.getUnmergedImports || !window.__mergeBackfill) return;
+function drainBackfillImports() {
+  if (!useNative || !HrvNative.getUnmergedImports || !window.__mergeBackfill) return Promise.resolve();
+  if (backfillDrainPromise) return backfillDrainPromise;
+  backfillDrainPromise = runBackfillDrain().finally(() => { backfillDrainPromise = null; });
+  return backfillDrainPromise;
+}
+
+async function runBackfillDrain() {
   let imports = [];
-  try { const r = await HrvNative.getUnmergedImports(); imports = JSON.parse((r && r.imports) || '[]'); }
+  try { const r = await HrvNative.getUnmergedImports({ user: currentUser }); imports = JSON.parse((r && r.imports) || '[]'); }
   catch (_) { return; }
   if (!imports.length) return;
   const ids = [];
   for (const im of imports) {
     const from = Number(im.fromMs), to = Number(im.toMs);
-    if (Number.isFinite(from) && Number.isFinite(to)) await nativeBackfillMerge(from, to, !!Number(im.truncated));
-    ids.push(im.id);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) continue;
+    if (await nativeBackfillMerge(from, to, !!Number(im.truncated))) ids.push(im.id);
   }
-  try { await HrvNative.markImportsMerged({ ids: ids.join(',') }); } catch (_) {}
+  if (ids.length) await HrvNative.markImportsMerged({ user: currentUser, ids: ids.join(',') });
 }
 
 if (isAndroid && typeof document !== 'undefined') {
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) nativeCatchUp(); });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) nativeCatchUp().catch((e) => console.error('[native] catch-up failed', e));
+  });
 }
 
 // Synthetic RR generator for the browser — mirrors index.js --simulate.
@@ -291,11 +395,28 @@ const hostBridge = {
   toggleSleepLR: () => useNative ? HrvNative.toggleSleepLR() : monitor.toggleSleepLR(), // -> { ok, swap }
   setOrientation: (mode) => applyOrientation(mode), // 'auto' | 'portrait' | 'landscape'
   setRelaxVoice: (sec) => useNative ? HrvNative.setRelaxVoice({ sec }) : ({ ok: false }), // native TTS readout interval (s; 0=off)
+  setBreathingAlert: (on) => useNative ? HrvNative.setBreathingAlert({ on }) : ({ ok: false }), // native TTS warning: low RMSSD + shallow breathing
   setPowerSave: (on) => useNative ? HrvNative.setPowerSave({ on }) : ({ ok: false }), // ACC power-save mode (duty-cycle + steps off)
+  clearAllData: async () => {
+    if (!useNative) return { ok: true };
+    try { await HrvNative.clearAllData(); } catch (_) {}
+    currentUser = 1;
+    durableCatchUpT = '0';
+    liveLatestT = '0';
+    await startNativeEngine();
+    return { ok: true };
+  },
   exportFiles: (files) => exportFiles(files), // share/download CSVs -> { method, count }
   getRrLog: async () => { // recent raw RR beats for the Kubios export
     if (!useNative) return monitor.getRrLog();
     try { const r = await HrvNative.getRrLog(); return JSON.parse(r.log || '[]'); } catch (_) { return []; }
+  },
+  getDataDiagnostics: async () => {
+    if (!useNative || !HrvNative.getDataDiagnostics) return null;
+    try {
+      const r = await HrvNative.getDataDiagnostics({ user: currentUser });
+      return JSON.parse((r && r.value) || 'null');
+    } catch (_) { return null; }
   },
   now: () => localIso(), // JST ISO timestamp, matching point.t — used for activity logging
   iso: (ms) => localIso(new Date(ms)), // arbitrary epoch ms → JST ISO (activity time edits)
@@ -321,7 +442,9 @@ const hostBridge = {
       // Cold start: visibilitychange doesn't fire for the initial 'visible' state, so
       // trigger catch-up once the chart hooks exist — pulls forward points AND drains a
       // gap restored while no WebView was attached (service-only restore after a restart).
-      setTimeout(() => { try { nativeCatchUp(); } catch (_) {} }, 1500);
+      setTimeout(() => {
+        nativeCatchUp().catch((e) => console.error('[native] initial catch-up failed', e));
+      }, 1500);
       return;
     }
     // ?sim=1: the in-WebView Monitor driven by a synthetic RR stream.
@@ -377,7 +500,9 @@ function makeRemoteBridge() {
     toggleSleepLR: () => ({ ok: false }),
     setOrientation: noop,
     setRelaxVoice: () => ({ ok: false }), // native-only (host TTS); remote view can't drive it
+    setBreathingAlert: () => ({ ok: false }), // native-only (host TTS); remote view can't drive it
     setPowerSave: () => ({ ok: false }), // native-only (BLE/ACC); remote view can't drive it
+    clearAllData: () => ({ ok: false }),
     setEngine: () => ({ ok: false, engine: 'js' }),
     getEngine: () => 'js',
     exportFiles: (files) => exportFiles(files), // browser download

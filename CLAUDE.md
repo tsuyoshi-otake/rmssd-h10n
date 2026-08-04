@@ -96,7 +96,7 @@ app/android/.../MonitorService.java   前面サービス（エンジン所有・
                 RespirationTracker.java RSA呼吸：受理NN窓＋throttled Welch再計算＋last-good保持（信頼度を経時減衰）
                 RelaxReadout.java / TtsSpeaker.java  リラックス読み上げ文面生成 / ja-JP TTS（画面OFFでも前面サービスで継続）
                 HrvTime.java / HrvJson.java  JSTタイムスタンプ / 点・status JSON組立（live/backfill共有=key drift防止）
-                HrvDb.java             SQLite=真実の源。points/status_latest/kv/recordings/backfill_imports
+                HrvDb.java             SQLite=真実の源。ユーザー別points_v3/status/集約＋recordings/backfill ledger/quarantine
                 HrvNativePlugin.java   WebViewブリッジ（live push＋getPointsSince/getUnmergedImports catch-up＋baseline/posture/rrLog制御）
                 BootReceiver.java      BOOT_COMPLETEDで監視を再開（kv engine==native時）
                 hrv/Backfill.java      穴埋め純計算（fetchしたRR列をstart-anchor前進再生→秒境界の点列。JUnitゴールデン）
@@ -127,7 +127,9 @@ app/src/app.js + app/www/index.html    ダッシュボード（esbuild: src→ww
 - **user-stop ⇔ OS-kill**: 明示停止(`stopEngine`)は `markUserStopped()`→`discarded_by_user`で**復元しない**。OS-kill(`onDestroy`でengine!=null)は `active`のまま→次回起動で復元。
 - **UIへの反映はイベント非依存**: `backfill_imports` ledger を起動/復帰/イベントで drain（`getUnmergedImports`→`nativeBackfillMerge`→`__mergeBackfill`＝history再構築＋trend `replaceBuckets`）。WebView未アタッチ中のサービス単独復元も次回ロードで反映。「**離席分を復元しました（約N分・一部欠落）**」。
 - **満杯(truncated)**: 録音が今より大きく前に自動停止＋RR上限/~18h で検知→復元範囲を `[start,start+duration]` に限定し `truncated` をledger/UIに明示。
-- DBは **schema v2**。`onUpgrade` は**追加のみ（pointsを消さない）**。
+- DBは **schema v3**。新規点・status・backfill ledgerはユーザー別テーブルへ保存し、5/15/30分集約もネイティブで更新する。旧v2のユーザー不明`points`は`legacy_unassigned`として削除せず保持する。`onUpgrade` は**追加のみ（旧pointsを消さない）**。
+- H10 exerciseは、point＋ledgerのcommit、既commit確認、または生RRの`recording_quarantine`保存が成功した場合だけ削除可能。不正anchor、空replay、commit失敗を「何もなかった」として削除しない。追跡メタのない自動削除は禁止し、明示的にuser-discard済みの同一exIdだけ削除できる。
+- WebView catch-upは最新900点を先に描画し、固定上限付きkeyset page（最大2000点）で追従する。live受信時刻はdurable cursorを進めず、backfill importは範囲取得・解析・マージ成功後だけackする。localStorageは破棄可能な表示キャッシュで、長期集約の正本はSQLite。
 
 ### ネイティブ計算・UIの差分（Polar SDK移行後）
 - **呼吸(native)は `src/respiration.js` から意図的に乖離**（`Respiration.java`＋`RespirationTracker.java`）: グローバル最大ではなく **局所最大ピーク** を採り、帯端 ~0.10Hz の Mayer波(baroreflex)を構造的に除外。低速帯0.10–0.15Hzは **SNR≥4＋鋭さ**を満たす時のみ採用し信頼度≤0.5で報告。1回のSNRディップで消さず **last-good を120s掛けて信頼度減衰**（Schäfer&Kratky 2008: RSAレートは1–2分平均）。HF帯 MIN_SNR=2.0。**Android唯一の計算経路なのでNode版と乖離してよい**。

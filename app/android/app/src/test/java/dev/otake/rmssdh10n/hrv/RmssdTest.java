@@ -10,7 +10,7 @@ import org.junit.Test;
 public class RmssdTest {
     @Test
     public void rmssdSdnnHrFromKnownSequence() {
-        Rmssd w = new Rmssd(600000); // big window: no eviction
+        Rmssd w = new Rmssd(600000, 3); // big window, low startup gate for the math fixture
         assertTrue(w.add(0, 800));
         assertTrue(w.add(1, 820));
         assertTrue(w.add(2, 810));
@@ -53,6 +53,24 @@ public class RmssdTest {
         assertEquals(1, r.count);
         assertNull(r.rmssd);
         assertEquals(60.0, r.hr, 1e-9);
+    }
+
+    @Test
+    public void startupSpikeNeedsEnoughCleanDiffs() {
+        Rmssd w = new Rmssd(600000);
+        assertTrue(w.add(0, 800));
+        assertTrue(w.add(1, 990));  // within accept gate, but its successive diffs are outliers
+        assertTrue(w.add(2, 800));
+
+        Rmssd.Result early = w.compute(null);
+        assertEquals(3, early.count);
+        assertNull("do not publish RMSSD from only startup outlier diffs", early.rmssd);
+        assertTrue("HR can still be reported", early.hr > 0);
+
+        for (int i = 3; i < 12; i++) w.add(i, 800);
+        Rmssd.Result settled = w.compute(null);
+        assertTrue("startup spike should not linger in RMSSD, got " + settled.rmssd,
+                settled.rmssd != null && settled.rmssd < 5.0);
     }
 
     @Test
