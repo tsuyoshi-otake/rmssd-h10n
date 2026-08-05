@@ -68,6 +68,7 @@
     .menu button { width: 100%; text-align: left; background: transparent; border: none;
       padding: 10px 12px; border-radius: 8px; color: var(--text); font-size: 13px; }
     .menu button:hover { background: var(--raised); }
+    .menu button:disabled { opacity: .42; } /* explicit: color:var(--text) defeats the UA's disabled graying */
     .menu button#serverBtn.on { color: var(--hrv); }
     .menu .sep { height: 1px; background: var(--line); margin: 5px 4px; }
     .menu .lbl-short { display: none; } .menu .lbl-full { display: inline; }
@@ -345,6 +346,7 @@
         <button id="recalibBtn" title="今を安静として基準値を取り直す">安静で基準を取り直す</button>
         <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算">全期間で基準を取り直す</button>
         <button id="editBaseBtn" title="基準値(RMSSD/心拍)を手動で設定">基準を編集</button>
+        <button id="postureBtn" title="姿勢推定（H10の加速度センサー）。OFFにするとACCを完全に停止してH10の電池消費を大きく抑えます（姿勢・寝姿勢・歩数は出ません）。RMSSD・心拍・呼吸はそのまま計測します">姿勢推定: ON</button>
         <button id="recalPostureBtn" title="今のまっすぐな姿勢を基準（傾き0°）として登録">姿勢の基準を取り直す</button>
         <button id="supineBtn" title="あおむけで横になった状態を寝姿勢の基準として登録">あおむけで基準を取る</button>
         <button id="sleepLRBtn" title="寝姿勢の左右が逆に出るとき押す">寝姿勢の左右を反転</button>
@@ -1626,7 +1628,12 @@
       const degEl = document.getElementById('postureDeg');
       const unitEl = document.getElementById('postureUnit');
       const pBase = document.getElementById('postureBase');
-      if (p && p.receiving && p.calibrated && p.leanDeg != null) {
+      if (p && p.disabled) {                     // 姿勢推定OFF: intentional, not a missing signal
+        degEl.textContent = '–';
+        degEl.style.color = '';
+        unitEl.style.display = 'none';
+        pBase.textContent = 'OFF（電池節約）';
+      } else if (p && p.receiving && p.calibrated && p.leanDeg != null) {
         const info = postureInfo(p);
         degEl.textContent = p.leanDeg;
         degEl.style.color = info.color;
@@ -1643,9 +1650,10 @@
 
       // Steps (today's total + live cadence) from the H10 accelerometer.
       const stp = s.steps;
-      if (stp && stp.disabled) {                 // ACC duty-cycle: steps intentionally omitted (not 0)
+      if (stp && stp.disabled) {                 // ACC off/duty-cycled: steps intentionally omitted (not 0)
         document.getElementById('steps').textContent = '–';
-        document.getElementById('stepsBase').textContent = '省電力中（ACC間欠）';
+        document.getElementById('stepsBase').textContent =
+          stp.reason === 'posture-off' ? '姿勢推定OFF' : '省電力中（ACC間欠）';
       } else {
         document.getElementById('steps').textContent = stp ? (stp.today || 0).toLocaleString() : '0';
         document.getElementById('stepsBase').textContent =
@@ -2360,6 +2368,36 @@
       RmssdBridge.onStatus(() => { if (!applied) { applied = true; apply(isOn(), false); } });
     })();
 
+    // Posture estimation on/off (Android host only). OFF unsubscribes the H10 accelerometer
+    // entirely — the sensor then only runs its RR path, which is the biggest battery saving
+    // available (25 Hz is the ACC's minimum rate, so even 省電力 duty-cycling keeps paying for
+    // periodic ACC startup). RMSSD/心拍/呼吸 are unaffected. Default ON; persisted; re-asserted
+    // once the engine is up. The posture-calibration items are meaningless while OFF, so they
+    // are disabled together with it.
+    const POSTURE_KEY = 'rmssd-h10n.postureEnabled.v1';
+    const posturePrefOn = () => { try { return localStorage.getItem(POSTURE_KEY) !== '0'; } catch (_) { return true; } }; // default ON
+    (function () {
+      const btn = document.getElementById('postureBtn');
+      if (!btn) return;
+      if (!RmssdBridge.nativeEngine) { btn.style.display = 'none'; return; }
+      // 省電力 only duty-cycles the ACC, so it is moot (and misleading) while posture is OFF.
+      const deps = ['recalPostureBtn', 'supineBtn', 'sleepLRBtn', 'powerBtn']
+        .map((id) => document.getElementById(id)).filter(Boolean);
+      const render = (on) => {
+        btn.textContent = '姿勢推定: ' + (on ? 'ON' : 'OFF');
+        deps.forEach((b) => { b.disabled = !on; });
+      };
+      const apply = (on, persist) => {
+        render(on);
+        try { RmssdBridge.setPostureEnabled(on); } catch (_) {}
+        if (persist) { try { localStorage.setItem(POSTURE_KEY, on ? '1' : '0'); } catch (_) {} }
+      };
+      render(posturePrefOn());
+      btn.addEventListener('click', () => apply(!posturePrefOn(), true));
+      let applied = false; // re-assert the saved choice once the engine is running
+      RmssdBridge.onStatus(() => { if (!applied) { applied = true; apply(posturePrefOn(), false); } });
+    })();
+
     document.getElementById('recalPostureBtn').addEventListener('click', async () => {
       const calib = document.getElementById('calib');
       try {
@@ -2367,7 +2405,8 @@
         baselineMsgUntil = Date.now() + 4000;
         calib.textContent = (r && r.ok)
           ? '今の姿勢を基準（傾き0°）に設定しました'
-          : 'まっすぐな姿勢で静止して押してください（動作中またはACC未受信）。';
+          : (!posturePrefOn() ? '姿勢推定がOFFです（設定でONにしてください）。'
+            : 'まっすぐな姿勢で静止して押してください（動作中またはACC未受信）。');
       } catch (_) {}
     });
 

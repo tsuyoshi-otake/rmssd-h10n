@@ -102,6 +102,7 @@ public final class HrvEngine {
     private int stepTotal = 0;
     private boolean stepsEnabled = true; // false when ACC is duty-cycled — bursts can't count steps, so omit them (no misleading undercount)
     private volatile boolean powerSave = false; // 省電力モード: ACC間欠＋歩数オフ（dashboard toggle, default OFF=ACC連続）
+    private volatile boolean postureEnabled = true; // 姿勢推定: OFFでACCを完全停止（H10電池を最大に節約。姿勢・歩数なし）
     private long lastStepsSavedAt = 0;
     private Long lastPostureSavedAt = null;
 
@@ -243,8 +244,9 @@ public final class HrvEngine {
         battWindowStart = System.currentTimeMillis();
         deviceMac = mac;
         ble = new PolarBle(ctx, mac, withAcc, createBleSink());
-        ble.setAccDutyCycle(powerSave); // apply the current power-save mode to the fresh link
-        stepsEnabled = !powerSave;       // power-save ⇒ omit steps (posture still refreshes each burst)
+        ble.setAccDutyCycle(powerSave);      // apply the current power-save mode to the fresh link
+        ble.setAccEnabled(postureEnabled);   // 姿勢推定OFFならACCを購読させない
+        stepsEnabled = postureEnabled && !powerSave; // power-save ⇒ omit steps (posture still refreshes each burst)
         ble.setRecordingStore(recStore);
         ble.start();
         ticker = Executors.newSingleThreadScheduledExecutor();
@@ -297,9 +299,22 @@ public final class HrvEngine {
      *  OFF = continuous ACC (full posture + steps). Applies live and to the next connect. */
     public void setPowerSave(boolean on) {
         powerSave = on;
-        stepsEnabled = !on;
+        stepsEnabled = postureEnabled && !on;
         PolarBle b = ble;
         if (b != null) b.setAccDutyCycle(on);
+    }
+
+    /** Dashboard 姿勢推定 toggle: OFF stops the H10 accelerometer entirely (no posture, no
+     *  sleep position, no steps) so the sensor only runs its RR path — the largest battery
+     *  saving available, since 25 Hz is the ACC's minimum rate and even the duty-cycled
+     *  power-save mode keeps paying for periodic ACC startup. RMSSD/HR/呼吸 are unaffected.
+     *  Applies live and to the next connect. */
+    public void setPostureEnabled(boolean on) {
+        postureEnabled = on;
+        stepsEnabled = on && !powerSave;
+        PolarBle b = ble;
+        if (b != null) b.setAccEnabled(on);
+        Log.i(TAG, "[posture] enabled=" + on);
     }
 
     public void stop() {
@@ -429,8 +444,13 @@ public final class HrvEngine {
             double lnDelta0 = (base != null && rmssdSmInner != null && base.rmssd > 0)
                 ? Math.log(rmssdSmInner / base.rmssd) : Double.NaN;
             Double lnDelta = Double.isNaN(lnDelta0) ? null : lnDelta0;
-            body = bodyState.update(steps.walking(), p.activity, p.leanDeg,
-                hrInner, base != null ? base.hr : null, lnDelta, respOut, respConf, now);
+            // 活動/座位/臥位/睡眠 is ACC-derived. With posture OFF there is no motion evidence at
+            // all, and the classifier would otherwise report a permanent 座位 (or drift into
+            // 睡眠 on HR/HRV alone), so leave it unreported rather than guess.
+            body = postureEnabled
+                ? bodyState.update(steps.walking(), p.activity, p.leanDeg,
+                    hrInner, base != null ? base.hr : null, lnDelta, respOut, respConf, now)
+                : null;
         }
 
         // Persist an auto-calibrated posture reference (like monitor.js).
@@ -477,12 +497,14 @@ public final class HrvEngine {
             status.put("respiration", HrvJson.jn(fresh ? respOut : null));
             status.put("respirationConfidence", HrvJson.jn(fresh ? respConf : null));
             status.put("respirationPreview", previewOut);
-            status.put("posture", HrvJson.postureJson(p));
+            status.put("posture", HrvJson.postureJson(p, postureEnabled));
             status.put("steps", stepsEnabled
                     ? new JSONObject().put("today", stepTotal).put("cadence", steps.cadence()).put("walking", steps.walking())
-                    : new JSONObject().put("today", JSONObject.NULL).put("disabled", true)); // ACC duty-cycle: steps omitted
+                    // ACC duty-cycle or 姿勢推定OFF: steps omitted (reason lets the UI say which)
+                    : new JSONObject().put("today", JSONObject.NULL).put("disabled", true)
+                            .put("reason", postureEnabled ? "power-save" : "posture-off"));
 
-            status.put("body", body.state);
+            status.put("body", body != null ? body.state : JSONObject.NULL);
             status.put("engine", "native");
             status.put("recording", ble != null && ble.isRecording());
             status.put("externalRecording", ble != null && ble.isExternalBlocking());
@@ -533,7 +555,8 @@ public final class HrvEngine {
                 Integer leanOut = (p.calibrated && p.receiving && p.leanDeg != null) ? p.leanDeg : null;
                 String pointStr = HrvJson.buildPointJson(HrvTime.localIso(tSec), rmssd, hrVal, respOut,
                         state != null ? state.tone : null,
-                        leanOut, p.state, p.leanDir, p.activity, stepDelta, body.state, p.sleepPos);
+                        leanOut, p.state, p.leanDir, p.activity, stepDelta,
+                        body != null ? body.state : null, p.sleepPos);
                 db.addPoint(user, tSec, pointStr);
                 if (e != null) e.point(pointStr);
             }

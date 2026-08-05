@@ -145,6 +145,7 @@ public final class PolarBle {
     private volatile Disposable accDis;
     private volatile ScheduledFuture<?> accDutyFuture; // repeating ACC duty-cycle task (null = none)
     private volatile boolean accDutyCycle = false;     // power-save ACC mode (runtime-toggleable); true = burst-sample. Default OFF = continuous
+    private volatile boolean accEnabled = true;        // 姿勢推定トグル: false = ACC never streams (biggest H10 battery saving)
     private volatile boolean stopping = false;
     private volatile boolean recordingActive = false;
     private volatile boolean linkConnected = false;   // BLE link up — gates PFTP ops
@@ -181,7 +182,7 @@ public final class PolarBle {
 
     /** True when ACC is being duty-cycled for power saving — steps can't be counted
      *  accurately from short bursts, so the engine omits them. */
-    public boolean accDutyCycled() { return withAcc && accDutyCycle; }
+    public boolean accDutyCycled() { return withAcc && accEnabled && accDutyCycle; }
 
     public void start() {
         exec.execute(() -> {
@@ -408,7 +409,7 @@ public final class PolarBle {
      *  period (posture refreshes each burst — it changes slowly; steps are omitted)
      *  rather than continuously. HR/RR are never affected. Runtime-toggleable. */
     private void beginAcc() {
-        if (!withAcc) return;
+        if (!withAcc || !accEnabled) return; // 姿勢推定OFF: ACCは一切購読しない
         if (!accDutyCycle) { startAcc(); return; }
         cancelAccDuty();
         final int gen = connGen.get();
@@ -434,10 +435,26 @@ public final class PolarBle {
         if (accDutyCycle == on) return;
         accDutyCycle = on;
         execSafe(() -> {
-            if (stopping || api == null || !linkConnected || !withAcc) return;
+            if (stopping || api == null || !linkConnected || !withAcc || !accEnabled) return;
             cancelAccDuty();
             disposeAcc();
             beginAcc(); // re-reads accDutyCycle: continuous or burst
+        });
+    }
+
+    /** Turn the accelerometer stream on/off at runtime (dashboard 姿勢推定 toggle).
+     *  OFF unsubscribes ACC entirely — the H10 then only runs its ECG/RR path, which is the
+     *  single biggest sensor-battery saving available (25 Hz is the ACC's MINIMUM rate, so
+     *  even the duty-cycled power-save mode still pays for periodic ACC startup). HR/RR are
+     *  untouched, so RMSSD keeps running. Applies live and to the next connect. */
+    public void setAccEnabled(boolean on) {
+        if (accEnabled == on) return;
+        accEnabled = on;
+        execSafe(() -> {
+            if (stopping || api == null || !withAcc) return;
+            cancelAccDuty();
+            disposeAcc();                          // OFF: drop the live subscription now
+            if (accEnabled && linkConnected) beginAcc(); // ON: resume in the current power mode
         });
     }
 

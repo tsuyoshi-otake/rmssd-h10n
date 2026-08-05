@@ -179,6 +179,7 @@ public class MonitorService extends Service {
         engine.setSpeaker(tts);
         engine.setLinkStateSink(this::updateNotification); // surface a stalled link in the notification
         engine.setPowerSave("1".equals(db().kvGet("powerSave"))); // 省電力モード（kv未設定=既定OFF=ACC連続・歩数あり）
+        engine.setPostureEnabled(!"0".equals(db().kvGet("postureEnabled"))); // 姿勢推定（kv未設定=既定ON）。OFFでACC停止＝H10電池節約
         engine.setBreathingAlertVoice(!"0".equals(db().kvGet("breathingAlertVoice"))); // 既定ON。設定でOFF可
         engine.start(mac);
         db().kvPut("engine", "native");
@@ -203,6 +204,9 @@ public class MonitorService extends Service {
     public void nativeSetBreathingAlertVoice(boolean on) { db().kvPut("breathingAlertVoice", on ? "1" : "0"); if (engine != null) engine.setBreathingAlertVoice(on); }
     /** Power-save toggle from the dashboard: persist (survives restart/Boot) + apply live. */
     public void nativeSetPowerSave(boolean on) { db().kvPut("powerSave", on ? "1" : "0"); if (engine != null) engine.setPowerSave(on); }
+    /** 姿勢推定 toggle from the dashboard: persist (survives restart/Boot) + apply live.
+     *  OFF stops the H10 accelerometer entirely — RR/HR keep streaming. */
+    public void nativeSetPostureEnabled(boolean on) { db().kvPut("postureEnabled", on ? "1" : "0"); if (engine != null) engine.setPostureEnabled(on); }
     /** Destructive full reset from the dashboard; the WebView restarts the engine after this returns. */
     public void nativeClearAllData() { stopEngine(); db().clearAllData(); stopSelf(); }
 

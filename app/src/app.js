@@ -397,6 +397,7 @@ const hostBridge = {
   setRelaxVoice: (sec) => useNative ? HrvNative.setRelaxVoice({ sec }) : ({ ok: false }), // native TTS readout interval (s; 0=off)
   setBreathingAlert: (on) => useNative ? HrvNative.setBreathingAlert({ on }) : ({ ok: false }), // native TTS warning: low RMSSD + shallow breathing
   setPowerSave: (on) => useNative ? HrvNative.setPowerSave({ on }) : ({ ok: false }), // ACC power-save mode (duty-cycle + steps off)
+  setPostureEnabled: (on) => useNative ? HrvNative.setPostureEnabled({ on }) : ({ ok: false }), // ACC on/off (posture+steps off = H10 battery saving)
   clearAllData: async () => {
     if (!useNative) return { ok: true };
     try { await HrvNative.clearAllData(); } catch (_) {}
@@ -502,6 +503,7 @@ function makeRemoteBridge() {
     setRelaxVoice: () => ({ ok: false }), // native-only (host TTS); remote view can't drive it
     setBreathingAlert: () => ({ ok: false }), // native-only (host TTS); remote view can't drive it
     setPowerSave: () => ({ ok: false }), // native-only (BLE/ACC); remote view can't drive it
+    setPostureEnabled: () => ({ ok: false }), // native-only (BLE/ACC); remote view can't drive it
     clearAllData: () => ({ ok: false }),
     setEngine: () => ({ ok: false, engine: 'js' }),
     getEngine: () => 'js',
