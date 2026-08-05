@@ -2,6 +2,7 @@ package dev.otake.rmssdh10n;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -27,9 +28,10 @@ public class RecordingBackfillStoreTest {
         String removedExId;
         Set<Long> existing = new HashSet<>();
         boolean committed; int committedRestored; long committedBlv = -1;
-        boolean commitThrows;
+        boolean commitThrows, quarantineThrows, alreadyCommitted, quarantined;
+        String quarantineReason;
 
-        @Override public HrvDb.Rec recordingGetOpen() { return null; }
+        @Override public HrvDb.Rec recordingGetOpen(int user, String mac) { return null; }
         @Override public void recordingStarting(String exId, String mac, int user, String owner, int schemaVersion, long startRequestMs) {
             startedExId = exId; startedMac = mac; startedUser = user; startedOwner = owner; startedSchema = schemaVersion; startedReq = startRequestMs;
         }
@@ -37,13 +39,19 @@ public class RecordingBackfillStoreTest {
         @Override public void recordingSetState(String exId, String state) { states.add(state); }
         @Override public void recordingSetFetched(String exId, long rrCount, long durationMs, int truncated) { fetchTrunc = truncated; }
         @Override public void recordingMarkRemoved(String exId) { removedExId = exId; }
-        @Override public Set<Long> pointTimesIn(long fromMs, long toMs) { return existing; }
-        @Override public long backfillCommit(List<Object[]> points, long fromMs, long toMs,
+        @Override public Set<Long> pointTimesIn(int user, long fromMs, long toMs) { return existing; }
+        @Override public long backfillCommit(int user, List<Object[]> points, long fromMs, long toMs,
                                              long anchorStartMs, String exId, int truncated, int baselineVersion) {
             if (commitThrows) throw new RuntimeException("commit boom");
             committed = true; committedRestored = points.size(); committedBlv = baselineVersion;
             return points.size(); // fake "actually inserted" = all attempted (no real dedup here)
         }
+        @Override public boolean backfillIsCommitted(int user, String exId, long anchorStartMs) { return alreadyCommitted; }
+        @Override public void recordingQuarantine(String exId, long anchorStartMs, double[] rrMs, String reason) {
+            if (quarantineThrows) throw new RuntimeException("quarantine boom");
+            quarantined = true; quarantineReason = reason;
+        }
+        @Override public boolean recordingIsDiscarded(String exId) { return false; }
     }
 
     static class FakeHost implements RecordingBackfillStore.Host {
@@ -90,8 +98,8 @@ public class RecordingBackfillStoreTest {
         assertEquals(1, db.fetchTrunc);
 
         long now = System.currentTimeMillis();
-        boolean ok = store.recPersistGap(beats(40, 800), now - 32_000L, "rmssd-1", false);
-        assertTrue(ok);
+        PolarBle.RecordingStore.PersistResult result = store.recPersistGap(beats(40, 800), now - 32_000L, "rmssd-1", false);
+        assertSame(PolarBle.RecordingStore.PersistResult.COMMITTED, result);
         assertTrue(db.committed);
         assertEquals(7, db.committedBlv);                 // baseline version threaded through to the ledger
         assertTrue(db.states.contains("persisted"));      // success marks the recording persisted
@@ -100,22 +108,44 @@ public class RecordingBackfillStoreTest {
         assertEquals("rmssd-1", db.removedExId);
     }
 
-    @Test public void persistFailureReturnsFalseAndDoesNotMarkPersisted() {
+    @Test public void commitFailureQuarantinesRawPayloadBeforeReportingDurable() {
         FakeDb db = new FakeDb(); db.commitThrows = true;
         RecordingBackfillStore store = new RecordingBackfillStore(db, new FakeHost());
         long now = System.currentTimeMillis();
-        boolean ok = store.recPersistGap(beats(40, 800), now - 32_000L, "rmssd-1", false);
-        assertFalse(ok);                              // a failed commit must NOT report durable
-        assertFalse(db.states.contains("persisted")); // so the device slot is retried, not removed
+        PolarBle.RecordingStore.PersistResult result = store.recPersistGap(beats(40, 800), now - 32_000L, "rmssd-1", false);
+        assertSame(PolarBle.RecordingStore.PersistResult.QUARANTINED, result);
+        assertTrue(db.quarantined);
+        assertTrue(db.states.contains("persisted"));
     }
 
-    @Test public void implausibleAnchorIsNoOpButRemovable() {
+    @Test public void commitAndQuarantineFailureIsNotDurable() {
+        FakeDb db = new FakeDb(); db.commitThrows = true; db.quarantineThrows = true;
+        RecordingBackfillStore store = new RecordingBackfillStore(db, new FakeHost());
+        long now = System.currentTimeMillis();
+        PolarBle.RecordingStore.PersistResult result = store.recPersistGap(beats(40, 800), now - 32_000L, "rmssd-1", false);
+        assertSame(PolarBle.RecordingStore.PersistResult.FAILED, result);
+        assertFalse(db.states.contains("persisted"));
+    }
+
+    @Test public void implausibleAnchorIsQuarantinedBeforeRemoval() {
         FakeDb db = new FakeDb(); FakeHost host = new FakeHost();
         RecordingBackfillStore store = new RecordingBackfillStore(db, host);
         long now = System.currentTimeMillis();
-        boolean ok = store.recPersistGap(beats(40, 800), now + 5_000_000_000L, "rmssd-1", false);
-        assertTrue(ok);                               // true so the device exercise is still removed
-        assertFalse(db.committed);                    // but nothing is written
+        PolarBle.RecordingStore.PersistResult result = store.recPersistGap(beats(40, 800), now + 5_000_000_000L, "rmssd-1", false);
+        assertSame(PolarBle.RecordingStore.PersistResult.QUARANTINED, result);
+        assertFalse(db.committed);
+        assertTrue(db.quarantined);
+        assertEquals("invalid_anchor", db.quarantineReason);
         assertEquals(Integer.valueOf(0), host.setRestored);
+    }
+
+    @Test public void priorCommitIsDurableWithoutWritingDuplicateLedger() {
+        FakeDb db = new FakeDb(); db.alreadyCommitted = true;
+        RecordingBackfillStore store = new RecordingBackfillStore(db, new FakeHost());
+        PolarBle.RecordingStore.PersistResult result = store.recPersistGap(
+                beats(40, 800), System.currentTimeMillis() - 32_000L, "rmssd-1", false);
+        assertSame(PolarBle.RecordingStore.PersistResult.ALREADY_COMMITTED, result);
+        assertFalse(db.committed);
+        assertTrue(db.states.contains("persisted"));
     }
 }

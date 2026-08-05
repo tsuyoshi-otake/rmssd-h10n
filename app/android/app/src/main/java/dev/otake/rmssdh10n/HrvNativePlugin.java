@@ -66,6 +66,27 @@ public class HrvNativePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void switchUser(PluginCall call) {
+        String mac = call.getString("mac", MonitorService.DEFAULT_MAC);
+        boolean acc = Boolean.TRUE.equals(call.getBoolean("acc", true));
+        int user = call.getInt("user", 1);
+        String seed = call.getString("seed", null);
+        Intent svc = new Intent(getContext(), MonitorService.class);
+        svc.setAction(MonitorService.ACTION_SWITCH_USER);
+        svc.putExtra(MonitorService.EXTRA_MAC, mac);
+        svc.putExtra(MonitorService.EXTRA_ACC, acc);
+        svc.putExtra(MonitorService.EXTRA_USER, user);
+        if (seed != null) svc.putExtra(MonitorService.EXTRA_SEED, seed);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) getContext().startForegroundService(svc);
+        else getContext().startService(svc);
+        JSObject ret = new JSObject();
+        ret.put("ok", true);
+        ret.put("engine", "native");
+        ret.put("user", user);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
     public void setPostureRef(PluginCall call) {
         MonitorService s = MonitorService.INSTANCE;
         JSObject ret = new JSObject();
@@ -86,6 +107,16 @@ public class HrvNativePlugin extends Plugin {
         boolean on = Boolean.TRUE.equals(call.getBoolean("on", true));
         MonitorService s = MonitorService.INSTANCE;
         if (s != null) s.nativeSetPowerSave(on);
+        JSObject ret = new JSObject();
+        ret.put("ok", s != null);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void setPostureEnabled(PluginCall call) {
+        boolean on = Boolean.TRUE.equals(call.getBoolean("on", true));
+        MonitorService s = MonitorService.INSTANCE;
+        if (s != null) s.nativeSetPostureEnabled(on);
         JSObject ret = new JSObject();
         ret.put("ok", s != null);
         call.resolve(ret);
@@ -134,6 +165,18 @@ public class HrvNativePlugin extends Plugin {
         call.resolve(ret);
     }
 
+    /** Voice warning for sustained low RMSSD + shallow breathing. */
+    @PluginMethod
+    public void setBreathingAlert(PluginCall call) {
+        boolean on = Boolean.TRUE.equals(call.getBoolean("on", true));
+        MonitorService s = MonitorService.INSTANCE;
+        if (s != null) s.nativeSetBreathingAlertVoice(on);
+        JSObject ret = new JSObject();
+        ret.put("ok", s != null);
+        ret.put("on", on);
+        call.resolve(ret);
+    }
+
     /** Recent raw RR beats (JSON array string) for the Kubios/Elite-HRV export. */
     @PluginMethod
     public void getRrLog(PluginCall call) {
@@ -159,7 +202,7 @@ public class HrvNativePlugin extends Plugin {
     @PluginMethod
     public void getStatus(PluginCall call) {
         JSObject ret = new JSObject();
-        ret.put("value", db().getStatus());
+        ret.put("value", db().getStatus(call.getInt("user", 1)));
         call.resolve(ret);
     }
 
@@ -168,8 +211,8 @@ public class HrvNativePlugin extends Plugin {
     public void getPointsSince(PluginCall call) {
         long since = 0;
         try { since = Long.parseLong(call.getString("since", "0")); } catch (Exception ignored) {}
-        int limit = call.getInt("limit", 5000);
-        HrvDb.PointsPage page = db().getPointsSince(since, limit);
+        int limit = boundedLimit(call.getInt("limit", 2000));
+        HrvDb.PointsPage page = db().getPointsSince(call.getInt("user", 1), since, limit);
         JSObject ret = new JSObject();
         ret.put("points", page.jsonArray); // JSON array string
         ret.put("count", page.count);
@@ -185,14 +228,76 @@ public class HrvNativePlugin extends Plugin {
     @PluginMethod
     public void getUnmergedImports(PluginCall call) {
         JSObject ret = new JSObject();
-        ret.put("imports", db().unmergedImportsJson());
+        ret.put("imports", db().unmergedImportsJson(call.getInt("user", 1)));
         call.resolve(ret);
     }
 
     /** Flag import ids (CSV of integers) as merged so they are not merged again. */
     @PluginMethod
     public void markImportsMerged(PluginCall call) {
-        db().markImportsMerged(call.getString("ids", ""));
+        db().markImportsMerged(call.getInt("user", 1), call.getString("ids", ""));
+        JSObject ret = new JSObject();
+        ret.put("ok", true);
+        call.resolve(ret);
+    }
+
+    /** Latest finite window, chronological. Keeps startup independent of total DB size. */
+    @PluginMethod
+    public void getLatestPoints(PluginCall call) {
+        int user = call.getInt("user", 1);
+        int limit = boundedLimit(call.getInt("limit", 900));
+        resolvePoints(call, db().getLatestPoints(user, limit));
+    }
+
+    /** Fixed-upper-bound keyset page used by catch-up and past-range backfill merges. */
+    @PluginMethod
+    public void getPointsRange(PluginCall call) {
+        int user = call.getInt("user", 1);
+        long after = parseLong(call.getString("after", "0"), 0);
+        long toExclusive = parseLong(call.getString("toExclusive", String.valueOf(Long.MAX_VALUE)), Long.MAX_VALUE);
+        int limit = boundedLimit(call.getInt("limit", 2000));
+        resolvePoints(call, db().getPointsRange(user, after, toExclusive, limit));
+    }
+
+    private static int boundedLimit(int requested) { return Math.max(1, Math.min(2000, requested)); }
+    private static long parseLong(String value, long fallback) {
+        try { return Long.parseLong(value); } catch (Exception ignored) { return fallback; }
+    }
+    private static void resolvePoints(PluginCall call, HrvDb.PointsPage page) {
+        JSObject ret = new JSObject();
+        ret.put("points", page.jsonArray);
+        ret.put("count", page.count);
+        ret.put("hasMore", page.hasMore);
+        ret.put("lastT", String.valueOf(page.lastT));
+        call.resolve(ret);
+    }
+
+    /** Native long-range aggregates; localStorage is only a disposable renderer cache. */
+    @PluginMethod
+    public void getAggregates(PluginCall call) {
+        int user = call.getInt("user", 1);
+        long width = parseLong(call.getString("widthMs", "300000"), 300_000L);
+        long from = parseLong(call.getString("fromMs", "0"), 0);
+        long to = parseLong(call.getString("toMs", String.valueOf(Long.MAX_VALUE)), Long.MAX_VALUE);
+        int limit = Math.max(1, Math.min(4000, call.getInt("limit", 4000)));
+        JSObject ret = new JSObject();
+        ret.put("buckets", db().aggregatesJson(user, width, from, to, limit));
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void getDataDiagnostics(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("value", db().diagnosticsJson(call.getInt("user", 1)));
+        call.resolve(ret);
+    }
+
+    /** Destructive reset from the dashboard's complete-clear action. */
+    @PluginMethod
+    public void clearAllData(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        if (s != null) s.nativeClearAllData();
+        else db().clearAllData();
         JSObject ret = new JSObject();
         ret.put("ok", true);
         call.resolve(ret);

@@ -53,7 +53,15 @@ final class HrvJson {
 
     /** Posture/sleep-position sub-object for the status frame. */
     static JSONObject postureJson(Posture.Result p) throws Exception {
+        return postureJson(p, true);
+    }
+
+    /** As above, but {@code enabled=false} (姿勢推定OFF) marks the block {@code disabled} so the
+     *  dashboard says "OFF by choice" instead of "no ACC signal" — the two look identical in
+     *  {@link Posture.Result} (both are 'nosignal') but mean very different things. */
+    static JSONObject postureJson(Posture.Result p, boolean enabled) throws Exception {
         JSONObject o = new JSONObject();
+        if (!enabled) o.put("disabled", true);
         o.put("receiving", p.receiving);
         o.put("calibrated", p.calibrated);
         o.put("state", p.state);

@@ -13,3 +13,6 @@ data/*
 
 # Playwright MCP scratch (browser-test screenshots/snapshots)
 .playwright-mcp/
+
+# Developer-local editor configuration.
+.vscode/

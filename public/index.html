@@ -28,8 +28,12 @@
     button:hover { background: #30363d; }
     .users { display: flex; align-items: center; gap: 6px; }
     .users .lbl { font-size: 13px; color: #8b949e; }
-    .users button { padding: 6px 11px; min-width: 34px; }
-    .users button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; }
+    .users .current {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 34px; padding: 6px 11px; border-radius: 8px;
+      background: #1f6feb; color: #fff; font-size: 13px; font-weight: 600;
+      font-variant-numeric: tabular-nums; cursor: pointer;
+    }
     .wrap { padding: 24px; }
 
     .state {
@@ -79,7 +83,7 @@
     <span id="batt" style="display:none"></span>
     <span id="calib"></span>
     <span class="spacer"></span>
-    <span class="users" id="userSel" title="計測対象のユーザーを切り替え（基準値・記録は個別）">
+    <span class="users" id="userSel" title="現在のユーザー（クリックで確認付き切替）">
       <span class="lbl">ユーザー</span>
     </span>
     <span id="histInfo" style="font-size:12px;color:#6e7681"></span>
@@ -111,13 +115,7 @@
 
     <div class="chartbox"><canvas id="chart"></canvas></div>
 
-    <div class="section">
-      <span class="section-title">長期トレンド（15分平均）</span>
-      <span id="trendInfo" style="font-size:12px;color:#6e7681"></span>
-    </div>
-    <div class="chartbox trend"><canvas id="trendChart"></canvas></div>
-
-    <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。上のグラフは直近約1時間の詳細（1秒間隔）、下のグラフは15分平均の長期トレンドで、どちらもこのブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。</div>
+    <div class="note">※ 状態・気分・呼吸数は心拍変動（RSA / 自律神経バランス）からの推定で、医療・心理診断ではありません。基準値は接続後の最初の約1分（落ち着いた読みのみ採用）で確定します。「安静で基準を取り直す」で再キャリブレーションできます。呼吸数の「信号品質」はピークのSNR・鋭さに基づく指標で、約60秒未満は「暫定」表示です。グラフは直近約1時間の詳細（1秒間隔）です。このブラウザの localStorage に保存され、再読み込みしても復元されます。グラフ背景の色帯はその時間帯の状態（緑=リラックス/回復・青=平常・水色=集中・橙=緊張・赤=高負荷）を表します。</div>
   </div>
 
   <script>
@@ -237,7 +235,8 @@
       },
     });
 
-    const trendChart = new Chart(document.getElementById('trendChart'), {
+    const trendCanvas = document.getElementById('trendChart');
+    const trendChart = trendCanvas ? new Chart(trendCanvas, {
       type: 'line',
       plugins: [stateBandPlugin],
       data: {
@@ -259,7 +258,7 @@
         },
         plugins: { legend: { labels: { color: '#e6edf3' } } },
       },
-    });
+    }) : null;
 
     function redrawFromHistory() {
       chart.data.labels = history.map((p) => new Date(p.t).toLocaleTimeString('ja-JP'));
@@ -340,6 +339,7 @@
       return all;
     }
     function redrawTrend() {
+      if (!trendChart) return;
       const s = trendSeries();
       trendChart.data.labels = s.map((b) => fmtBucketLabel(b.t));
       trendChart.data.datasets[0].data = s.map((b) => b.rmssd);
@@ -347,7 +347,8 @@
       trendChart.data.datasets[2].data = s.map((b) => b.resp);
       trendChart.$tones = s.map((b) => b.tone);
       trendChart.update('none');
-      document.getElementById('trendInfo').textContent = s.length ? `${s.length} 区間 / 15分` : '';
+      const info = document.getElementById('trendInfo');
+      if (info) info.textContent = s.length ? `${s.length} 区間 / 15分` : '';
     }
 
     // Fold one live point into the trend, finalising the previous bucket on roll-over.
@@ -479,9 +480,8 @@
 
     // ---- user switching (client side: swap stored history, redraw) ----
     function highlightUser(n) {
-      for (const b of document.querySelectorAll('#userSel button')) {
-        b.classList.toggle('active', Number(b.dataset.user) === n);
-      }
+      const badge = document.getElementById('currentUserLabel');
+      if (badge) badge.textContent = n;
     }
     function switchLocalUser(n) {
       // Persist the outgoing user's history before swapping keys.
@@ -499,21 +499,21 @@
       redrawTrend();
       highlightUser(n);
     }
-    (function buildUserButtons() {
+    (function buildUserIndicator() {
       const sel = document.getElementById('userSel');
-      for (let n = 1; n <= 5; n++) {
-        const b = document.createElement('button');
-        b.textContent = n;
-        b.dataset.user = n;
-        b.title = `ユーザー ${n} に切り替え`;
-        b.addEventListener('click', async () => {
-          if (n === currentUser) return;
-          for (const x of sel.querySelectorAll('button')) x.disabled = true;
-          try { await fetch('/api/user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user: n }) }); } catch (_) {}
-          setTimeout(() => { for (const x of sel.querySelectorAll('button')) x.disabled = false; }, 1200);
-        });
-        sel.appendChild(b);
-      }
+      const badge = document.createElement('span');
+      badge.className = 'current';
+      badge.id = 'currentUserLabel';
+      badge.setAttribute('aria-label', '現在のユーザー');
+      badge.title = 'クリックしてユーザーを切り替え';
+      badge.addEventListener('click', async () => {
+        const raw = prompt('切り替えるユーザー番号（1〜5）', String(currentUser));
+        if (raw == null) return;
+        const n = Number(raw);
+        if (!Number.isInteger(n) || n < 1 || n > 5 || n === currentUser) return;
+        try { await fetch('/api/user', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user: n }) }); } catch (_) {}
+      });
+      sel.appendChild(badge);
       highlightUser(currentUser);
     })();
 

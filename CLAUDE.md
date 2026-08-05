@@ -96,7 +96,7 @@ app/android/.../MonitorService.java   前面サービス（エンジン所有・
                 RespirationTracker.java RSA呼吸：受理NN窓＋throttled Welch再計算＋last-good保持（信頼度を経時減衰）
                 RelaxReadout.java / TtsSpeaker.java  リラックス読み上げ文面生成 / ja-JP TTS（画面OFFでも前面サービスで継続）
                 HrvTime.java / HrvJson.java  JSTタイムスタンプ / 点・status JSON組立（live/backfill共有=key drift防止）
-                HrvDb.java             SQLite=真実の源。points/status_latest/kv/recordings/backfill_imports
+                HrvDb.java             SQLite=真実の源。ユーザー別points_v3/status/集約＋recordings/backfill ledger/quarantine
                 HrvNativePlugin.java   WebViewブリッジ（live push＋getPointsSince/getUnmergedImports catch-up＋baseline/posture/rrLog制御）
                 BootReceiver.java      BOOT_COMPLETEDで監視を再開（kv engine==native時）
                 hrv/Backfill.java      穴埋め純計算（fetchしたRR列をstart-anchor前進再生→秒境界の点列。JUnitゴールデン）
@@ -127,7 +127,9 @@ app/src/app.js + app/www/index.html    ダッシュボード（esbuild: src→ww
 - **user-stop ⇔ OS-kill**: 明示停止(`stopEngine`)は `markUserStopped()`→`discarded_by_user`で**復元しない**。OS-kill(`onDestroy`でengine!=null)は `active`のまま→次回起動で復元。
 - **UIへの反映はイベント非依存**: `backfill_imports` ledger を起動/復帰/イベントで drain（`getUnmergedImports`→`nativeBackfillMerge`→`__mergeBackfill`＝history再構築＋trend `replaceBuckets`）。WebView未アタッチ中のサービス単独復元も次回ロードで反映。「**離席分を復元しました（約N分・一部欠落）**」。
 - **満杯(truncated)**: 録音が今より大きく前に自動停止＋RR上限/~18h で検知→復元範囲を `[start,start+duration]` に限定し `truncated` をledger/UIに明示。
-- DBは **schema v2**。`onUpgrade` は**追加のみ（pointsを消さない）**。
+- DBは **schema v3**。新規点・status・backfill ledgerはユーザー別テーブルへ保存し、5/15/30分集約もネイティブで更新する。旧v2のユーザー不明`points`は`legacy_unassigned`として削除せず保持する。`onUpgrade` は**追加のみ（旧pointsを消さない）**。
+- H10 exerciseは、point＋ledgerのcommit、既commit確認、または生RRの`recording_quarantine`保存が成功した場合だけ削除可能。不正anchor、空replay、commit失敗を「何もなかった」として削除しない。追跡メタのない自動削除は禁止し、明示的にuser-discard済みの同一exIdだけ削除できる。
+- WebView catch-upは最新900点を先に描画し、固定上限付きkeyset page（最大2000点）で追従する。live受信時刻はdurable cursorを進めず、backfill importは範囲取得・解析・マージ成功後だけackする。localStorageは破棄可能な表示キャッシュで、長期集約の正本はSQLite。
 
 ### ネイティブ計算・UIの差分（Polar SDK移行後）
 - **呼吸(native)は `src/respiration.js` から意図的に乖離**（`Respiration.java`＋`RespirationTracker.java`）: グローバル最大ではなく **局所最大ピーク** を採り、帯端 ~0.10Hz の Mayer波(baroreflex)を構造的に除外。低速帯0.10–0.15Hzは **SNR≥4＋鋭さ**を満たす時のみ採用し信頼度≤0.5で報告。1回のSNRディップで消さず **last-good を120s掛けて信頼度減衰**（Schäfer&Kratky 2008: RSAレートは1–2分平均）。HF帯 MIN_SNR=2.0。**Android唯一の計算経路なのでNode版と乖離してよい**。
@@ -141,6 +143,7 @@ app/src/app.js + app/www/index.html    ダッシュボード（esbuild: src→ww
 - **全画面表示**: `MainActivity.hideStatusBar()` が `WindowInsetsControllerCompat` で**上のステータスバーのみ** immersive 非表示（ナビバーは残置／スワイプで一時表示）。`onCreate`＋`onWindowFocusChanged` で再適用。
 - **RMSSDロバスト窓化**（`Rmssd.java`＋`src/rmssd.js`、数値等価）: 窓内の successive-difference を **「平均RRの20%超(Malik流)」かつ Hampel/MAD 外れ値**でゲートし、単一の期外収縮/アーティファクト差分が30s窓を支配する**段差/針**を防ぐ。**拍は捨てない**＝HR/SDNN不変、2拍以上で必ず非null。RMSSDは補正済みRR前提（Task Force 1996／Kubios）。
 - **範囲セレクタ＋カード集計**: 長期トレンド見出しの **`‹ ›` ステッパー1つ**が表示範囲を統括（`selectedRange`、`rmssd-h10n.range.v1`永続）。固定9段を広い→狭い順に順送り: **60日間/30日間/二週間/一週間/昨日/当日/12時間/6時間/3時間**（既定=当日）。`Nd`/`Nh`はnowからのローリング窓、`昨日`/`当日`はカレンダー日。**メイングラフは常に1秒詳細(~15分)固定**（旧 `selectedPeriod`＋メイン期間チップ＋`redrawMainPeriod`は撤去）。範囲は **5分/15分/30分の3トレンドグラフ**と**カード中央値/平均**に連動。カード（RMSSD/心拍/呼吸）タップで **現在→中央値→平均**（カードごと独立）。カード集計は `rangeStore()` が範囲に応じ最適ストア選択（**二週間/30日/60日=30分、それ未満=5分**）。長期範囲のため保持拡張: **trend15 max2880(≈30日)/trend30 max3000(≈62日)**。**初期描画は boot 初期化に任せる**——`activities`(let) 初期化前にトレンド再描画(`redrawTrend`等)を呼ぶと **TDZ で boot が落ち `RmssdBridge.start()` に到達せずエンジン未起動**になる（重要なハマりどころ）。
+- **姿勢推定 ON/OFFトグル**（`設定→姿勢推定`、既定 **ON**、kv `postureEnabled`＋localStorage `rmssd-h10n.postureEnabled.v1` に永続）: **OFFでACCを一切購読しない**（`PolarBle.setAccEnabled`／`HrvEngine.setPostureEnabled`）。25Hz は H10 ACC の最小レートで、省電力の間欠でも周期的なACC起動コストを払い続けるため、**H10電池を最も節約できるのはACC完全停止**。**RR/HRは別系統(0x2A37)なのでRMSSD/呼吸/録音穴埋めは無影響**。OFF時は 姿勢・寝姿勢・歩数に加え **活動状態(body)も報告しない**（動きの根拠が皆無なので恒久「座位」や HR/HRVだけの「睡眠」誤判定を出さない＝`座りすぎ`通知も鳴らない）。UIの区別のため status に `posture.disabled` と `steps.reason`(`posture-off`/`power-save`) を追加（OFFと「ACC受信なし」は `Posture.Result` 上は同一）。OFF中は姿勢基準取り直し系＋省電力ボタンを `disabled` にする。
 - **ACC間欠/省電力トグル**（`設定→省電力`、既定 **OFF**＝ACC連続）: 25Hz は H10 ACC の**最小レート**なので、ON時は ACC を **5s/30s の間欠**にして稼働を~83%削減（`PolarBle.setAccDutyCycle`／`HrvEngine.setPowerSave`／kv `powerSave` 永続）。ON中は **姿勢~30s更新・歩数オミット**（status `steps.disabled`→「省電力中」表示）。**RR/HR は別系統(0x2A37)で連続＝間欠化しない**が、ACC の start/stop が単一BLEリンク上で **RR を間接的に乱しうる**割の悪いトレードオフ→**既定OFF**（実機検証まで非推奨）。
 
 ## トレンド分析

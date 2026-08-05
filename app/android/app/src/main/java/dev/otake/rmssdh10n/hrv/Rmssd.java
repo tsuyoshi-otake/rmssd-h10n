@@ -59,8 +59,11 @@ public final class Rmssd {
     private static final double ROBUST_REL_FLOOR = 0.20;
     private static final double ROBUST_MAD_K = 4.0;
     private static final int    ROBUST_MIN_DIFFS = 5;
+    private static final int    MIN_USED_DIFFS = 3;
+    private static final int    STARTUP_MIN_USED_DIFFS = 8;
 
     private final double windowMs, minRr, maxRr, maxRelJump, localTol, emaAlpha;
+    private final int startupMinUsedDiffs;
     private final int localN;
     private final List<Entry> entries = new ArrayList<>();
     private final List<Double> recent = new ArrayList<>(); // last N accepted RR
@@ -71,11 +74,21 @@ public final class Rmssd {
     public Rmssd() { this(30000); }
 
     public Rmssd(double windowMs) {
-        this(windowMs, 300, 2000, 0.25, 0.25, 7, 20);
+        this(windowMs, STARTUP_MIN_USED_DIFFS);
+    }
+
+    public Rmssd(double windowMs, int startupMinUsedDiffs) {
+        this(windowMs, 300, 2000, 0.25, 0.25, 7, 20, startupMinUsedDiffs);
     }
 
     public Rmssd(double windowMs, double minRr, double maxRr,
                  double maxRelJump, double localTol, int localN, double emaTau) {
+        this(windowMs, minRr, maxRr, maxRelJump, localTol, localN, emaTau, STARTUP_MIN_USED_DIFFS);
+    }
+
+    public Rmssd(double windowMs, double minRr, double maxRr,
+                 double maxRelJump, double localTol, int localN, double emaTau,
+                 int startupMinUsedDiffs) {
         this.windowMs = windowMs;
         this.minRr = minRr;
         this.maxRr = maxRr;
@@ -83,6 +96,7 @@ public final class Rmssd {
         this.localTol = localTol;
         this.localN = localN;
         this.emaAlpha = 1.0 / (emaTau + 1.0);
+        this.startupMinUsedDiffs = startupMinUsedDiffs;
     }
 
     /** @return true if accepted, false if rejected as an artifact. */
@@ -154,13 +168,21 @@ public final class Rmssd {
         for (int i = 0; i < dn; i++) {
             if (absd[i] <= thr) { sumSqDiff += diff[i] * diff[i]; used++; }
         }
-        if (used == 0) { for (int i = 0; i < dn; i++) sumSqDiff += diff[i] * diff[i]; used = dn; }
-        double rmssd = Math.sqrt(sumSqDiff / used);
 
         double varSum = 0;
         for (Entry e : entries) varSum += (e.rr - mean) * (e.rr - mean);
         double sdnn = Math.sqrt(varSum / count);
         double hr = 60000.0 / mean;
+
+        // Do not publish RMSSD from too few usable successive differences. Strap
+        // attach/re-wet often produces valid-looking but non-NN beats; the first
+        // RMSSD value is held until enough clean diffs exist, then later short
+        // dropouts use the smaller floor so the display can recover quickly.
+        int needed = rmssdEma == null ? startupMinUsedDiffs : MIN_USED_DIFFS;
+        if (used < needed) {
+            return new Result(null, rmssdEma, hr, sdnn, count, rejected);
+        }
+        double rmssd = Math.sqrt(sumSqDiff / used);
 
         rmssdEma = (rmssdEma == null) ? rmssd : emaAlpha * rmssd + (1 - emaAlpha) * rmssdEma;
         return new Result(rmssd, rmssdEma, hr, sdnn, count, rejected);

@@ -105,11 +105,18 @@ public final class PolarBle {
         void recActive(String exId, long startAckMs);
         /** Fetched from the device → stamp counts + truncation, state 'fetching'. */
         void recFetching(String exId, long rrCount, long durationMs, boolean truncated);
-        /** Replay + durably persist the gap RR (+ ledger). Return true once durable; the
-         *  device exercise is removed only on true so a failure retries idempotently. */
-        boolean recPersistGap(double[] rrMs, long anchorStartMs, String exId, boolean truncated);
+        /** Replay + durably persist the gap RR (+ ledger), or quarantine the raw RR when it
+         *  cannot be placed safely. The device exercise is removed only after a durable result. */
+        PersistResult recPersistGap(double[] rrMs, long anchorStartMs, String exId, boolean truncated);
         /** Device exercise removed → 'removed' (terminal). */
         void recRemoved(String exId);
+        /** True only for an exact recording explicitly discarded by the user. */
+        boolean canRemoveDiscarded(String exId);
+
+        enum PersistResult {
+            COMMITTED, ALREADY_COMMITTED, QUARANTINED, FAILED;
+            public boolean isDurable() { return this != FAILED; }
+        }
 
         /** Minimal view of a recoverable recording. */
         final class OpenRec {
@@ -138,6 +145,7 @@ public final class PolarBle {
     private volatile Disposable accDis;
     private volatile ScheduledFuture<?> accDutyFuture; // repeating ACC duty-cycle task (null = none)
     private volatile boolean accDutyCycle = false;     // power-save ACC mode (runtime-toggleable); true = burst-sample. Default OFF = continuous
+    private volatile boolean accEnabled = true;        // 姿勢推定トグル: false = ACC never streams (biggest H10 battery saving)
     private volatile boolean stopping = false;
     private volatile boolean recordingActive = false;
     private volatile boolean linkConnected = false;   // BLE link up — gates PFTP ops
@@ -174,7 +182,7 @@ public final class PolarBle {
 
     /** True when ACC is being duty-cycled for power saving — steps can't be counted
      *  accurately from short bursts, so the engine omits them. */
-    public boolean accDutyCycled() { return withAcc && accDutyCycle; }
+    public boolean accDutyCycled() { return withAcc && accEnabled && accDutyCycle; }
 
     public void start() {
         exec.execute(() -> {
@@ -401,7 +409,7 @@ public final class PolarBle {
      *  period (posture refreshes each burst — it changes slowly; steps are omitted)
      *  rather than continuously. HR/RR are never affected. Runtime-toggleable. */
     private void beginAcc() {
-        if (!withAcc) return;
+        if (!withAcc || !accEnabled) return; // 姿勢推定OFF: ACCは一切購読しない
         if (!accDutyCycle) { startAcc(); return; }
         cancelAccDuty();
         final int gen = connGen.get();
@@ -427,16 +435,32 @@ public final class PolarBle {
         if (accDutyCycle == on) return;
         accDutyCycle = on;
         execSafe(() -> {
-            if (stopping || api == null || !linkConnected || !withAcc) return;
+            if (stopping || api == null || !linkConnected || !withAcc || !accEnabled) return;
             cancelAccDuty();
             disposeAcc();
             beginAcc(); // re-reads accDutyCycle: continuous or burst
         });
     }
 
+    /** Turn the accelerometer stream on/off at runtime (dashboard 姿勢推定 toggle).
+     *  OFF unsubscribes ACC entirely — the H10 then only runs its ECG/RR path, which is the
+     *  single biggest sensor-battery saving available (25 Hz is the ACC's MINIMUM rate, so
+     *  even the duty-cycled power-save mode still pays for periodic ACC startup). HR/RR are
+     *  untouched, so RMSSD keeps running. Applies live and to the next connect. */
+    public void setAccEnabled(boolean on) {
+        if (accEnabled == on) return;
+        accEnabled = on;
+        execSafe(() -> {
+            if (stopping || api == null || !withAcc) return;
+            cancelAccDuty();
+            disposeAcc();                          // OFF: drop the live subscription now
+            if (accEnabled && linkConnected) beginAcc(); // ON: resume in the current power mode
+        });
+    }
+
     // --- recording lifecycle (exec thread; blocking RxJava is fine here) -----
     private enum FetchResult { PERSISTED, EMPTY, FAILED }
-    private enum SlotClass { EMPTY, OURS_NO_META, FOREIGN }
+    private enum SlotClass { EMPTY, OURS_NO_META, FOREIGN, UNKNOWN }
 
     /** Drive the single H10 slot on (re)connect. Recovers a DB-persisted recording if
      *  present (across reconnects AND app/OS restarts), else starts fresh while guarding
@@ -452,10 +476,15 @@ public final class PolarBle {
                 // Unifies same-process reconnect AND post-restart recovery: the anchor and
                 // exId come from the DB, so even a brand-new process recovers the gap.
                 if (recoverRecording(open) == FetchResult.FAILED) needRetry = true; // keep the gap
-            } else if (classifySlot() == SlotClass.FOREIGN) {
-                externalBlocking = true;
-                sink.log("external recording present — not starting (slot not ours)");
-                return; // never auto-delete a non-owned recording (e.g. Polar Beat)
+            } else {
+                SlotClass slot = classifySlot();
+                if (slot != SlotClass.EMPTY) {
+                    externalBlocking = true;
+                    if (slot == SlotClass.UNKNOWN) sink.log("recording slot unknown — list failed; retrying without deleting");
+                    else if (slot == SlotClass.FOREIGN) sink.log("external recording present — not starting (slot not ours)");
+                    else sink.log("untracked rmssd recording present — preserving it; recovery metadata is missing");
+                    return; // never auto-delete a foreign, unknown, or unanchored device payload
+                }
             }
             externalBlocking = false;
             // startFreshRecording clears the slot first (stop + remove ours), so an EMPTY or
@@ -549,20 +578,14 @@ public final class PolarBle {
                     .timeout(FETCH_TIMEOUT_S, TimeUnit.SECONDS).blockingGet();
             List<Integer> samples = data != null ? data.getHrSamples() : null; // RR ms (recorded as RR)
             int n = samples != null ? samples.size() : 0;
-            if (n < 2) {
-                sink.log("backfill: " + n + " samples (nothing to replay)");
-                try { api.removeExercise(id, entry).timeout(OP_TIMEOUT_S, TimeUnit.SECONDS).blockingAwait(); }
-                catch (Throwable ignored) {}
-                store.recRemoved(exId);
-                return FetchResult.EMPTY;
-            }
             double[] rr = new double[n];
             long sum = 0;
             for (int i = 0; i < n; i++) { rr[i] = samples.get(i); sum += samples.get(i); }
+            if (n < 2) sink.log("backfill: " + n + " samples — preserving raw payload before removal");
             boolean truncated = detectTruncated(n, sum, anchorStartMs);
             store.recFetching(exId, n, sum, truncated);
-            boolean persisted = store.recPersistGap(rr, anchorStartMs, exId, truncated);
-            if (!persisted) {
+            RecordingStore.PersistResult persisted = store.recPersistGap(rr, anchorStartMs, exId, truncated);
+            if (!persisted.isDurable()) {
                 sink.log("backfill not persisted; keeping exercise for retry");
                 return FetchResult.FAILED; // retry next reconnect — idempotent (same anchor → same seconds)
             }
@@ -586,12 +609,9 @@ public final class PolarBle {
         if (stopping || api == null || !linkConnected) return false;
         // No setLocalTime: the H10 doesn't support the time feature cleanly (see start()),
         // and backfill is start-anchored to our own clock, so device time is not needed.
-        // Ensure the single slot is FREE first: stop any active recording (e.g. one left
-        // running across an app update) and remove our stale/stopped exercises — a non-empty
-        // slot makes startRecording return OPERATION_NOT_PERMITTED(106). A FOREIGN slot was
-        // already excluded by the caller, so removeOurExercises only ever touches ours.
+        // The caller has positively classified the slot as empty, or has just durably recovered
+        // and removed its tracked exercise. Never auto-delete an untracked payload here.
         stopRecordingQuietly();
-        removeOurExercises();
         String exId = EX_PREFIX + System.currentTimeMillis();
         long startReqMs = System.currentTimeMillis();
         RecordingStore store = recordingStore;
@@ -656,26 +676,26 @@ public final class PolarBle {
 
     private SlotClass classifySlot() {
         List<PolarExerciseEntry> entries = listExercises();
-        if (entries == null || entries.isEmpty()) return SlotClass.EMPTY;
+        if (entries == null) return SlotClass.UNKNOWN;
+        if (entries.isEmpty()) return SlotClass.EMPTY;
+        RecordingStore store = recordingStore;
+        boolean kept = false;
         for (PolarExerciseEntry e : entries) {
             String idf = entryIdentifier(e);
             if (idf == null || !idf.startsWith(EX_PREFIX)) return SlotClass.FOREIGN; // not ours
+            if (store != null && store.canRemoveDiscarded(idf)) {
+                try {
+                    api.removeExercise(id, e).timeout(OP_TIMEOUT_S, TimeUnit.SECONDS).blockingAwait();
+                    sink.log("removed explicitly discarded recording " + idf);
+                    continue;
+                } catch (Throwable t) {
+                    sink.log("remove discarded recording failed: " + t.getMessage());
+                    return SlotClass.UNKNOWN;
+                }
+            }
+            kept = true;
         }
-        return SlotClass.OURS_NO_META; // ours, but no recoverable meta (old / un-anchored)
-    }
-
-    /** Remove only OUR exercises (rmssd- prefix) to reclaim the slot; never a foreign one. */
-    private void removeOurExercises() {
-        List<PolarExerciseEntry> entries = listExercises();
-        if (entries == null) return;
-        int removed = 0;
-        for (PolarExerciseEntry e : entries) {
-            String idf = entryIdentifier(e);
-            if (idf == null || !idf.startsWith(EX_PREFIX)) continue;
-            try { api.removeExercise(id, e).timeout(OP_TIMEOUT_S, TimeUnit.SECONDS).blockingAwait(); removed++; }
-            catch (Throwable t) { sink.log("remove ours failed: " + t.getMessage()); }
-        }
-        if (removed > 0) sink.log("reclaimed " + removed + " un-anchored recording(s)");
+        return kept ? SlotClass.OURS_NO_META : SlotClass.EMPTY;
     }
 
     private static String entryIdentifier(PolarExerciseEntry e) {

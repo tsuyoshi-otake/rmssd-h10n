@@ -66,4 +66,15 @@ public class HrvJsonTest {
     @Test public void stateJsonNullWhenUnclassified() throws Exception {
         assertNull(HrvJson.stateJson(null));
     }
+
+    /** 姿勢推定OFF and "no ACC signal" produce an identical Posture.Result, so only the
+     *  explicit `disabled` marker lets the dashboard tell "off by choice" from "no data". */
+    @Test public void postureJsonMarksDisabledOnlyWhenTurnedOff() throws Exception {
+        dev.otake.rmssdh10n.hrv.Posture.Result p = new dev.otake.rmssdh10n.hrv.Posture().compute(0L);
+        JSONObject off = HrvJson.postureJson(p, false);
+        assertTrue(off.optBoolean("disabled"));
+        JSONObject on = HrvJson.postureJson(p, true);
+        assertTrue(!on.has("disabled"));
+        assertTrue(!HrvJson.postureJson(p).has("disabled")); // legacy overload unchanged
+    }
 }
