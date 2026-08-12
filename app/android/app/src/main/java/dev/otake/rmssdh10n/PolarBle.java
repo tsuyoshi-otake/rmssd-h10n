@@ -154,6 +154,8 @@ public final class PolarBle {
     private int recordingAttempt = 0;                 // exec-thread only — PFTP retry counter
     private int recoveryReconnects = 0;               // exec-thread only — bounded forced reconnects on stuck PFTP
     private boolean rebondTried = false;              // exec-thread only — one OS bond reset per stuck episode
+    private long lastBondPromptAt = 0;                // exec-thread only — rate-limits OS pairing dialogs
+    private static final long BOND_PROMPT_MIN_MS = 10 * 60_000L; // one pairing prompt per 10 min at most
     // Engine-provided "is live RR actually stale right now?" — consulted at the moment a
     // watchdog action RUNS (exec can lag behind the tick that queued it by a whole PFTP op).
     private volatile java.util.function.BooleanSupplier rrStale = () -> true;
@@ -192,7 +194,10 @@ public final class PolarBle {
     public void start() {
         exec.execute(() -> {
             try {
-                PolarBonding.ensureBonded(ctx, id, sink::log); // pair first — PFTP needs an encrypted link
+                // Pair first — PFTP needs an encrypted link. This may show the OS pairing
+                // dialog, so record the prompt time for the rate limiter in ensurePftpBond.
+                if (!PolarBonding.isBonded(ctx, id)) lastBondPromptAt = System.currentTimeMillis();
+                PolarBonding.ensureBonded(ctx, id, sink::log);
                 Set<PolarBleApi.PolarBleSdkFeature> features = EnumSet.of(
                         PolarBleApi.PolarBleSdkFeature.FEATURE_HR,
                         PolarBleApi.PolarBleSdkFeature.FEATURE_POLAR_ONLINE_STREAMING,
@@ -506,6 +511,7 @@ public final class PolarBle {
      *  not-yet-recovered gap. */
     private void runRecordingOnConnect(int gen) {
         if (stopping || api == null || !linkConnected || gen != connGen.get()) return;
+        if (!ensurePftpBond(gen)) return; // unbonded: any PFTP op would fire an OS pairing dialog
         boolean needRetry = false;
         try {
             // Guard a foreign ACTIVE recording FIRST. An actively-recording exercise is NOT
@@ -565,14 +571,17 @@ public final class PolarBle {
                 sink.log("recording stuck after retries — forcing clean reconnect "
                         + recoveryReconnects + "/" + MAX_RECOVERY_RECONNECTS);
                 forceReconnectForRecording();
-            } else if (!rebondTried) {
-                // Fresh links didn't help either. A one-sided bond loss (H10 battery pull /
-                // reset while the phone still reports BONDED) makes every PFTP op fail on
-                // encryption forever — only re-pairing fixes it. Reset the OS bond once per
-                // stuck episode, then reconnect (recordingAttempt resets in deviceConnected).
+            } else if (!rebondTried && !rrStale.getAsBoolean()) {
+                // Fresh links didn't help either. RR flowing while PFTP still fails is the
+                // signature of a one-sided bond loss (H10 battery pull / reset while the phone
+                // still reports BONDED) — only re-pairing fixes that. A wedged sensor has stale
+                // RR too, and rebonding THEN would destroy a good bond for nothing and leave an
+                // unbonded reconnect loop spamming OS pairing dialogs — so the gate stays open
+                // until RR proves the sensor alive. One reset per stuck episode.
                 rebondTried = true;
-                sink.log("recording still stuck — resetting the OS bond and reconnecting");
+                sink.log("recording still stuck with live RR — resetting the OS bond and reconnecting");
                 try { api.disconnectFromDevice(id); } catch (Throwable ignored) {}
+                lastBondPromptAt = System.currentTimeMillis(); // rebond prompts the OS pairing dialog
                 boolean ok = PolarBonding.rebond(ctx, id, sink::log);
                 sink.log(ok ? "bond re-established" : "bond reset failed");
                 try { exec.schedule(() -> issueConnect("rebond", 1), 3, TimeUnit.SECONDS); }
@@ -581,6 +590,35 @@ public final class PolarBle {
                 sink.log("recording recovery gave up (PFTP 106 persists) — re-strap H10 to recover");
             }
         }
+    }
+
+    /** PFTP requires an encrypted (bonded) link — ANY PFTP op on an unbonded one makes the
+     *  Android stack fire an OS pairing-request dialog, and with the retry/reconnect loops
+     *  around recording that turns into an endless stream of dialogs. So all PFTP work is
+     *  gated here instead: already bonded → proceed; otherwise prompt for pairing at most
+     *  once per {@link #BOND_PROMPT_MIN_MS}, and only while RR is flowing (an unresponsive
+     *  H10 cannot complete SMP, so prompting would be pure dialog spam). While unbonded the
+     *  recording job re-checks periodically without prompting — live HR/RR needs no bond and
+     *  keeps streaming throughout. Must run on exec. */
+    private boolean ensurePftpBond(int gen) {
+        if (PolarBonding.isBonded(ctx, id)) return true;
+        long now = System.currentTimeMillis();
+        if (rrStale.getAsBoolean()) {
+            sink.log("not bonded and RR not flowing — postponing pairing (re-strap H10 if this persists)");
+        } else if (now - lastBondPromptAt >= BOND_PROMPT_MIN_MS) {
+            lastBondPromptAt = now;
+            sink.log("not bonded — requesting OS pairing (accept the dialog on the phone)");
+            PolarBonding.ensureBonded(ctx, id, sink::log);
+            if (PolarBonding.isBonded(ctx, id)) return true;
+            sink.log("pairing not completed — recording deferred (live HR/RR unaffected)");
+        } else {
+            sink.log("not bonded — pairing prompt rate-limited; recording deferred");
+        }
+        // Quiet re-check: picks up a bond made later (user accepts the dialog or pairs from
+        // Settings) without another prompt, then resumes recording on this same connection.
+        try { exec.schedule(() -> runRecordingOnConnect(gen), 60, TimeUnit.SECONDS); }
+        catch (RejectedExecutionException ignored) {}
+        return false;
     }
 
     /** Identifier of a NON-owned recording actively running on the device, or null when none

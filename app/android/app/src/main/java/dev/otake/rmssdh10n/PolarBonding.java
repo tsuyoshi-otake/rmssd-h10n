@@ -26,6 +26,17 @@ import java.util.function.Consumer;
 final class PolarBonding {
     private PolarBonding() {}
 
+    /** Whether the phone currently holds an OS bond for {@code mac} (needed for PFTP). */
+    @SuppressLint("MissingPermission")
+    static boolean isBonded(Context ctx, String mac) {
+        try {
+            BluetoothDevice dev = remoteDevice(ctx, mac);
+            return dev != null && dev.getBondState() == BluetoothDevice.BOND_BONDED;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT is requested at runtime in MainActivity
     static void ensureBonded(Context ctx, String mac, Consumer<String> log) {
         try {
