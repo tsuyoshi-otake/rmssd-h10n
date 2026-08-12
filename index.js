@@ -425,6 +425,8 @@ async function runHrRr(opts, log, cleanup, { setConnected, onRr, onHr, onBattery
   const ble = require('./src/ble');
   let stopping = false;
   let current = null; // currently connected peripheral, if any
+  let attachEpoch = 0; // bumped on deliberate teardown so a stale disconnect handler can't re-enter connectLoop
+  let lastDataAt = 0;  // wall clock of the last HR notification (stall watchdog)
 
   // On shutdown: stop reconnecting and disconnect (timeout-guarded so an already
   // dropped device cannot hang the exit path).
@@ -442,8 +444,11 @@ async function runHrRr(opts, log, cleanup, { setConnected, onRr, onHr, onBattery
 
   async function attach(peripheral) {
     current = peripheral;
+    lastDataAt = Date.now(); // arm the stall watchdog fresh for this session
+    const epoch = ++attachEpoch;
     let live = false; // only handle drops AFTER a successful subscribe
     peripheral.once('disconnect', () => {
+      if (epoch !== attachEpoch) return; // superseded — the stall watchdog already tore this session down
       current = null;
       if (!live || stopping) return;
       setConnected(false);
@@ -454,6 +459,7 @@ async function runHrRr(opts, log, cleanup, { setConnected, onRr, onHr, onBattery
     // bound them so a stuck attach falls through to a clean retry.
     const { hrm } = await withTimeout(ble.discoverHr(peripheral), 10000, 'discoverHr');
     hrm.on('data', (buf) => {
+      lastDataAt = Date.now();
       const { hr, rr } = parseHrm(buf);
       if (hr != null) onHr(hr);
       for (const interval of rr) onRr(interval);
@@ -482,6 +488,25 @@ async function runHrRr(opts, log, cleanup, { setConnected, onRr, onHr, onBattery
       } catch (_) { /* no battery service — fine, HR keeps running */ }
     }
   }
+
+  // Stall watchdog: WinRT can leave the link half-open — still 'connected', but
+  // notifications silently stopped and no 'disconnect' event ever fires. Without
+  // this, the monitor freezes until the process is restarted. The H10 notifies
+  // ~1/s even without skin contact, so sustained silence means a dead link: tear
+  // the session down ourselves and re-enter the reconnect loop.
+  const STALL_MS = 20000;
+  const stallTimer = setInterval(async () => {
+    if (stopping || !current) return;
+    if (Date.now() - lastDataAt < STALL_MS) return;
+    const stalled = current;
+    current = null;
+    attachEpoch++; // disarm the old session's disconnect handler (no double connectLoop)
+    setConnected(false);
+    log(`No HR data for ${Math.round(STALL_MS / 1000)}s — link looks half-open; reconnecting...`);
+    await ble.disconnectWithTimeout(stalled, 4000);
+    if (!stopping) connectLoop();
+  }, 5000);
+  cleanup.fns.push(() => clearInterval(stallTimer));
 
   async function connectLoop() {
     while (!stopping) {

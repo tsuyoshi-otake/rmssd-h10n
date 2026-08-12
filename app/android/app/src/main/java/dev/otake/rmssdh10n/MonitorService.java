@@ -5,7 +5,11 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.bluetooth.BluetoothAdapter;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
@@ -47,6 +51,19 @@ public class MonitorService extends Service {
     private HrvEngine engine;
     private TtsSpeaker tts; // relax-mode voice readout (created with the engine, on the main thread)
 
+    // Bluetooth OFF→ON is not survived by the SDK's auto-reconnect (nobody re-issues
+    // connectToDevice after an adapter cycle), which left the session dead until an app
+    // restart. Watch the adapter and re-issue the connect when it comes back.
+    private final BroadcastReceiver btStateReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context c, Intent i) {
+            if (i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1) == BluetoothAdapter.STATE_ON
+                    && engine != null) {
+                Log.i(TAG, "bluetooth adapter back ON — nudging reconnect");
+                engine.bluetoothRestarted();
+            }
+        }
+    };
+
     /** Register the WebView-side emitter; applied to a running engine immediately. */
     public static void registerEmitter(HrvEngine.Emitter e) {
         sEmitter = e;
@@ -74,6 +91,10 @@ public class MonitorService extends Service {
             ch.setDescription("バックグラウンドで心拍変動を計測します");
             nm.createNotificationChannel(ch);
         }
+        // System broadcasts reach NOT_EXPORTED receivers, matching PolarBonding's registration.
+        androidx.core.content.ContextCompat.registerReceiver(this, btStateReceiver,
+                new IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED);
     }
 
     @Override
@@ -228,6 +249,7 @@ public class MonitorService extends Service {
 
     @Override
     public void onDestroy() {
+        try { unregisterReceiver(btStateReceiver); } catch (Exception ignored) {}
         if (engine != null) { engine.stop(); engine = null; }
         if (tts != null) { tts.shutdown(); tts = null; }
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();

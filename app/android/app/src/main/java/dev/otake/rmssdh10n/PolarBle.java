@@ -69,6 +69,7 @@ public final class PolarBle {
     private static final int RETRY_DELAY_S = 5;          // spacing for transient PFTP 106 retries
     private static final int MAX_RECORDING_ATTEMPTS = 6; // bound the recover/start retry loop
     private static final int MAX_RECOVERY_RECONNECTS = 2;// bounded forced reconnects when PFTP stays wedged on a link
+    private static final int MAX_CONNECT_ATTEMPTS = 5;   // bounded re-issues when connectToDevice throws
     private static final long RR_CAP = 95000L;           // ~H10 RR memory limit (truncation heuristic)
     private static final long FULL_DURATION_MS = 18L * 3600 * 1000; // ~18 h
     private static final long TRUNCATE_TAIL_MS = 5L * 60 * 1000;    // unrecorded tail ⇒ memory-full auto-stop
@@ -152,6 +153,10 @@ public final class PolarBle {
     private volatile boolean externalBlocking = false;// a non-owned recording occupies the slot
     private int recordingAttempt = 0;                 // exec-thread only — PFTP retry counter
     private int recoveryReconnects = 0;               // exec-thread only — bounded forced reconnects on stuck PFTP
+    private boolean rebondTried = false;              // exec-thread only — one OS bond reset per stuck episode
+    // Engine-provided "is live RR actually stale right now?" — consulted at the moment a
+    // watchdog action RUNS (exec can lag behind the tick that queued it by a whole PFTP op).
+    private volatile java.util.function.BooleanSupplier rrStale = () -> true;
     // CAS-guarded so duplicate feature-ready callbacks can't queue two recording jobs.
     private final AtomicBoolean recordingHandledThisConn = new AtomicBoolean(false);
     // Bumped on every (re)connect. The recording job + its retries capture the gen they
@@ -205,7 +210,7 @@ public final class PolarBle {
                 api.setAutomaticReconnection(true);
                 api.setApiCallback(callback);
                 sink.log("connecting " + id);
-                api.connectToDevice(id);
+                issueConnect("initial", 1);
             } catch (Throwable t) {
                 sink.log("start failed: " + t.getMessage());
             }
@@ -217,6 +222,36 @@ public final class PolarBle {
     public void foregroundEntered() {
         PolarBleApi a = api;
         if (a != null) { try { a.foregroundEntered(); } catch (Throwable ignored) {} }
+    }
+
+    /** See {@link #rrStale}. Wire before {@link #start()}. */
+    public void setRrStaleCheck(java.util.function.BooleanSupplier s) { this.rrStale = s; }
+
+    /** Bluetooth adapter power-cycled back ON: the SDK's auto-reconnect does not reliably
+     *  survive an adapter cycle, so re-issue the connect when the link is down. */
+    public void reconnectIfDown() {
+        execSafe(() -> {
+            if (stopping || api == null || linkConnected) return;
+            sink.log("bluetooth adapter restarted — re-issuing connect");
+            issueConnect("bt-on", 1);
+        });
+    }
+
+    /** Issue connectToDevice with bounded retries. A throw here (adapter mid-cycle, transient
+     *  stack state) used to be logged once and never retried, leaving the session dead until
+     *  an app restart. Runs (and reschedules itself) on exec. */
+    private void issueConnect(String why, int attempt) {
+        if (stopping || api == null) return;
+        try {
+            if (attempt > 1) sink.log("connect (" + why + ") attempt " + attempt + "/" + MAX_CONNECT_ATTEMPTS);
+            api.connectToDevice(id);
+        } catch (Throwable t) {
+            sink.log("connect (" + why + ") failed: " + t.getMessage());
+            if (attempt < MAX_CONNECT_ATTEMPTS) {
+                try { exec.schedule(() -> issueConnect(why, attempt + 1), RETRY_DELAY_S, TimeUnit.SECONDS); }
+                catch (RejectedExecutionException ignored) {}
+            }
+        }
     }
 
     /** Run work on the BLE worker, swallowing the rejection that happens if a teardown
@@ -236,6 +271,9 @@ public final class PolarBle {
         if (stopping || api == null) return;
         execSafe(() -> {
             if (stopping || api == null || !linkConnected) return;
+            // Re-validate at execution time: exec may have been blocked by a long PFTP op
+            // since the watchdog queued this — if RR resumed meanwhile, leave the streams be.
+            if (!rrStale.getAsBoolean()) { sink.log("nudge skipped — RR already flowing"); return; }
             sink.log("nudge: re-subscribing streams (stale)");
             disposeStreams();
             startHr();
@@ -248,7 +286,7 @@ public final class PolarBle {
      *  fresh link does. Force one clean disconnect→reconnect; the caller (HrvEngine watchdog)
      *  bounds how many times this runs per stale episode so churn can't wedge the scanner. */
     public void forceReconnect() {
-        execSafe(this::cleanReconnect);
+        execSafe(() -> cleanReconnect(true));
     }
 
     public void stop() {
@@ -470,31 +508,46 @@ public final class PolarBle {
         if (stopping || api == null || !linkConnected || gen != connGen.get()) return;
         boolean needRetry = false;
         try {
+            // Guard a foreign ACTIVE recording FIRST. An actively-recording exercise is NOT
+            // listable until it is finalized, so classifySlot alone cannot see it — and both
+            // recovery's stop and startFresh's slot-clear would kill it. requestRecordingStatus
+            // sees it live; when it is someone else's (e.g. Polar Beat), leave the slot alone.
+            String foreign = foreignActiveRecording();
+            if (foreign != null) {
+                externalBlocking = true;
+                sink.log("foreign recording active (" + foreign + ") — leaving the slot untouched");
+                return;
+            }
             RecordingStore store = recordingStore;
             RecordingStore.OpenRec open = (store != null) ? store.getOpenRecording() : null;
             if (open != null) {
                 // Unifies same-process reconnect AND post-restart recovery: the anchor and
                 // exId come from the DB, so even a brand-new process recovers the gap.
                 if (recoverRecording(open) == FetchResult.FAILED) needRetry = true; // keep the gap
-            } else {
+            }
+            if (!needRetry) {
+                // (Re-)classify even after a recovery: recovery only settles OUR exercise's
+                // fate — the slot could still hold a payload we must never overwrite, and
+                // startFreshRecording's slot-clear would otherwise churn on PFTP 106.
                 SlotClass slot = classifySlot();
-                if (slot != SlotClass.EMPTY) {
+                if (slot == SlotClass.UNKNOWN) {
+                    needRetry = true; // list failed — retry rather than guessing the slot state
+                } else if (slot != SlotClass.EMPTY) {
                     externalBlocking = true;
-                    if (slot == SlotClass.UNKNOWN) sink.log("recording slot unknown — list failed; retrying without deleting");
-                    else if (slot == SlotClass.FOREIGN) sink.log("external recording present — not starting (slot not ours)");
-                    else sink.log("untracked rmssd recording present — preserving it; recovery metadata is missing");
-                    return; // never auto-delete a foreign, unknown, or unanchored device payload
+                    sink.log(slot == SlotClass.FOREIGN
+                            ? "external recording present — not starting (slot not ours)"
+                            : "untracked rmssd recording present — preserving it; recovery metadata is missing");
+                    return; // never auto-delete a foreign or unanchored device payload
+                } else {
+                    externalBlocking = false;
+                    if (!startFreshRecording()) needRetry = true; // a failed start → retry (don't give up)
                 }
             }
-            externalBlocking = false;
-            // startFreshRecording clears the slot first (stop + remove ours), so an EMPTY or
-            // OURS_NO_META slot needs nothing extra here. A failed start → retry (don't give up).
-            if (!needRetry && !startFreshRecording()) needRetry = true;
         } catch (Throwable t) {
             sink.log("recording-on-connect failed: " + t.getMessage());
             needRetry = true;
         }
-        if (!needRetry) { recoveryReconnects = 0; return; } // recovered/started — clear the reconnect budget
+        if (!needRetry) { recoveryReconnects = 0; rebondTried = false; return; } // done — clear the escalation budget
         if (!stopping && linkConnected && gen == connGen.get()) {
             if (recordingAttempt < MAX_RECORDING_ATTEMPTS) {
                 recordingAttempt++;
@@ -512,27 +565,62 @@ public final class PolarBle {
                 sink.log("recording stuck after retries — forcing clean reconnect "
                         + recoveryReconnects + "/" + MAX_RECOVERY_RECONNECTS);
                 forceReconnectForRecording();
+            } else if (!rebondTried) {
+                // Fresh links didn't help either. A one-sided bond loss (H10 battery pull /
+                // reset while the phone still reports BONDED) makes every PFTP op fail on
+                // encryption forever — only re-pairing fixes it. Reset the OS bond once per
+                // stuck episode, then reconnect (recordingAttempt resets in deviceConnected).
+                rebondTried = true;
+                sink.log("recording still stuck — resetting the OS bond and reconnecting");
+                try { api.disconnectFromDevice(id); } catch (Throwable ignored) {}
+                boolean ok = PolarBonding.rebond(ctx, id, sink::log);
+                sink.log(ok ? "bond re-established" : "bond reset failed");
+                try { exec.schedule(() -> issueConnect("rebond", 1), 3, TimeUnit.SECONDS); }
+                catch (RejectedExecutionException ignored) {}
             } else {
                 sink.log("recording recovery gave up (PFTP 106 persists) — re-strap H10 to recover");
             }
         }
     }
 
+    /** Identifier of a NON-owned recording actively running on the device, or null when none
+     *  is running, it is ours, or the probe failed (the probe is a guard, not a gate — on
+     *  failure we proceed exactly as before). A null/empty identifier is treated as ours,
+     *  mirroring {@link #matchEntry}'s firmware-quirk fallback. */
+    private String foreignActiveRecording() {
+        try {
+            androidx.core.util.Pair<Boolean, String> st = api.requestRecordingStatus(id)
+                    .timeout(OP_TIMEOUT_S, TimeUnit.SECONDS).blockingGet();
+            if (st == null || !Boolean.TRUE.equals(st.first)) return null;
+            String idf = st.second;
+            if (idf == null || idf.isEmpty() || idf.startsWith(EX_PREFIX)) return null;
+            return idf;
+        } catch (Throwable t) {
+            sink.log("requestRecordingStatus failed: " + t.getMessage());
+            return null;
+        }
+    }
+
     /** Recovery's PFTP is wedged on the current link — get a fresh link so recovery retries on
-     *  a new connection (recordingAttempt resets in deviceConnected). Already on exec. */
-    private void forceReconnectForRecording() { cleanReconnect(); }
+     *  a new connection (recordingAttempt resets in deviceConnected). Already on exec. RR may
+     *  be flowing perfectly here (it's PFTP that's stuck), so no staleness gate. */
+    private void forceReconnectForRecording() { cleanReconnect(false); }
 
     /** Disconnect then reconnect to obtain a fresh link (live streams or recording wedged on
      *  the current one). An explicit disconnect disables the SDK's auto-reconnect, so we issue
      *  the reconnect ourselves after a short gap. Must run on exec. */
-    private void cleanReconnect() {
+    private void cleanReconnect(boolean onlyIfRrStale) {
         if (stopping || api == null) return;
+        // Re-validate at execution time: this can run a whole PFTP op after the watchdog
+        // queued it — disconnecting a link whose RR recovered meanwhile would only re-create
+        // the outage it was meant to fix.
+        if (onlyIfRrStale && !rrStale.getAsBoolean()) { sink.log("forced reconnect skipped — RR already flowing"); return; }
         try { api.disconnectFromDevice(id); } catch (Throwable ignored) {}
         try {
             exec.schedule(() -> {
                 if (stopping || api == null) return;
-                try { sink.log("reconnecting after stall"); api.connectToDevice(id); }
-                catch (Throwable t) { sink.log("reconnect failed: " + t.getMessage()); }
+                sink.log("reconnecting after stall");
+                issueConnect("stall", 1);
             }, 3, TimeUnit.SECONDS);
         } catch (RejectedExecutionException ignored) {}
     }
@@ -570,7 +658,10 @@ public final class PolarBle {
     }
 
     private FetchResult fetchAndBackfill(PolarExerciseEntry entry, long anchorStartMs, String exId) {
-        if (anchorStartMs <= 0) { sink.log("backfill: no valid start anchor"); return FetchResult.EMPTY; }
+        // No anchor validity check here: recPersistGap quarantines an implausible anchor
+        // (raw RR preserved durably in SQLite) and returns QUARANTINED, which lets the device
+        // exercise be removed below. An early EMPTY return instead left the slot occupied
+        // forever — no branch could ever clear it.
         RecordingStore store = recordingStore;
         if (store == null) return FetchResult.FAILED;
         try {
@@ -682,7 +773,11 @@ public final class PolarBle {
         boolean kept = false;
         for (PolarExerciseEntry e : entries) {
             String idf = entryIdentifier(e);
-            if (idf == null || !idf.startsWith(EX_PREFIX)) return SlotClass.FOREIGN; // not ours
+            if (idf != null && !idf.startsWith(EX_PREFIX)) return SlotClass.FOREIGN; // known-foreign
+            if (idf == null) { kept = true; continue; }
+            // ^ unreadable identifier (firmware quirk): matchEntry treats a single null-id
+            //   entry as OURS during recovery, so classifying it FOREIGN here would block the
+            //   slot forever. Preserve it as ours-without-meta instead (never auto-deleted).
             if (store != null && store.canRemoveDiscarded(idf)) {
                 try {
                     api.removeExercise(id, e).timeout(OP_TIMEOUT_S, TimeUnit.SECONDS).blockingAwait();

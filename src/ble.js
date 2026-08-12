@@ -64,12 +64,21 @@ async function scanAndConnect({ nameMatch = 'polar', timeoutMs = 30000, log = ()
 
   // Bound the connect so a stuck GATT connection cannot hang the caller forever.
   const connectTimeoutMs = 15000;
-  await Promise.race([
-    peripheral.connectAsync(),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`connect timed out after ${connectTimeoutMs} ms`)), connectTimeoutMs)
-    ),
-  ]);
+  try {
+    await Promise.race([
+      peripheral.connectAsync(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`connect timed out after ${connectTimeoutMs} ms`)), connectTimeoutMs)
+      ),
+    ]);
+  } catch (err) {
+    // The losing connectAsync may still complete AFTER the timeout. A late success
+    // would silently hold the single-connection H10 (it stops advertising, so no
+    // rescan ever finds it again — only a Bluetooth toggle or re-strapping recovers).
+    // Always release the peripheral before surfacing the failure.
+    await disconnectWithTimeout(peripheral, 4000);
+    throw err;
+  }
   log('Connected.');
   return peripheral;
 }
