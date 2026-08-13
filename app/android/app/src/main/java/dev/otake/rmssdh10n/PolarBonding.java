@@ -26,30 +26,37 @@ import java.util.function.Consumer;
 final class PolarBonding {
     private PolarBonding() {}
 
+    /** Whether the phone currently holds an OS bond for {@code mac} (needed for PFTP). */
+    @SuppressLint("MissingPermission")
+    static boolean isBonded(Context ctx, String mac) {
+        try {
+            BluetoothDevice dev = remoteDevice(ctx, mac);
+            return dev != null && dev.getBondState() == BluetoothDevice.BOND_BONDED;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT is requested at runtime in MainActivity
     static void ensureBonded(Context ctx, String mac, Consumer<String> log) {
         try {
-            BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
-            BluetoothAdapter ad = bm != null ? bm.getAdapter() : null;
-            if (ad == null) return;
-            BluetoothDevice dev = ad.getRemoteDevice(mac);
+            BluetoothDevice dev = remoteDevice(ctx, mac);
+            if (dev == null) return;
             if (dev.getBondState() == BluetoothDevice.BOND_BONDED) return; // already paired — nothing to do
             final CountDownLatch latch = new CountDownLatch(1);
-            BroadcastReceiver rx = new BroadcastReceiver() {
-                @Override public void onReceive(Context c, Intent i) {
-                    BluetoothDevice d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
-                    if (d != null && mac.equalsIgnoreCase(d.getAddress())) {
-                        int st = i.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
-                        if (st == BluetoothDevice.BOND_BONDED || st == BluetoothDevice.BOND_NONE) latch.countDown();
-                    }
-                }
-            };
+            BroadcastReceiver rx = settleReceiver(mac, latch);
             ContextCompat.registerReceiver(ctx, rx,
                     new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
                     ContextCompat.RECEIVER_NOT_EXPORTED);
             try {
-                log.accept("bonding H10 (createBond)…");
-                if (!dev.createBond()) log.accept("createBond() returned false");
+                if (dev.getBondState() == BluetoothDevice.BOND_BONDING) {
+                    // An SMP exchange from a previous attempt is still in flight — createBond()
+                    // would just return false, so wait for it to settle instead.
+                    log.accept("bond already in progress — waiting…");
+                } else {
+                    log.accept("bonding H10 (createBond)…");
+                    if (!dev.createBond()) log.accept("createBond() returned false");
+                }
                 latch.await(30, TimeUnit.SECONDS);
             } finally {
                 try { ctx.unregisterReceiver(rx); } catch (Exception ignored) {}
@@ -58,5 +65,65 @@ final class PolarBonding {
         } catch (Throwable t) {
             log.accept("ensureBonded failed: " + t.getMessage());
         }
+    }
+
+    /**
+     * Clear a (possibly one-sided) stale bond and pair again. The H10 can lose its side of
+     * the bond (battery pull / factory reset) while the phone still reports BOND_BONDED —
+     * then every PFTP op fails on encryption forever and no reconnect fixes it; only
+     * re-pairing does. Blocking (up to ~40 s); call from a worker thread with the SDK link
+     * already disconnected. Returns true when the device ends up bonded.
+     */
+    @SuppressLint("MissingPermission")
+    static boolean rebond(Context ctx, String mac, Consumer<String> log) {
+        try {
+            BluetoothDevice dev = remoteDevice(ctx, mac);
+            if (dev == null) return false;
+            if (dev.getBondState() != BluetoothDevice.BOND_NONE) {
+                final CountDownLatch latch = new CountDownLatch(1);
+                BroadcastReceiver rx = settleReceiver(mac, latch);
+                ContextCompat.registerReceiver(ctx, rx,
+                        new IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+                        ContextCompat.RECEIVER_NOT_EXPORTED);
+                try {
+                    log.accept("removing stale bond…");
+                    // Hidden-but-greylisted API; there is no public SDK equivalent for
+                    // programmatic unpair, and PFTP recovery is impossible without it.
+                    dev.getClass().getMethod("removeBond").invoke(dev);
+                    latch.await(10, TimeUnit.SECONDS);
+                } finally {
+                    try { ctx.unregisterReceiver(rx); } catch (Exception ignored) {}
+                }
+                if (dev.getBondState() != BluetoothDevice.BOND_NONE) {
+                    log.accept("bond did not clear (state=" + dev.getBondState() + ")");
+                    return false;
+                }
+            }
+            ensureBonded(ctx, mac, log);
+            return dev.getBondState() == BluetoothDevice.BOND_BONDED;
+        } catch (Throwable t) {
+            log.accept("rebond failed: " + t.getMessage());
+            return false;
+        }
+    }
+
+    private static BluetoothDevice remoteDevice(Context ctx, String mac) {
+        BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
+        BluetoothAdapter ad = bm != null ? bm.getAdapter() : null;
+        return ad != null ? ad.getRemoteDevice(mac) : null;
+    }
+
+    /** Counts down when a bond-state broadcast for {@code mac} reaches a settled state
+     *  (BONDED or NONE — BONDING is transitional and keeps the wait alive). */
+    private static BroadcastReceiver settleReceiver(String mac, CountDownLatch latch) {
+        return new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                BluetoothDevice d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                if (d != null && mac.equalsIgnoreCase(d.getAddress())) {
+                    int st = i.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE);
+                    if (st == BluetoothDevice.BOND_BONDED || st == BluetoothDevice.BOND_NONE) latch.countDown();
+                }
+            }
+        };
     }
 }

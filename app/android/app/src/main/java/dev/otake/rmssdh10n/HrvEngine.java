@@ -248,6 +248,13 @@ public final class HrvEngine {
         ble.setAccEnabled(postureEnabled);   // 姿勢推定OFFならACCを購読させない
         stepsEnabled = postureEnabled && !powerSave; // power-save ⇒ omit steps (posture still refreshes each burst)
         ble.setRecordingStore(recStore);
+        // Watchdog actions queue on PolarBle's single worker behind PFTP ops that can block
+        // for tens of seconds; let it re-check RR staleness at the moment an action actually
+        // runs, so a link that recovered in the meantime is never torn down.
+        ble.setRrStaleCheck(() -> {
+            long lr = lastRrReceivedAt;
+            return !(lr > 0 && System.currentTimeMillis() - lr < POINT_FRESH_MS);
+        });
         ble.start();
         ticker = Executors.newSingleThreadScheduledExecutor();
         ticker.scheduleAtFixedRate(this::tickSafe, 1000, 1000, TimeUnit.MILLISECONDS);
@@ -337,6 +344,13 @@ public final class HrvEngine {
         if (b != null) b.foregroundEntered();
     }
 
+    /** Bluetooth adapter came back ON — the SDK's auto-reconnect does not reliably survive an
+     *  adapter power cycle (nobody re-issues connectToDevice), so re-issue it for a down link. */
+    public void bluetoothRestarted() {
+        PolarBle b = ble;
+        if (b != null) b.reconnectIfDown();
+    }
+
     // --- recording store: DB-backed lifecycle so the H10 recording survives an app/OS
     //     restart, replaying a fetched gap into points. The lifecycle + replay logic lives in
     //     RecordingBackfillStore; this Host exposes the live mac/user/baseline it reads and
@@ -379,38 +393,39 @@ public final class HrvEngine {
         tickCount++;
         battTicks++;
 
-        // Stream watchdog: GATT 'connected' but NO RR since this connection began is a stalled
-        // link. Re-subscribe first (gentle); if RR still never arrives, the link is a half-open
-        // orphan a re-subscribe can't fix → force a clean reconnect, bounded per episode so the
-        // churn can't wedge the scanner. The force budget resets as soon as RR flows again.
+        // Stream watchdog: a 'connected' link that stops delivering RR is stalled — whether it
+        // NEVER delivered on this connection (half-open orphan after an abrupt kill) or went
+        // silent MID-SESSION (stream error / wedged stack). Silence is measured from the later
+        // of connect time and last RR, so both cases share the same escalation: re-subscribe
+        // first (gentle); if RR still doesn't flow, force a clean reconnect, bounded per stale
+        // episode so churn can't wedge the scanner. The force budget resets once RR flows again.
         long cs = connectedSince;
-        if (lastRrReceivedAt > 0 && now - lastRrReceivedAt < POINT_FRESH_MS) staleForceReconnects = 0;
-        if (connected && cs > 0 && now - cs > STALE_STREAM_MS && lastRrReceivedAt < cs
+        boolean delivering = lastRrReceivedAt > 0 && now - lastRrReceivedAt < POINT_FRESH_MS;
+        if (delivering) staleForceReconnects = 0;
+        long silentSince = Math.max(lastRrReceivedAt, cs);
+        if (connected && cs > 0 && !delivering && now - silentSince > STALE_STREAM_MS
                 && now - lastReconnectNudge > STALE_ACTION_MS) {
             PolarBle b = ble;
             if (b != null) {
                 lastReconnectNudge = now;
-                if (now - cs > STALE_FORCE_MS && staleForceReconnects < MAX_STALE_FORCE_RECONNECTS) {
+                if (now - silentSince > STALE_FORCE_MS && staleForceReconnects < MAX_STALE_FORCE_RECONNECTS) {
                     staleForceReconnects++;
-                    Log.w(TAG, "[ble] stream watchdog: no RR " + ((now - cs) / 1000) + "s — forcing clean reconnect "
+                    Log.w(TAG, "[ble] stream watchdog: no RR " + ((now - silentSince) / 1000) + "s — forcing clean reconnect "
                             + staleForceReconnects + "/" + MAX_STALE_FORCE_RECONNECTS);
                     b.forceReconnect();
                 } else {
-                    Log.w(TAG, "[ble] stream watchdog: no RR " + ((now - cs) / 1000) + "s after connect — re-subscribing");
+                    Log.w(TAG, "[ble] stream watchdog: no RR " + ((now - silentSince) / 1000) + "s — re-subscribing");
                     b.nudgeStreams();
                 }
             }
         }
 
-        // Foreground-notification link hint: connected but no fresh RR for a while (a
-        // post-force-stop orphan the watchdog can't always clear from the phone side, or a
-        // mid-session stall). Surface "re-attach H10"; only RR actually resuming clears it, so
-        // the brief blip of a forced reconnect doesn't make it flap.
-        boolean delivering = lastRrReceivedAt > 0 && now - lastRrReceivedAt < POINT_FRESH_MS;
-        boolean quiet = !delivering && (
-                (cs > 0 && lastRrReceivedAt < cs && now - cs > NOTIF_STALE_MS)     // connected, never delivered (orphan)
-             || (lastRrReceivedAt > 0 && now - lastRrReceivedAt > NOTIF_STALE_MS)); // delivered before, now silent
-        if (delivering && linkStaleShown) { linkStaleShown = false; notifyLinkStale(false); }
+        // Foreground-notification link hint: CONNECTED but silent (never delivered, or went
+        // quiet mid-session) → surface "re-attach H10". A plain disconnect (out of range /
+        // away from the phone) is the normal backfill case, not a re-attach condition, so the
+        // hint requires an up link and clears as soon as RR resumes or the link drops.
+        boolean quiet = connected && cs > 0 && !delivering && now - silentSince > NOTIF_STALE_MS;
+        if (!quiet && linkStaleShown) { linkStaleShown = false; notifyLinkStale(false); }
         else if (quiet && !linkStaleShown) { linkStaleShown = true; notifyLinkStale(true); }
 
         Rmssd.Result r, r5;
