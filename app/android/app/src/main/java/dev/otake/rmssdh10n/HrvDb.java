@@ -512,9 +512,10 @@ public final class HrvDb extends SQLiteOpenHelper implements RecordingBackfillSt
         getWritableDatabase().insertWithOnConflict("recordings", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
 
-    public synchronized void recordingActive(String exId, long startAckMs) {
+    public synchronized void recordingActive(String exId, long startAckMs, boolean uncertainAnchor) {
         ContentValues cv = new ContentValues();
-        cv.put("state", "active"); cv.put("start_ack_ms", startAckMs);
+        cv.put("state", uncertainAnchor ? "active_uncertain" : "active");
+        cv.put("start_ack_ms", startAckMs);
         cv.put("updated_at", System.currentTimeMillis());
         getWritableDatabase().update("recordings", cv,
                 "ex_id=? AND state != 'discarded_by_user'", new String[]{ exId });
@@ -549,7 +550,7 @@ public final class HrvDb extends SQLiteOpenHelper implements RecordingBackfillSt
         ContentValues cv = new ContentValues();
         cv.put("state", "discarded_by_user"); cv.put("updated_at", System.currentTimeMillis());
         getWritableDatabase().update("recordings", cv,
-                "user=? AND state IN ('starting','active','fetching','persisted')",
+                "user=? AND state IN ('starting','active','active_uncertain','fetching','persisted')",
                 new String[]{ String.valueOf(user) });
     }
 
@@ -559,7 +560,7 @@ public final class HrvDb extends SQLiteOpenHelper implements RecordingBackfillSt
                 "SELECT ex_id,mac,user,owner,schema_version,sample_type,start_request_ms,start_ack_ms,"
               + "anchor_start_ms,state,rr_count,duration_ms,truncated,remove_status FROM recordings "
               + "WHERE user=? AND (mac=? OR mac IS NULL) "
-              + "AND state IN ('starting','active','fetching','persisted') "
+              + "AND state IN ('starting','active','active_uncertain','fetching','persisted') "
               + "ORDER BY start_request_ms DESC LIMIT 1",
                 new String[]{ String.valueOf(user), mac })) {
             if (!c.moveToFirst()) return null;

@@ -30,7 +30,7 @@ final class RecordingBackfillStore implements PolarBle.RecordingStore {
     interface Db {
         HrvDb.Rec recordingGetOpen(int user, String mac);
         void recordingStarting(String exId, String mac, int user, String owner, int schemaVersion, long startRequestMs);
-        void recordingActive(String exId, long startAckMs);
+        void recordingActive(String exId, long startAckMs, boolean uncertainAnchor);
         void recordingSetState(String exId, String state);
         void recordingSetFetched(String exId, long rrCount, long durationMs, int truncated);
         void recordingMarkRemoved(String exId);
@@ -71,7 +71,9 @@ final class RecordingBackfillStore implements PolarBle.RecordingStore {
     @Override public void recStarting(String exId, long startRequestMs) {
         db.recordingStarting(exId, host.deviceMac(), host.user(), OWNER, SCHEMA, startRequestMs);
     }
-    @Override public void recActive(String exId, long startAckMs) { db.recordingActive(exId, startAckMs); }
+    @Override public void recActive(String exId, long startAckMs, boolean uncertainAnchor) {
+        db.recordingActive(exId, startAckMs, uncertainAnchor);
+    }
     @Override public void recFetching(String exId, long rrCount, long durationMs, boolean truncated) {
         db.recordingSetFetched(exId, rrCount, durationMs, truncated ? 1 : 0);
     }
@@ -79,6 +81,17 @@ final class RecordingBackfillStore implements PolarBle.RecordingStore {
         PersistResult result = replayAndPersistGap(rrMs, anchorStartMs, exId, truncated);
         if (result.isDurable()) db.recordingSetState(exId, "persisted");
         return result;
+    }
+    @Override public PersistResult recPersistUncertainGap(double[] rrMs, long anchorStartMs, String exId) {
+        try {
+            db.recordingQuarantine(exId, anchorStartMs, rrMs, "uncertain_start_anchor");
+            db.recordingSetState(exId, "persisted");
+            host.setRestored(0);
+            return PersistResult.QUARANTINED;
+        } catch (Throwable failure) {
+            Log.e(TAG, "uncertain-anchor quarantine failed", failure);
+            return PersistResult.FAILED;
+        }
     }
     @Override public void recRemoved(String exId) { db.recordingMarkRemoved(exId); }
     @Override public boolean canRemoveDiscarded(String exId) { return db.recordingIsDiscarded(exId); }

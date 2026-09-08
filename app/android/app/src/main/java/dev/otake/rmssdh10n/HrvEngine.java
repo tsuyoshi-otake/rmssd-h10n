@@ -10,6 +10,9 @@ import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
+
+import com.polar.sdk.api.model.PolarDeviceInfo;
 
 import dev.otake.rmssdh10n.hrv.Analysis;
 import dev.otake.rmssdh10n.hrv.BodyState;
@@ -68,6 +71,7 @@ public final class HrvEngine {
     private final Analysis.Baseline baseline = new Analysis.Baseline();
     private final Analysis.Classifier classifier = new Analysis.Classifier(45000);
     private final BodyState bodyState = new BodyState();
+    private final BleStatus bleStatus = new BleStatus();
 
     private int user = 1;
     private volatile String deviceMac;          // mac of the H10 we record (for recording meta)
@@ -248,8 +252,8 @@ public final class HrvEngine {
         ble.setAccEnabled(postureEnabled);   // 姿勢推定OFFならACCを購読させない
         stepsEnabled = postureEnabled && !powerSave; // power-save ⇒ omit steps (posture still refreshes each burst)
         ble.setRecordingStore(recStore);
-        // Watchdog actions queue on PolarBle's single worker behind PFTP ops that can block
-        // for tens of seconds; let it re-check RR staleness at the moment an action actually
+        // Watchdog actions use the live-control lane, separate from blocking PFTP work. Still
+        // re-check RR staleness at the moment an action actually
         // runs, so a link that recovered in the meantime is never torn down.
         ble.setRrStaleCheck(() -> {
             long lr = lastRrReceivedAt;
@@ -275,12 +279,17 @@ public final class HrvEngine {
                     }
                     return; // invalid input must not advance the beat timeline or freshness
                 }
-                lastRrReceivedAt = receivedAt;
                 synchronized (gate) {
+                    if (lastRrReceivedAt > 0 && receivedAt - lastRrReceivedAt >= 10000) {
+                        win.reset(); win5.reset(); respiration.reset();
+                    }
+                    lastRrReceivedAt = receivedAt;
                     lastPeakMs += rrMs;
                     beats++;
+                    int generation = win.generation;
                     boolean accepted = win.add(lastPeakMs, rrMs);
                     win5.add(lastPeakMs, rrMs);
+                    if (win.generation != generation) respiration.reset();
                     rrLog.add(new double[]{ receivedAt, rrMs, accepted ? 1 : 0 });
                     if (rrLog.size() > 2500) rrLog.remove(0);
                     if (accepted) {
@@ -299,7 +308,19 @@ public final class HrvEngine {
             }
             @Override public void onBattery(int level) { deviceBattery = level; }
             @Override public void log(String m) { Log.i(TAG, "[ble] " + m); }
+            @Override public void onStage(String stage, String reason, int attempt, long nextRetryAt) {
+                bleStatus.transition(stage, reason, attempt, nextRetryAt);
+            }
         };
+    }
+
+    public String bleDiagnosticsJson() { return bleStatus.diagnosticsJson(); }
+
+    public boolean scanDevices(int seconds, Consumer<List<PolarDeviceInfo>> ok, Consumer<Throwable> fail) {
+        PolarBle b = ble;
+        if (b == null) return false;
+        b.scanDevices(seconds, ok, fail);
+        return true;
     }
 
     /** Dashboard 省電力 toggle: ON = ACC duty-cycle (low power, posture ~30s, steps omitted),
@@ -495,6 +516,7 @@ public final class HrvEngine {
         try {
             JSONObject status = new JSONObject();
             status.put("connected", connected);
+            status.put("connection", bleStatus.snapshotJson());
             status.put("user", user);
             status.put("mode", "hr-rr");
             status.put("hr", HrvJson.jn(fresh ? hrVal : null));

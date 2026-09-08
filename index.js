@@ -14,6 +14,10 @@ const { RmssdWindow } = require('./src/rmssd');
 const { CsvLogger } = require('./src/csv');
 const { StatusFile } = require('./src/statusfile');
 const { createServer } = require('./src/server');
+const { ConnectionStatus } = require('./src/connection-status');
+const { SampleFreshness } = require('./src/sample-freshness');
+const { resolveDeviceSelection } = require('./src/device-selection');
+const { withDeadline } = require('./src/async');
 
 function parseArgs(argv) {
   const opts = {
@@ -36,7 +40,9 @@ function parseArgs(argv) {
     switch (a) {
       case '--port': opts.port = Number(argv[++i]); break;
       case '--window': opts.window = Number(argv[++i]); break;
-      case '--name': opts.name = argv[++i]; break;
+      case '--name': opts.name = argv[++i]; opts.nameExplicit = true; break;
+      case '--device': opts.deviceId = argv[++i]; opts.saveDevice = true; break;
+      case '--forget-device': opts.forgetDevice = true; break;
       case '--csv': opts.csv = argv[++i]; opts.csvExplicit = true; break;
       case '--user': opts.user = Number(argv[++i]); break;
       case '--status': opts.status = argv[++i]; break;
@@ -69,6 +75,8 @@ Usage: node index.js [options]
   --port <n>          dashboard/API port (default 3000)
   --window <sec>      RMSSD sliding-window length in seconds (default 30)
   --name <str>        device name fragment to match (default "polar")
+  --device <ID>       select and save an exact device ID/address for future runs
+  --forget-device    clear the saved selection and use name discovery
   --csv <path>        CSV output path (default data/rmssd-u<user>-<timestamp>.csv,
                       split per user; an explicit path is used as one combined file)
   --user <1-5>        active user profile at startup (default 1); baselines, CSV
@@ -86,7 +94,10 @@ Usage: node index.js [options]
 
 async function main() {
   const opts = parseArgs(process.argv);
+  opts.deviceId = resolveDeviceSelection(opts);
   const log = (...a) => console.log(`[${new Date().toLocaleTimeString()}]`, ...a);
+  const connection = new ConnectionStatus();
+  const freshness = new SampleFreshness();
 
   const dataDir = path.join(__dirname, 'data');
   const CSV_COLS = ['user', 'wallClock', 'tMs', 'rr_ms', 'rmssd_ms', 'sdnn_ms', 'hr_bpm', 'rrCount', 'resp_brpm', 'resp_conf', 'corrected', 'state'];
@@ -187,6 +198,7 @@ async function main() {
     respBuffer.length = 0;
     respHistory.length = 0;
     beats = 0; lastPeakMs = null; lastRr = null; deviceHr = null;
+    freshness.reset();
     baselineSaved = false; lastAdaptedAt = null;
 
     if (!opts.csvExplicit) {
@@ -206,7 +218,7 @@ async function main() {
   }
 
   let server = null;
-  if (opts.server) server = await createServer({ port: opts.port, log });
+  if (opts.server) server = await createServer({ port: opts.port, log, getDiagnostics: () => connection.diagnostics() });
 
   // Dashboard "re-take resting baseline" button -> recalibrate from now.
   if (server) {
@@ -244,8 +256,16 @@ async function main() {
   function handleRR(tMs, rr) {
     beats++;
     lastRr = rr;
+    if (freshness.receiveRr(rr)) {
+      rmssdWin.reset();
+      respBuffer.length = 0;
+      respHistory.length = 0;
+    }
+    const generation = rmssdWin.generation;
     const accepted = rmssdWin.add(tMs, rr);
+    if (generation !== rmssdWin.generation) { respBuffer.length = 0; respHistory.length = 0; }
     if (accepted) {
+      freshness.acceptRr();
       respBuffer.push({ tMs, rr });
       const cutoff = tMs - RESP_WINDOW_MS;
       while (respBuffer.length && respBuffer[0].tMs < cutoff) respBuffer.shift();
@@ -254,17 +274,18 @@ async function main() {
 
   // 1 Hz reporting loop: compute window stats, publish to file/server/console/CSV.
   const reportTimer = setInterval(() => {
-    const { rmssd, rmssdEma, hr, sdnn, count, corrected } = rmssdWin.compute(lastPeakMs ?? undefined);
+    const { rmssd, rmssdEma, hr, sdnn, count, corrected } = rmssdWin.compute(freshness.windowNow(lastPeakMs));
+    const sample = freshness.snapshot(connected);
     const wall = localIso();
-    const effHr = deviceHr != null ? deviceHr : hr;
+    const effHr = sample.hrFresh && deviceHr != null ? deviceHr : sample.dataFresh ? hr : null;
 
-    const rmssdVal = rmssd != null ? Number(rmssd.toFixed(1)) : null;
-    const rmssdSmoothed = rmssdEma != null ? Number(rmssdEma.toFixed(1)) : null;
+    const rmssdVal = sample.dataFresh && rmssd != null ? Number(rmssd.toFixed(1)) : null;
+    const rmssdSmoothed = rmssdVal != null && rmssdEma != null ? Number(rmssdEma.toFixed(1)) : null;
     const hrVal = effHr != null ? Number(effHr.toFixed(1)) : null;
 
     // Baseline (settled readings) and autonomic-state estimate. The classifier
     // reads the SMOOTHED RMSSD so the label does not chase per-second noise.
-    if (connected) {
+    if (sample.dataFresh) {
       baseline.add(rmssdSmoothed, hrVal);
       if (baseline.get() && !baselineSaved) {
         try { fs.writeFileSync(baselineFileFor(currentUser), JSON.stringify(baseline.toJSON())); } catch (_) {}
@@ -283,7 +304,7 @@ async function main() {
 
     // Respiration rate via RSA, smoothed across recent estimates (median of the
     // last few valid/preview windows) to suppress 1 Hz jitter.
-    const resp = estimateRespiration(respBuffer);
+    const resp = sample.dataFresh ? estimateRespiration(respBuffer) : null;
     let respOut = null, respConf = null, respPreview = false;
     if (resp && (resp.valid || resp.preview)) {
       respHistory.push({ brpm: resp.breathsPerMin, conf: resp.confidence });
@@ -297,12 +318,16 @@ async function main() {
 
     const status = {
       connected,
+      connection: connection.snapshot(),
+      dataFresh: sample.dataFresh,
+      sampleAt: sample.sampleAt == null ? null : localIso(new Date(sample.sampleAt)),
+      sampleAgeMs: sample.sampleAgeMs,
       user: currentUser,
       mode: opts.mode,
       hr: hrVal,
       rmssd: rmssdVal,
       rmssdSmoothed,
-      sdnn: sdnn != null ? Number(sdnn.toFixed(1)) : null,
+      sdnn: sample.dataFresh && sdnn != null ? Number(sdnn.toFixed(1)) : null,
       rrCount: count,
       beatsTotal: beats,
       rejected: rmssdWin.rejected,
@@ -324,11 +349,11 @@ async function main() {
         server.pushPoint({ t: wall, rmssd: status.rmssd, hr: status.hr, resp: status.respiration, tone: state.tone });
       }
     }
-    csv.write({
+    if (hrVal != null || rmssdVal != null) csv.write({
       user: currentUser,
       wallClock: wall,
       tMs: Math.round(lastPeakMs ?? 0),
-      rr_ms: lastRr != null ? Math.round(lastRr) : '',
+      rr_ms: sample.dataFresh && lastRr != null ? Math.round(lastRr) : '',
       rmssd_ms: status.rmssd ?? '',
       sdnn_ms: status.sdnn ?? '',
       hr_bpm: status.hr ?? '',
@@ -379,6 +404,7 @@ async function main() {
   if (opts.mode === 'simulate') {
     log('SIMULATE mode — generating synthetic RR intervals (no hardware).');
     connected = true;
+    connection.transition('streaming', 'simulation');
     if (server) server.setStatus({ connected: true });
     let tMs = 0;
     const baseRr = 1000;
@@ -397,7 +423,7 @@ async function main() {
     cleanup.fns.push(() => clearTimeout(timer));
   } else if (opts.mode === 'ecg') {
     await runEcg(opts, log, cleanup, {
-      onConnected: () => { connected = true; if (server) server.setStatus({ connected: true }); },
+      onConnected: () => { connected = true; connection.transition('streaming', 'ecg_ready'); if (server) server.setStatus({ connected: true }); },
       onPeak: (peakMs) => {
         if (lastPeakMs != null) handleRR(peakMs, peakMs - lastPeakMs);
         lastPeakMs = peakMs;
@@ -412,8 +438,12 @@ async function main() {
         if (server) server.setStatus({ connected: v });
       },
       onRr: (rr) => { lastPeakMs = (lastPeakMs ?? 0) + rr; handleRR(lastPeakMs, rr); },
-      onHr: (hr) => { deviceHr = hr; },
+      onHr: (hr) => { deviceHr = hr > 0 ? hr : null; freshness.receiveHr(hr); },
       onBattery: (b) => { deviceBattery = b; },
+      onStage: (...args) => {
+        connection.transition(...args);
+        if (server) server.setStatus({ connection: connection.snapshot() });
+      },
     });
   }
   } // end startMode
@@ -421,138 +451,52 @@ async function main() {
 
 // Default path: standard HR service (0x2A37) RR intervals, with auto-reconnect
 // so the monitor survives the H10 dropping the BLE link mid-session.
-async function runHrRr(opts, log, cleanup, { setConnected, onRr, onHr, onBattery }) {
-  const ble = require('./src/ble');
-  let stopping = false;
-  let current = null; // currently connected peripheral, if any
-  let attachEpoch = 0; // bumped on deliberate teardown so a stale disconnect handler can't re-enter connectLoop
-  let lastDataAt = 0;  // wall clock of the last HR notification (stall watchdog)
-
-  // On shutdown: stop reconnecting and disconnect (timeout-guarded so an already
-  // dropped device cannot hang the exit path).
-  cleanup.fns.push(async () => {
-    stopping = true;
-    if (current) await ble.disconnectWithTimeout(current, 4000);
-  });
-
-  // Reject if a promise (e.g. a WinRT GATT op) does not settle in time.
-  const withTimeout = (p, ms, what) =>
-    Promise.race([
-      p,
-      new Promise((_, reject) => setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms)),
-    ]);
-
-  async function attach(peripheral) {
-    current = peripheral;
-    lastDataAt = Date.now(); // arm the stall watchdog fresh for this session
-    const epoch = ++attachEpoch;
-    let live = false; // only handle drops AFTER a successful subscribe
-    peripheral.once('disconnect', () => {
-      if (epoch !== attachEpoch) return; // superseded — the stall watchdog already tore this session down
-      current = null;
-      if (!live || stopping) return;
-      setConnected(false);
-      log('Device disconnected — reconnecting...');
-      connectLoop();
-    });
-    // Service discovery / subscribe can hang on WinRT after a flaky connect;
-    // bound them so a stuck attach falls through to a clean retry.
-    const { hrm } = await withTimeout(ble.discoverHr(peripheral), 10000, 'discoverHr');
-    hrm.on('data', (buf) => {
-      lastDataAt = Date.now();
-      const { hr, rr } = parseHrm(buf);
-      if (hr != null) onHr(hr);
-      for (const interval of rr) onRr(interval);
-    });
-    await withTimeout(hrm.subscribeAsync(), 8000, 'subscribe');
-    live = true;
-    setConnected(true);
-    log('Subscribed to HR Measurement (0x2A37). Reading RR intervals.');
-
-    // Battery is a bonus: read 0x2A19 once and subscribe for changes, but never
-    // let a missing/failed battery service tear down the working HR session.
-    if (onBattery) {
-      try {
-        const battChar = await withTimeout(ble.discoverBattery(peripheral), 6000, 'discoverBattery');
-        if (battChar) {
-          const apply = (b) => { if (b && b.length) onBattery(b.readUInt8(0)); };
-          let first = null;
-          try {
-            const b = await withTimeout(battChar.readAsync(), 5000, 'battery read');
-            if (b && b.length) { first = b.readUInt8(0); onBattery(first); }
-          } catch (_) {}
-          battChar.on('data', apply);            // H10 notifies on change (if supported)
-          try { await withTimeout(battChar.subscribeAsync(), 5000, 'battery subscribe'); } catch (_) {}
-          log(`Battery level: ${first != null ? first + '%' : 'n/a'} (0x2A19).`);
-        }
-      } catch (_) { /* no battery service — fine, HR keeps running */ }
-    }
-  }
-
-  // Stall watchdog: WinRT can leave the link half-open — still 'connected', but
-  // notifications silently stopped and no 'disconnect' event ever fires. Without
-  // this, the monitor freezes until the process is restarted. The H10 notifies
-  // ~1/s even without skin contact, so sustained silence means a dead link: tear
-  // the session down ourselves and re-enter the reconnect loop.
-  const STALL_MS = 20000;
-  const stallTimer = setInterval(async () => {
-    if (stopping || !current) return;
-    if (Date.now() - lastDataAt < STALL_MS) return;
-    const stalled = current;
-    current = null;
-    attachEpoch++; // disarm the old session's disconnect handler (no double connectLoop)
-    setConnected(false);
-    log(`No HR data for ${Math.round(STALL_MS / 1000)}s — link looks half-open; reconnecting...`);
-    await ble.disconnectWithTimeout(stalled, 4000);
-    if (!stopping) connectLoop();
-  }, 5000);
-  cleanup.fns.push(() => clearInterval(stallTimer));
-
-  async function connectLoop() {
-    while (!stopping) {
-      try {
-        const peripheral = await ble.scanAndConnect({ nameMatch: opts.name, timeoutMs: opts.scanTimeout, log });
-        if (stopping) { await ble.disconnectWithTimeout(peripheral, 4000); return; }
-        await attach(peripheral);
-        return; // connected; the disconnect handler re-enters connectLoop on drop
-      } catch (e) {
-        if (stopping) return;
-        // Drop a half-open connection (e.g. connected but discover/subscribe hung)
-        // before retrying, so the device is released for the next attempt.
-        if (current) { await ble.disconnectWithTimeout(current, 3000); current = null; }
-        log(`Connect/attach failed (${e.message}); retrying in 5s...`);
-        await new Promise((r) => setTimeout(r, 5000));
-      }
-    }
-  }
-
-  await connectLoop();
+async function runHrRr(opts, log, cleanup, callbacks) {
+  const { HrSession } = require('./src/hr-session');
+  const session = new HrSession({ ...opts, ...callbacks, log });
+  cleanup.fns.push(() => session.stop());
+  session.start();
+  await session.ready;
 }
 
 // Experimental path: Polar PMD raw ECG + local QRS detection.
 async function runEcg(opts, log, cleanup, { onConnected, onPeak, onDisconnect }) {
   const ble = require('./src/ble');
-  const peripheral = await ble.scanAndConnect({ nameMatch: opts.name, timeoutMs: opts.scanTimeout, log });
+  const controller = new AbortController();
+  let peripheral, control, data, onData, startIssued = false;
+  cleanup.fns.push(async () => {
+    controller.abort();
+    if (peripheral) peripheral.removeListener('disconnect', onDisconnect);
+    if (data && onData) data.removeListener('data', onData);
+    if (control && startIssued) {
+      try { await withDeadline(() => control.writeAsync(pmd.ECG_STOP_COMMAND, false), 2000, 'ECG stop'); } catch (_) {}
+    }
+    if (data) {
+      try { await withDeadline(() => data.unsubscribeAsync(), 2000, 'ECG unsubscribe'); } catch (_) {}
+    }
+    if (peripheral) await ble.disconnectWithTimeout(peripheral, 4000);
+  });
+  peripheral = await ble.scanAndConnect({ nameMatch: opts.name, deviceId: opts.deviceId,
+    timeoutMs: opts.scanTimeout, log, signal: controller.signal });
   peripheral.once('disconnect', onDisconnect);
-  cleanup.fns.push(async () => { await ble.disconnectWithTimeout(peripheral, 4000); });
 
-  const { control, data } = await ble.discoverPmd(peripheral);
+  ({ control, data } = await withDeadline(() => ble.discoverPmd(peripheral), 10000,
+    'discoverPmd', controller.signal));
   const detector = new QRSDetector({
     sampleRate: pmd.ECG_SAMPLE_RATE,
     onPeak,
   });
-  data.on('data', (buf) => {
+  onData = (buf) => {
     const parsed = pmd.parseEcg(buf);
     if (parsed) for (const s of parsed.samples) detector.push(s);
-  });
-  await data.subscribeAsync();
-  cleanup.fns.push(async () => {
-    try { await control.writeAsync(pmd.ECG_STOP_COMMAND, false); } catch (_) {}
-    try { await data.unsubscribeAsync(); } catch (_) {}
-  });
+  };
+  data.on('data', onData);
+  await withDeadline(() => data.subscribeAsync(), 8000, 'ECG subscribe', controller.signal);
 
   log('Requesting ECG stream (130 Hz, 14-bit)...');
-  await control.writeAsync(pmd.ECG_START_COMMAND, false);
+  startIssued = true;
+  await withDeadline(() => control.writeAsync(pmd.ECG_START_COMMAND, false), 10000,
+    'ECG start', controller.signal);
   onConnected();
   log('Streaming ECG. R-wave detection running.');
 }

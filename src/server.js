@@ -14,7 +14,7 @@ const { localIso } = require('./time');
  * small control channel (POST /api/baseline/reset) that the monitor subscribes
  * to via the returned `events` emitter.
  */
-function createServer({ port = 3000, log = () => {} } = {}) {
+function createServer({ port = 3000, log = () => {}, getDiagnostics = () => ({ events: [] }) } = {}) {
   const app = express();
   const events = new EventEmitter();
   app.use(express.json());
@@ -38,6 +38,7 @@ function createServer({ port = 3000, log = () => {} } = {}) {
   };
 
   app.get('/api/status', (_req, res) => res.json(latest));
+  app.get('/api/diagnostics', (_req, res) => res.json(getDiagnostics()));
 
   // Control channel: re-take the resting baseline. The monitor listens on the
   // returned `events` emitter and calls baseline.reset().

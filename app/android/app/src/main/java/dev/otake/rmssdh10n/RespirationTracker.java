@@ -31,6 +31,11 @@ final class RespirationTracker {
 
     RespirationTracker(int every) { this.every = every; }
 
+    void reset() {
+        buffer.clear(); history.clear(); preview = false;
+        lastGoodMs = 0; lastLogMs = 0;
+    }
+
     /** Smoothed output of a tick compute. */
     static final class Result {
         final Double brpm, confidence; final boolean preview;

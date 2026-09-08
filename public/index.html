@@ -89,6 +89,7 @@
     <span id="histInfo" style="font-size:12px;color:#6e7681"></span>
     <button id="recalibBtn" title="今を安静として基準値を取り直す">安静で基準を取り直す</button>
     <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算">全期間で基準を取り直す</button>
+    <button id="diagBtn" title="直近の接続・復旧状態をJSONで保存">接続診断</button>
     <button id="clearBtn" title="保存した履歴を消去">履歴をクリア</button>
   </header>
 
@@ -408,7 +409,11 @@
       if (s.user != null && s.user !== currentUser) switchLocalUser(s.user);
 
       const conn = document.getElementById('conn');
-      conn.textContent = s.connected ? '接続中 ●' : '未接続';
+      const cs = s.connection || {};
+      conn.textContent = s.connected ? '接続中'
+        : cs.stage === 'scanning' ? '検索中'
+          : cs.stage === 'connecting' ? '接続中'
+            : cs.stage === 'retry_wait' ? `再試行待ち (${cs.attempt || 1})` : '未接続';
       conn.className = s.connected ? 'on' : '';
 
       // H10 battery %; last-known is kept across a drop, so show it whenever present.
@@ -424,8 +429,14 @@
       const calib = document.getElementById('calib');
       // A transient "full-session baseline" message owns the calib slot briefly.
       if (Date.now() >= baselineMsgUntil) {
-        calib.textContent = (s.connected && s.calibration != null && s.calibration < 1)
-          ? `基準値キャリブレーション中… ${Math.round(s.calibration * 100)}%` : '';
+        const reasons = {
+          connect_retries_exhausted: 'Bluetoothとセンサーの装着を確認してください',
+          scan_timeout: '対象のH10が見つかりません。接続先IDと距離を確認してください',
+          adapter_off: 'BluetoothをONにしてください',
+          pftp_retries_exhausted: 'H10の記録取得に失敗しました。センサーを付け直してください',
+        };
+        calib.textContent = reasons[cs.reason] || ((s.connected && s.calibration != null && s.calibration < 1)
+          ? `基準値キャリブレーション中… ${Math.round(s.calibration * 100)}%` : '');
       }
 
       document.getElementById('rmssd').textContent = fmt(s.rmssd);
@@ -525,6 +536,21 @@
       try { localStorage.removeItem(STORAGE_KEY); localStorage.removeItem(TREND_KEY); } catch (_) {}
       redrawFromHistory();
       redrawTrend();
+    });
+
+    document.getElementById('diagBtn').addEventListener('click', async () => {
+      try {
+        const value = await fetch('/api/diagnostics').then((r) => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.json();
+        });
+        const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `rmssd-ble-diagnostics-${new Date().toLocaleString('sv-SE').replace(/[ :]/g, '-')}.json`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      } catch (e) { alert('接続診断の保存に失敗しました: ' + ((e && e.message) || e)); }
     });
 
     document.getElementById('recalibBtn').addEventListener('click', async () => {

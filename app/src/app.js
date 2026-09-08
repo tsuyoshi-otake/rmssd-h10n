@@ -126,8 +126,16 @@ async function startNativeEngine() {
     drainBackfillImports();
   });
   nativeSubs = [sStatus, sPoint, sBackfill];
-  try { await HrvNative.start({ acc: true, user: currentUser, seed: buildNativeSeed(currentUser) }); }
-  catch (e) { console.error('[native] start failed', e); }
+  try {
+    const selected = HrvNative.getSelectedDevice ? await HrvNative.getSelectedDevice() : null;
+    if (!selected || !selected.id) {
+      const status = { connected: false, dataFresh: false,
+        connection: { stage: 'needs_action', reason: 'device_selection_required', attempt: 0 } };
+      for (const cb of statusListeners) cb(status);
+      return;
+    }
+    await HrvNative.start({ mac: selected.id, acc: true, user: currentUser, seed: buildNativeSeed(currentUser) });
+  } catch (e) { console.error('[native] start failed', e); }
 }
 
 // Seed the native engine with this user's persisted posture/supine refs, sleep
@@ -398,6 +406,16 @@ const hostBridge = {
   setBreathingAlert: (on) => useNative ? HrvNative.setBreathingAlert({ on }) : ({ ok: false }), // native TTS warning: low RMSSD + shallow breathing
   setPowerSave: (on) => useNative ? HrvNative.setPowerSave({ on }) : ({ ok: false }), // ACC power-save mode (duty-cycle + steps off)
   setPostureEnabled: (on) => useNative ? HrvNative.setPostureEnabled({ on }) : ({ ok: false }), // ACC on/off (posture+steps off = H10 battery saving)
+  getSelectedDevice: () => useNative && HrvNative.getSelectedDevice ? HrvNative.getSelectedDevice() : Promise.resolve(null),
+  scanDevices: (seconds = 8) => useNative && HrvNative.scanDevices
+    ? HrvNative.scanDevices({ seconds }) : Promise.resolve({ devices: [] }),
+  selectDevice: (id, name) => useNative && HrvNative.selectDevice
+    ? HrvNative.selectDevice({ id, name }) : Promise.resolve({ ok: false }),
+  getBleDiagnostics: async () => {
+    if (!useNative || !HrvNative.getBleDiagnostics) return { events: [] };
+    const r = await HrvNative.getBleDiagnostics();
+    try { return JSON.parse((r && r.value) || '{"events":[]}'); } catch (_) { return { events: [] }; }
+  },
   clearAllData: async () => {
     if (!useNative) return { ok: true };
     try { await HrvNative.clearAllData(); } catch (_) {}

@@ -70,6 +70,26 @@ public final class Rmssd {
     private Double lastAccepted = null;
     public int rejected = 0;
     private Double rmssdEma = null;
+    private final List<Double> candidates = new ArrayList<>();
+    public int generation = 0;
+
+    /** New contiguous NN window; keep the session's cumulative correction count. */
+    public void reset() {
+        entries.clear(); recent.clear(); candidates.clear();
+        lastAccepted = null; rmssdEma = null; generation++;
+    }
+
+    private boolean reacquire(double rr) {
+        candidates.add(rr);
+        if (candidates.size() > 5) candidates.remove(0);
+        double med = median(candidates);
+        boolean stable = true;
+        for (double value : candidates) if (Math.abs(value - med) / med > 0.10) stable = false;
+        if (!stable) { candidates.clear(); candidates.add(rr); }
+        if (candidates.size() < 5) return false;
+        reset();
+        return true;
+    }
 
     public Rmssd() { this(30000); }
 
@@ -101,16 +121,20 @@ public final class Rmssd {
 
     /** @return true if accepted, false if rejected as an artifact. */
     public boolean add(double tMs, double rr) {
-        if (rr < minRr || rr > maxRr) { rejected++; return false; }
+        if (!Double.isFinite(rr) || !Double.isFinite(tMs) || rr < minRr || rr > maxRr) {
+            candidates.clear(); rejected++; return false;
+        }
+        evict(tMs);
 
         if (recent.size() >= 3) {
             Double med = median(recent);
-            if (med != null && med > 0 && Math.abs(rr - med) / med > localTol) { rejected++; return false; }
+            if (med != null && med > 0 && Math.abs(rr - med) / med > localTol && !reacquire(rr)) { rejected++; return false; }
         } else if (lastAccepted != null) {
-            if (Math.abs(rr - lastAccepted) / lastAccepted > maxRelJump) { rejected++; return false; }
+            if (Math.abs(rr - lastAccepted) / lastAccepted > maxRelJump && !reacquire(rr)) { rejected++; return false; }
         }
 
         entries.add(new Entry(tMs, rr));
+        candidates.clear();
         lastAccepted = rr;
         recent.add(rr);
         if (recent.size() > localN) recent.remove(0);
@@ -122,7 +146,10 @@ public final class Rmssd {
         double cutoff = nowMs - windowMs;
         int i = 0;
         while (i < entries.size() && entries.get(i).tMs < cutoff) i++;
-        if (i > 0) entries.subList(0, i).clear();
+        if (i > 0) {
+            entries.subList(0, i).clear();
+            if (entries.isEmpty()) reset();
+        }
     }
 
     /** @param nowMs current session time (nullable); evicts stale entries first. */

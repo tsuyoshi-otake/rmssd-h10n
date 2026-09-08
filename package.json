@@ -8,6 +8,7 @@
     "rmssd-h10n": "index.js"
   },
   "scripts": {
+    "test": "node --test --test-timeout=15000 test/*.test.cjs",
     "start": "node index.js",
     "simulate": "node index.js --simulate",
     "ecg": "node index.js --ecg",
