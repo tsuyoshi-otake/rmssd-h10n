@@ -18,6 +18,11 @@ import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
+import com.polar.sdk.api.model.PolarDeviceInfo;
+
+import java.util.List;
+import java.util.function.Consumer;
+
 /**
  * Foreground service that owns the native HRV engine (BLE + 1 Hz compute) so
  * monitoring keeps running with the screen off / app backgrounded — the WebView
@@ -33,11 +38,12 @@ public class MonitorService extends Service {
     private static final String TAG = "MonitorService";
     private static final String CHANNEL = "rmssd_monitor";
     private static final int NOTIF_ID = 1;
-    public static final String DEFAULT_MAC = "24:AC:AC:1B:54:C8"; // the user's H10
+    // Device selection is persisted in HrvDb; source code contains no user-specific MAC.
 
     public static final String ACTION_START_ENGINE = "dev.otake.rmssdh10n.START_ENGINE";
     public static final String ACTION_STOP_ENGINE  = "dev.otake.rmssdh10n.STOP_ENGINE";
     public static final String ACTION_SWITCH_USER  = "dev.otake.rmssdh10n.SWITCH_USER";
+    public static final String ACTION_SWITCH_DEVICE = "dev.otake.rmssdh10n.SWITCH_DEVICE";
     public static final String EXTRA_MAC  = "mac";
     public static final String EXTRA_ACC  = "acc";
     public static final String EXTRA_USER = "user";
@@ -154,19 +160,32 @@ public class MonitorService extends Service {
             stopEngine();
             return;
         }
+        if (ACTION_SWITCH_DEVICE.equals(action)) {
+            String mac = DeviceSelection.normalize(intent.getStringExtra(EXTRA_MAC));
+            if (mac == null) { Log.w(TAG, "device switch rejected — invalid ID"); return; }
+            // Before the first selection there is no saved ACC preference. Preserve the
+            // app's existing default (enabled) so posture works immediately after choosing H10.
+            boolean acc = !"0".equals(db().kvGet("acc"));
+            int user = parseInt(db().kvGet("user"), 1);
+            stopEngine(false);
+            startEngine(mac, acc, user, null);
+            return;
+        }
         if (ACTION_SWITCH_USER.equals(action)) {
             String mac = intent.getStringExtra(EXTRA_MAC);
             boolean acc = intent.getBooleanExtra(EXTRA_ACC, false);
             int user = intent.getIntExtra(EXTRA_USER, 1);
             stopEngine();
-            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user, intent.getStringExtra(EXTRA_SEED));
+            startEngine(DeviceSelection.resolve(mac, db().kvGet("deviceMac")), acc, user,
+                    intent.getStringExtra(EXTRA_SEED));
             return;
         }
         if (ACTION_START_ENGINE.equals(action)) {
             String mac = intent.getStringExtra(EXTRA_MAC);
             boolean acc = intent.getBooleanExtra(EXTRA_ACC, false);
             int user = intent.getIntExtra(EXTRA_USER, 1);
-            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user, intent.getStringExtra(EXTRA_SEED));
+            startEngine(DeviceSelection.resolve(mac, db().kvGet("deviceMac")), acc, user,
+                    intent.getStringExtra(EXTRA_SEED));
             return;
         }
         // Null/empty intent = START_STICKY restart (or keepAlive's service start).
@@ -175,11 +194,16 @@ public class MonitorService extends Service {
             String mac = db().kvGet("deviceMac");
             boolean acc = "1".equals(db().kvGet("acc"));
             int user = parseInt(db().kvGet("user"), 1);
-            startEngine(mac != null ? mac : DEFAULT_MAC, acc, user, null); // refs/baseline restored from kv
+            startEngine(DeviceSelection.resolve(null, mac), acc, user, null); // refs/baseline restored from kv
         }
     }
 
     private void startEngine(String mac, boolean acc, int user, String seed) {
+        if (mac == null) {
+            Log.w(TAG, "native engine not started — H10 selection required");
+            db().kvPut("engine", "selection_required");
+            return;
+        }
         // Idempotent: a normal launch fires BOTH an explicit START_ENGINE and a
         // kv-restore start (keepAlive's service start hits the null-intent branch
         // while kv still says "native" from a prior session). Starting twice spins
@@ -218,6 +242,13 @@ public class MonitorService extends Service {
     public boolean nativeResetBaseline() { if (engine == null) return false; engine.resetBaseline(); return true; }
     public boolean nativeSetBaseline(double r, double h) { return engine != null && engine.setBaseline(r, h); }
     public String nativeRrLog() { return engine != null ? engine.rrLogJson() : "[]"; }
+    public String nativeBleDiagnostics() {
+        return engine != null ? engine.bleDiagnosticsJson() : "{\"events\":[]}";
+    }
+    public boolean nativeScanDevices(int seconds, Consumer<List<PolarDeviceInfo>> ok,
+            Consumer<Throwable> fail) {
+        return engine != null && engine.scanDevices(seconds, ok, fail);
+    }
     public void nativeForegroundEntered() { if (engine != null) engine.foregroundEntered(); }
     // Relax-mode voice readout interval (0 = off). No-op if the engine isn't running.
     public void nativeSetRelaxVoice(int sec) { if (engine != null) engine.setRelaxIntervalSec(sec); }
@@ -231,16 +262,22 @@ public class MonitorService extends Service {
     /** Destructive full reset from the dashboard; the WebView restarts the engine after this returns. */
     public void nativeClearAllData() { stopEngine(); db().clearAllData(); stopSelf(); }
 
-    private void stopEngine() {
+    private void stopEngine() { stopEngine(true); }
+
+    private void stopEngine(boolean markStopped) {
         // Explicit (user) stop. Halt the engine/BLE worker FIRST, THEN mark the recording
         // discarded — otherwise an in-flight startRecording on the worker could write 'active'
         // back AFTER the discard, making the next launch treat it as an OS-kill gap to recover.
         // (An OS kill goes through onDestroy WITHOUT markUserStopped, leaving it 'active' so its
         // gap IS recovered on restart — preserving that distinction is the whole point.)
-        if (engine != null) { engine.stop(); engine.markUserStopped(); engine = null; }
+        if (engine != null) {
+            engine.stop();
+            if (markStopped) engine.markUserStopped();
+            engine = null;
+        }
         if (tts != null) { tts.shutdown(); tts = null; }
-        db().kvPut("engine", "js");
-        Log.i(TAG, "native engine stopped (engine=js)");
+        if (markStopped) db().kvPut("engine", "js");
+        Log.i(TAG, markStopped ? "native engine stopped (engine=js)" : "native engine switching device");
     }
 
     private static int parseInt(String s, int def) {

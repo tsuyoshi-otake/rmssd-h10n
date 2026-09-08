@@ -72,6 +72,23 @@
     .menu button#serverBtn.on { color: var(--hrv); }
     .menu .sep { height: 1px; background: var(--line); margin: 5px 4px; }
     .menu .lbl-short { display: none; } .menu .lbl-full { display: inline; }
+    .device-dialog { width: min(520px, calc(100vw - 32px)); color: var(--text);
+      background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r);
+      padding: 0; box-shadow: var(--shadow); }
+    .device-dialog::backdrop { background: rgba(3, 8, 15, .72); }
+    .device-dialog .head { padding: 20px 20px 10px; }
+    .device-dialog h2 { margin: 0 0 6px; font-size: 20px; }
+    .device-dialog p { margin: 0; color: var(--muted); line-height: 1.5; font-size: 13px; }
+    .device-list { display: grid; gap: 8px; min-height: 72px; max-height: 50vh;
+      overflow: auto; padding: 12px 20px; }
+    .device-row { display: grid; grid-template-columns: 1fr auto; align-items: center;
+      min-height: 54px; text-align: left; padding: 10px 12px; }
+    .device-row strong, .device-row small { display: block; }
+    .device-row small { color: var(--muted); margin-top: 3px; font-family: var(--mono); }
+    .device-row .signal { color: var(--muted); font-family: var(--mono); }
+    .device-dialog .actions { display: flex; justify-content: flex-end; gap: 8px;
+      padding: 12px 20px 20px; }
+    .device-dialog .actions button { min-height: 44px; }
     .wrap { padding: 22px; max-width: 1180px; margin: 0 auto; }
 
     .state {
@@ -358,6 +375,9 @@
         <button id="breathAlertBtn" title="RMSSDが基準以下で呼吸数が高めの状態が続いたら音声で警告">浅い呼吸警告: ON</button>
         <button id="powerBtn" title="省電力: H10の加速度を間欠サンプリングしてH10/スマホの電池を節約（姿勢は約30秒ごと・歩数オフ）。OFFで連続サンプリング（姿勢・歩数フル）">省電力: ON</button>
         <div class="sep"></div>
+        <button id="deviceBtn" title="接続するPolar H10を検索して選択">接続先H10: 未選択</button>
+        <button id="bleDiagBtn" title="直近の接続・復旧状態をJSONで書き出す">接続診断を書き出す</button>
+        <div class="sep"></div>
         <button id="serverBtn" title="PCのブラウザから見られるサーバーを起動/停止">PC共有サーバー: <span id="serverLabel">OFF</span></button>
         <div id="serverUrl" class="srvurl" title="クリックでURLをコピー" style="display:none"></div>
         <div class="sep"></div>
@@ -366,6 +386,13 @@
       </div>
     </div>
   </header>
+
+  <dialog id="deviceDialog" class="device-dialog" aria-labelledby="deviceTitle">
+    <div class="head"><h2 id="deviceTitle">接続するH10を選択</h2>
+      <p>近くの心拍センサーを8秒間検索します。選択した機器は通常起動・再接続・端末再起動でも固定されます。</p></div>
+    <div id="deviceList" class="device-list" aria-live="polite">検索を開始しています…</div>
+    <div class="actions"><button id="deviceRescanBtn">再検索</button><button id="deviceCloseBtn">閉じる</button></div>
+  </dialog>
 
   <div class="wrap">
     <div class="state wait" id="stateCard">
@@ -1545,6 +1572,28 @@
       });
     }
 
+    function connectionHint(s) {
+      const c = s && s.connection;
+      if (!c) return '';
+      const labels = {
+        device_selection_required: '設定から接続するH10を選択してください',
+        storage_unavailable: '履歴の保存先を確認してください。接続は維持し、H10内の記録を保護しています',
+        foreign_recording: '別アプリのH10記録が動作中です。終了後に再接続してください',
+        recording_anchor_missing: '時刻を確認できないH10記録を保護しています',
+        connect_retries_exhausted: 'Bluetoothとセンサーの装着を確認してください',
+        pftp_retries_exhausted: 'H10の記録取得に失敗しました。センサーを付け直してください',
+        device_selection: '接続候補を検索しています',
+        streams_settling: '接続済み。記録機能の準備を待っています',
+        link_lost: '接続が切れました。自動再接続します',
+      };
+      let text = labels[c.reason] || '';
+      if (c.stage === 'retry_wait' && c.nextRetryAt) {
+        const sec = Math.max(0, Math.ceil((Date.parse(c.nextRetryAt) - Date.now()) / 1000));
+        text = `${text || '再試行を待っています'}${sec ? ` · 約${sec}秒後` : ''}`;
+      }
+      return text;
+    }
+
     function renderStatus(s) {
       // The server is authoritative for the active user: when it reports a
       // different one, swap to that user's stored history and redraw.
@@ -1553,9 +1602,10 @@
 
       const conn = document.getElementById('conn');
       const dataFresh = s.dataFresh !== false;
+      const cstage = s.connection && s.connection.stage;
       conn.textContent = s.connected
         ? (!dataFresh ? '接続 · RRデータ待ち' : (s.externalRecording ? '接続 · 外部録音あり' : (s.recording ? '接続 · 記録' : '接続')))
-        : '未接続';
+        : (cstage === 'scanning' ? '検索中' : cstage === 'connecting' ? '接続中' : cstage === 'retry_wait' ? '再試行待ち' : '未接続');
       conn.className = s.connected ? (dataFresh ? 'on' : 'stale') : '';
       const brand = document.getElementById('brand');
       if (brand) brand.classList.toggle('on', !!s.connected);
@@ -1573,10 +1623,11 @@
       const calib = document.getElementById('calib');
       // A transient "full-session baseline" message owns the calib slot briefly.
       if (Date.now() >= baselineMsgUntil) {
-        calib.textContent = (s.connected && !dataFresh)
+        const hint = connectionHint(s);
+        calib.textContent = hint || ((s.connected && !dataFresh)
           ? `RRデータ待機中${s.sampleAgeMs != null ? ` · 最終正常値 ${Math.round(s.sampleAgeMs / 1000)}秒前` : ''}`
           : ((s.connected && s.calibration != null && s.calibration < 1)
-            ? `基準値キャリブレーション中… ${Math.round(s.calibration * 100)}%` : '');
+            ? `基準値キャリブレーション中… ${Math.round(s.calibration * 100)}%` : ''));
       }
 
       document.getElementById('sdnn').textContent = fmt(s.sdnn);
@@ -1772,6 +1823,71 @@
       btn.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('open'); });
       menu.addEventListener('click', (e) => { if (e.target.tagName === 'BUTTON') menu.classList.remove('open'); });
       document.addEventListener('click', (e) => { if (!menu.contains(e.target) && e.target !== btn) menu.classList.remove('open'); });
+    })();
+
+    // ---- explicit H10 selection + bounded connection diagnostics ----------
+    (function () {
+      const btn = document.getElementById('deviceBtn');
+      const diag = document.getElementById('bleDiagBtn');
+      const dialog = document.getElementById('deviceDialog');
+      const list = document.getElementById('deviceList');
+      const rescan = document.getElementById('deviceRescanBtn');
+      const close = document.getElementById('deviceCloseBtn');
+      if (!btn || !RmssdBridge.nativeEngine) {
+        if (btn) btn.style.display = 'none';
+        if (diag) diag.style.display = 'none';
+        return;
+      }
+      let scanning = false;
+      const refreshLabel = async () => {
+        try {
+          const selected = await RmssdBridge.getSelectedDevice();
+          btn.textContent = '接続先H10: ' + ((selected && selected.name) || 'Polar H10')
+            + (selected && selected.id ? ` (${selected.masked})` : ' · 未選択');
+        } catch (_) { btn.textContent = '接続先H10: 未選択'; }
+      };
+      const scan = async () => {
+        if (scanning) return;
+        scanning = true; rescan.disabled = true;
+        list.textContent = '検索中… センサーを装着し、ほかのアプリとの接続を解除してください。';
+        try {
+          const found = await RmssdBridge.scanDevices(8);
+          const rows = Array.isArray(found && found.devices) ? found.devices : [];
+          list.replaceChildren();
+          if (!rows.length) {
+            list.textContent = '心拍サービスを持つ機器が見つかりませんでした。距離とBluetoothを確認して再検索してください。';
+          }
+          for (const device of rows.sort((a, b) => (b.rssi || -999) - (a.rssi || -999))) {
+            const row = document.createElement('button'); row.className = 'device-row';
+            const text = document.createElement('span');
+            const name = document.createElement('strong'); name.textContent = device.name || 'Polar センサー';
+            const id = document.createElement('small'); id.textContent = device.masked || '識別子あり';
+            const signal = document.createElement('span'); signal.className = 'signal'; signal.textContent = `${device.rssi} dBm`;
+            text.append(name, id); row.append(text, signal);
+            row.addEventListener('click', async () => {
+              Array.from(list.querySelectorAll('button')).forEach((b) => { b.disabled = true; });
+              try {
+                await RmssdBridge.selectDevice(device.id, device.name || 'Polar H10');
+                await refreshLabel(); dialog.close();
+              } catch (e) { list.textContent = '接続先の保存に失敗しました: ' + ((e && e.message) || e); }
+            });
+            list.append(row);
+          }
+        } catch (e) { list.textContent = '検索に失敗しました: ' + ((e && e.message) || e); }
+        scanning = false; rescan.disabled = false;
+      };
+      btn.addEventListener('click', () => { dialog.showModal(); scan(); });
+      rescan.addEventListener('click', scan);
+      close.addEventListener('click', () => dialog.close());
+      diag.addEventListener('click', async () => {
+        try {
+          const value = await RmssdBridge.getBleDiagnostics();
+          const stamp = RmssdBridge.now().replace(/[:.]/g, '-');
+          await RmssdBridge.exportFiles([{ name: `rmssd-ble-diagnostics-${stamp}.json`,
+            content: JSON.stringify(value, null, 2), mime: 'application/json' }]);
+        } catch (e) { alert('接続診断の書き出しに失敗しました: ' + ((e && e.message) || e)); }
+      });
+      refreshLabel();
     })();
 
     // ---- local server toggle (Android host only) ----

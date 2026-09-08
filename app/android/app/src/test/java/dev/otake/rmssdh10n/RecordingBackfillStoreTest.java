@@ -35,7 +35,10 @@ public class RecordingBackfillStoreTest {
         @Override public void recordingStarting(String exId, String mac, int user, String owner, int schemaVersion, long startRequestMs) {
             startedExId = exId; startedMac = mac; startedUser = user; startedOwner = owner; startedSchema = schemaVersion; startedReq = startRequestMs;
         }
-        @Override public void recordingActive(String exId, long startAckMs) { activeAck = startAckMs; }
+        @Override public void recordingActive(String exId, long startAckMs, boolean uncertainAnchor) {
+            activeAck = startAckMs;
+            states.add(uncertainAnchor ? "active_uncertain" : "active");
+        }
         @Override public void recordingSetState(String exId, String state) { states.add(state); }
         @Override public void recordingSetFetched(String exId, long rrCount, long durationMs, int truncated) { fetchTrunc = truncated; }
         @Override public void recordingMarkRemoved(String exId) { removedExId = exId; }
@@ -92,7 +95,7 @@ public class RecordingBackfillStoreTest {
         assertEquals(2, db.startedUser);
         assertEquals(RecordingBackfillStore.OWNER, db.startedOwner);
         assertEquals(RecordingBackfillStore.SCHEMA, db.startedSchema);
-        store.recActive("rmssd-1", 222L);
+        store.recActive("rmssd-1", 222L, false);
         assertEquals(222L, db.activeAck);
         store.recFetching("rmssd-1", 100, 90_000, true);
         assertEquals(1, db.fetchTrunc);
@@ -136,6 +139,19 @@ public class RecordingBackfillStoreTest {
         assertFalse(db.committed);
         assertTrue(db.quarantined);
         assertEquals("invalid_anchor", db.quarantineReason);
+        assertEquals(Integer.valueOf(0), host.setRestored);
+    }
+
+    @Test public void uncertainStartAnchorQuarantinesRawRrWithoutCreatingTimedPoints() {
+        FakeDb db = new FakeDb(); FakeHost host = new FakeHost();
+        RecordingBackfillStore store = new RecordingBackfillStore(db, host);
+        PolarBle.RecordingStore.PersistResult result = store.recPersistUncertainGap(
+                beats(40, 800), System.currentTimeMillis() - 32_000L, "rmssd-timeout");
+        assertSame(PolarBle.RecordingStore.PersistResult.QUARANTINED, result);
+        assertTrue(db.quarantined);
+        assertEquals("uncertain_start_anchor", db.quarantineReason);
+        assertFalse(db.committed);
+        assertTrue(db.states.contains("persisted"));
         assertEquals(Integer.valueOf(0), host.setRestored);
     }
 

@@ -8,6 +8,40 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public class RmssdTest {
+    @Test public void reacquiresAfterLongGapInBothDirections() {
+        for (double[] rates : new double[][]{{1000, 600}, {600, 1000}}) {
+            Rmssd w = new Rmssd(); double t = 0;
+            for (int i = 0; i < 20; i++) w.add(t += rates[0], rates[0]);
+            w.compute(t); t += 60000;
+            assertNull(w.compute(t).rmssdEma);
+            for (int i = 0; i < 20; i++) assertTrue(w.add(t += rates[1], rates[1]));
+            assertEquals(60000 / rates[1], w.compute(t).hr, 0.001);
+            assertEquals(0, w.compute(t).rmssd, 0.001);
+        }
+    }
+
+    @Test public void stableShiftReacquiresWithoutBridgingWindows() {
+        Rmssd w = new Rmssd(300000); double t = 0;
+        for (int i = 0; i < 20; i++) w.add(t += 1000, 1000);
+        for (int i = 0; i < 4; i++) assertFalse(w.add(t += 600, 600));
+        assertTrue(w.add(t += 600, 600));
+        assertEquals(1, w.compute(t).count);
+        assertNull(w.compute(t).rmssdEma);
+        for (int i = 0; i < 10; i++) w.add(t += 600, 600);
+        assertEquals(0, w.compute(t).rmssd, 0.001);
+        assertEquals(4, w.rejected);
+    }
+
+    @Test public void invalidInputCannotResetAcceptanceCriteria() {
+        Rmssd w = new Rmssd();
+        for (int i = 0; i < 20; i++) w.add(i * 800, 800);
+        assertFalse(w.add(Double.POSITIVE_INFINITY, 1400));
+        assertFalse(w.add(16000, Double.NaN));
+        assertFalse(w.add(16800, 1400));
+        assertEquals(0, w.generation);
+        assertEquals(75, w.compute(16800.0).hr, 0.001);
+    }
+
     @Test
     public void rmssdSdnnHrFromKnownSequence() {
         Rmssd w = new Rmssd(600000, 3); // big window, low startup gate for the math fixture

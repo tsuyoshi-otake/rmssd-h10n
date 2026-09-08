@@ -1,0 +1,5 @@
+# Verified project learnings
+
+- A Java/Gradle `Unable to establish loopback connection` with `PipeImpl ... Invalid argument` on this Windows host can be caused by `TEMP`/`TMP` using the DOS 8.3 path `C:\Users\DEVELO~1\...`. Set both process variables to the full path `C:\Users\developer\tmp` before retrying Gradle; a standalone Unix-domain-socket probe and the full Android build verified this.
+- A BLE promise deadline does not cancel the underlying native WinRT operation. Keep the device identity leased until a timed-out connect actually settles and any late connection has been disconnected; otherwise old cleanup can race a new connection to the same H10.
+- An H10 `startRecording` timeout is an ambiguous commit. Correlate `requestRecordingStatus` with the exact attempt ID. If the wall-clock anchor cannot be proven, preserve raw RR in quarantine instead of assigning guessed timestamps or issuing a destructive second start.

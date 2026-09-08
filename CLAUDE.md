@@ -36,7 +36,8 @@ H10 ──BLE──┬─ (default) HRサービス0x2A37 → RR間隔
 | `src/rmssd.js` | スライディング窓 RMSSD/SDNN/HR・**local-median+dRRアーティファクト除去**・RMSSDのEMA平滑値（`compute(nowMs)`でstale退避） |
 | `src/analysis.js` | `Baseline`（安静ゲート付き中央値・JSON永続化）+ `StateClassifier`（lnRMSSD差分・HRデッドバンド・ヒステリシス）・覚醒度0-100 |
 | `src/respiration.js` | RSA呼吸数推定（RR→4Hz補間→2次detrend→**Welch PSD**→探索帯0.10-0.50Hzのピーク）。confidenceは**SNR×ピーク鋭さ**の信号品質。`node src/respiration.js`で自己テスト |
-| `src/ble.js` | noble スキャン/接続/characteristic取得・`disconnectWithTimeout` |
+| `src/ble.js` / `src/hr-session.js` | noble操作＋単一所有者の scan→connect→subscribe→cleanup→backoff。native遅延完了も世代外として解放 |
+| `src/connection-status.js` / `src/sample-freshness.js` | 有界BLE診断イベント／受信・受理時刻を分けた測定鮮度ゲート |
 | `src/server.js` | express静的 + WebSocket + `/api/status` + `POST /api/baseline/reset`（`events`で通知、close時にWSも閉じる） |
 | `src/time.js` | `localIso()` = JSTオフセット付きISO（`+09:00`）。**全タイムスタンプはこれを使う** |
 | `tools/measure.js` | ワンショット計測CLI。stdout=JSONのみ/stderr=ログ。watchdogで必ず終了 |
@@ -49,7 +50,7 @@ H10 ──BLE──┬─ (default) HRサービス0x2A37 → RR間隔
 2. **H10のPMD/ECGは単一接続専用**。スマホのPolar Flow/Beatや他アプリが掴んでいるとHR/RRは取れてもECGは流れない。
 3. **Windowsでペアリング不要**。nobleが直接GATT接続する。OS設定でペアリング/接続すると逆に干渉しうる。
 4. **force-killは厳禁**。`Stop-Process -Force`等で強制終了するとWindowsがBLE接続を掴んだまま残り（orphaned）、H10が広告停止→次のスキャンで見つからない/`discoverHr`がハング。**正常停止はターミナルで Ctrl+C**（`disconnectAsync`が走る）。force-killしてしまったらH10をストラップから外す or Bluetooth OFF→ONで復帰。
-5. **自動再接続あり**: HR-RR経路はドロップしても再スキャン→再接続を5s間隔でリトライ。discover/subscribeにもタイムアウト（10s/8s）があり、ハングしたら切断して再試行する。
+5. **自動再接続あり**: HR-RR経路は単一の`HrSession`が再スキャン→再接続を所有する。discover/subscribe/scan停止/切断に期限があり、指数backoff＋jitter（上限60秒）で再試行する。期限後にnative connectが遅延成功しても、同じdevice IDを解放し終えるまで次のconnectを開始しない。
 6. **タイムスタンプは全てJST**（`src/time.js`の`localIso()`）。`new Date().toISOString()`(UTC/Z)は使わない。
 7. **scanはallowDuplicates=true必須**。H10は名前なし/Polar名つきの広告を交互に出すため、falseだと名前マッチに引っかからない（`src/ble.js`）。
 
@@ -90,7 +91,7 @@ pwsh -NoProfile -Command "Get-NetTCPConnection -State Listen | Where-Object {$_.
 ```
 app/android/.../MonitorService.java   前面サービス（エンジン所有・START_STICKY・user-stop⇔OS-kill区別・TtsSpeaker所有・無反応時は通知文面を切替）
                 HrvEngine.java         1Hz計算ループの統括（RMSSD/姿勢/baseline/state＋stream watchdog）。録音/呼吸/読み上げ/JSON組立は各モジュールへ委譲
-                PolarBle.java          Polar BLE SDK 6.16.1(Java/RxJava3) 駆動。ライブHR/RR/ACC＋録音状態機械＋自前再接続監督＋有界の強制再接続
+                PolarBle.java          Polar BLE SDK 6.16.1(Java/RxJava3) 駆動。短いlive-control lane＋直列PFTP lane、録音状態機械、自前再接続監督
                 PolarBonding.java      接続前のOSボンディング（createBond＋bond状態待ち。PFTP=暗号化リンク必須のため）
                 RecordingBackfillStore.java  H10録音ライフサイクル(RecordingStore)＋穴埋め再生の永続化（narrow Db IF。失敗時はfalseで未取得スロットを守る）
                 RespirationTracker.java RSA呼吸：受理NN窓＋throttled Welch再計算＋last-good保持（信頼度を経時減衰）
@@ -113,7 +114,7 @@ app/src/app.js + app/www/index.html    ダッシュボード（esbuild: src→ww
 
 ### Polar BLE SDK の前提（重要）
 1. **`FEATURE_POLAR_DEVICE_TIME_SETUP` は有効化しない**。H10は時刻READ非対応で、SDKの feature-check probe が10sハング→**全ストリーム(HR含む)が落ちる**。穴埋めは自前クロックの start-anchor なのでデバイス時刻は不要。有効feature= HR / ONLINE_STREAMING / H10_EXERCISE_RECORDING / DEVICE_INFO / BATTERY_INFO（電池%は標準GATT 0x180F読み＝probeハング無し）。
-2. **H10はOSボンディング必須**（PFTP=録音転送は暗号化リンク必須）。SDK接続前に `ensureBonded()` で `createBond()`。ライブHR/ACCはボンディング不要だが録音取得はPFTP=要ボンド。
+2. **H10は録音PFTPだけOSボンディング必須**（暗号化リンク）。ライブHR/ACCはボンディング不要なので先に接続し、ボンディング待ちは専用PFTP workerで行う。stop中の待機完了がSDKを復活させないよう、SDK所有権は`LifecycleSlot`で閉じる。
 3. **PFTP 106 (OPERATION_NOT_PERMITTED)**: 接続直後に録音操作を走らせるとストリーム確立と競合して106。対策=**接続後8秒ディレイ＋リトライ**、かつ **start前に必ずスロットを空ける**（stop→ours削除）。**録音中/非空スロットへ startRecording すると106**。
 4. **ACCは `requestStreamSettings` で実機が出す組合せから選ぶ**（25Hz/16bit/2G優先）。ハードコードは拒否され姿勢が取れない。
 5. **再接続/teardownは自前監督**＋force-kill厳禁。`am force-stop` を**スキャン中に繰り返す**とAndroid BLEスキャナがwedge→端末再起動で解消。接続中の単発force-stopは比較的安全。
@@ -121,8 +122,11 @@ app/src/app.js + app/www/index.html    ダッシュボード（esbuild: src→ww
 
 ### オフライン穴埋め（再起動を跨ぐ復元）
 - H10本体= **単一スロット**。RR記録で **約95,000拍 ≒ 約20時間**、満杯で自動停止（上書きせず）。BLE切断中も記録継続。`PolarExerciseEntry.date`は信用不可(issue#168)→**自前クロックの start-anchor**で逆算せず前進再生。
-- **録音状態機械**（`recordings`テーブルに永続化）: `starting`→`active`→`fetching`→`persisted`→`removed` / `discarded_by_user`。**メタがDBに残るのでアプリ/OS再起動を跨いで復元**（在メモリだけに持たない）。`startRecording` 発行**前**に `starting`＋start-anchor を commit。
-- **接続時フロー**: `getOpenRecording`(DB) → 一致する on-device exercise を **exId↔identifier** で照合 → stop → fetch → `Backfill.replay`(start-anchor前進再生) → **`backfillCommit`（1トランザクションで `INSERT OR IGNORE` points ＋ `backfill_imports` ledger）** → 永続確認後に remove → 新規 start。**fetch/list失敗時は新規 startしない**（`listExercises` の失敗(null)を「録音なし」と誤認しない＝単一スロット上書きで未取得ギャップを失うため）→リトライ。
+- **録音状態機械**（`recordings`テーブルに永続化）: `starting`→`active` / `active_uncertain`→`fetching`→`persisted`→`removed` / `discarded_by_user`。**メタがDBに残るのでアプリ/OS再起動を跨いで復元**（在メモリだけに持たない）。`startRecording` 発行**前**に `starting`＋start-anchor を commit。
+- **接続時フロー**: まず`requestRecordingStatus`でinactive/ours/foreign/unknownを分類し、unknown/foreignではstop/start/removeしない。`getOpenRecording`(DB) → 一致する on-device exercise を **exId↔identifier** で照合 → stop → fetch → `Backfill.replay`(start-anchor前進再生) → **`backfillCommit`（1トランザクションで `INSERT OR IGNORE` points ＋ `backfill_imports` ledger）** → 永続確認後に remove → 新規 start。**fetch/list失敗時は新規 startしない**。ローカル保存失敗はBluetooth再接続・rebondへ昇格せず、記録を保持して`needs_action/storage_unavailable`で終了する。
+- **開始時刻の確定性**: `startRecording`の各再試行は新しいexId＋start-anchorを持つ。応答timeoutは同じexIdのactive状態と照合し、開始時刻を証明できない`starting`/`active_uncertain`のRRは時刻付きpointsへ変換せず`recording_quarantine`へ保存する。
+- **接続先選択**: Androidは設定の「接続先H10」から明示選択し、`deviceMac`を通常起動・ユーザー切替・START_STICKY復元で共用する。未選択なら自動接続せず`device_selection_required`。Nodeは`--device <ID>`で保存、`--forget-device`で解除する。
+- **接続診断**: statusの`connection`にstage/reason/attempt/nextRetryAtを含め、Android/Nodeとも直近64イベントだけを識別子・生RRなしで出力する。Androidは設定の「接続診断を書き出す」、Nodeは`GET /api/diagnostics`。
 - **dedup/冪等**: 既存秒は `pointTimesIn` でスキップ＋`INSERT OR IGNORE`（liveの境界秒をnull姿勢で壊さない）。同一anchorは同一秒を再構築するので remove失敗→再取得しても二重化しない。
 - **user-stop ⇔ OS-kill**: 明示停止(`stopEngine`)は `markUserStopped()`→`discarded_by_user`で**復元しない**。OS-kill(`onDestroy`でengine!=null)は `active`のまま→次回起動で復元。
 - **UIへの反映はイベント非依存**: `backfill_imports` ledger を起動/復帰/イベントで drain（`getUnmergedImports`→`nativeBackfillMerge`→`__mergeBackfill`＝history再構築＋trend `replaceBuckets`）。WebView未アタッチ中のサービス単独復元も次回ロードで反映。「**離席分を復元しました（約N分・一部欠落）**」。

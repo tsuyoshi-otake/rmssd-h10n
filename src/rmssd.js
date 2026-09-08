@@ -64,6 +64,28 @@ class RmssdWindow {
     this.lastAccepted = null;
     this.rejected = 0; // beats rejected as artifacts ("corrected")
     this.rmssdEma = null; // smoothed RMSSD for stable state classification
+    this.candidates = [];
+    this.generation = 0;
+  }
+
+  /** Start a new contiguous NN window without losing the session's correction count. */
+  reset() {
+    this.entries.length = 0;
+    this.recent.length = 0;
+    this.candidates.length = 0;
+    this.lastAccepted = null;
+    this.rmssdEma = null;
+    this.generation++;
+  }
+
+  _reacquire(rr) {
+    this.candidates.push(rr);
+    if (this.candidates.length > 5) this.candidates.shift();
+    const med = median(this.candidates);
+    if (this.candidates.some(value => Math.abs(value - med) / med > 0.10)) this.candidates = [rr];
+    if (this.candidates.length < 5) return false;
+    this.reset();
+    return true;
   }
 
   /**
@@ -72,26 +94,27 @@ class RmssdWindow {
    */
   add(tMs, rr) {
     // 1. Physiologically implausible -> reject outright.
-    if (rr < this.minRr || rr > this.maxRr) {
+    if (!Number.isFinite(rr) || !Number.isFinite(tMs) || rr < this.minRr || rr > this.maxRr) {
+      this.candidates.length = 0;
       this.rejected++;
       return false;
     }
+    this._evict(tMs);
     // 2. Local-median deviation (once we have a few accepted beats to trust).
     if (this.recent.length >= 3) {
       const med = median(this.recent);
       if (med > 0 && Math.abs(rr - med) / med > this.localTol) {
-        this.rejected++;
-        return false;
+        if (!this._reacquire(rr)) { this.rejected++; return false; }
       }
     } else if (this.lastAccepted != null) {
       // 3. Warm-up: fall back to a previous-beat jump test.
       if (Math.abs(rr - this.lastAccepted) / this.lastAccepted > this.maxRelJump) {
-        this.rejected++;
-        return false;
+        if (!this._reacquire(rr)) { this.rejected++; return false; }
       }
     }
 
     this.entries.push({ tMs, rr });
+    this.candidates.length = 0;
     this.lastAccepted = rr;
     this.recent.push(rr);
     if (this.recent.length > this.localN) this.recent.shift();
@@ -103,7 +126,10 @@ class RmssdWindow {
     const cutoff = nowMs - this.windowMs;
     let i = 0;
     while (i < this.entries.length && this.entries[i].tMs < cutoff) i++;
-    if (i > 0) this.entries.splice(0, i);
+    if (i > 0) {
+      this.entries.splice(0, i);
+      if (!this.entries.length) this.reset();
+    }
   }
 
   /**

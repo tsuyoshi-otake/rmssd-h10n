@@ -5,10 +5,19 @@ import android.os.Build;
 import android.util.Log;
 
 import com.getcapacitor.JSObject;
+import com.getcapacitor.JSArray;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.polar.sdk.api.PolarBleApi;
+import com.polar.sdk.api.PolarBleApiDefaultImpl;
+import com.polar.sdk.api.model.PolarDeviceInfo;
+
+import java.util.EnumSet;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Bridge between the WebView dashboard and the native HRV engine in
@@ -22,6 +31,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
  */
 @CapacitorPlugin(name = "HrvNative")
 public class HrvNativePlugin extends Plugin {
+    private final AtomicBoolean deviceScanActive = new AtomicBoolean(false);
     private static final String TAG = "HrvNativePlugin";
     private HrvDb db;
 
@@ -47,7 +57,8 @@ public class HrvNativePlugin extends Plugin {
 
     @PluginMethod
     public void start(PluginCall call) {
-        String mac = call.getString("mac", MonitorService.DEFAULT_MAC);
+        String mac = DeviceSelection.resolve(call.getString("mac", null), db().kvGet("deviceMac"));
+        if (mac == null) { call.reject("H10 selection required", "selection_required"); return; }
         boolean acc = Boolean.TRUE.equals(call.getBoolean("acc", false));
         int user = call.getInt("user", 1);
         String seed = call.getString("seed", null); // posture/supine refs + baseline
@@ -67,7 +78,8 @@ public class HrvNativePlugin extends Plugin {
 
     @PluginMethod
     public void switchUser(PluginCall call) {
-        String mac = call.getString("mac", MonitorService.DEFAULT_MAC);
+        String mac = DeviceSelection.resolve(call.getString("mac", null), db().kvGet("deviceMac"));
+        if (mac == null) { call.reject("H10 selection required", "selection_required"); return; }
         boolean acc = Boolean.TRUE.equals(call.getBoolean("acc", true));
         int user = call.getInt("user", 1);
         String seed = call.getString("seed", null);
@@ -203,6 +215,106 @@ public class HrvNativePlugin extends Plugin {
     public void getStatus(PluginCall call) {
         JSObject ret = new JSObject();
         ret.put("value", db().getStatus(call.getInt("user", 1)));
+        call.resolve(ret);
+    }
+
+    /** Current explicit selection. The masked suffix is safe for normal UI display. */
+    @PluginMethod
+    public void getSelectedDevice(PluginCall call) {
+        String id = DeviceSelection.normalize(db().kvGet("deviceMac"));
+        JSObject ret = new JSObject();
+        ret.put("id", id);
+        ret.put("name", db().kvGet("deviceName"));
+        ret.put("masked", DeviceSelection.masked(id));
+        call.resolve(ret);
+    }
+
+    /** User-triggered, bounded scan. Uses the running engine's owned SDK when possible; a
+     *  temporary scan-only client is used only before the first device has been selected. */
+    @PluginMethod
+    public void scanDevices(PluginCall call) {
+        if (!deviceScanActive.compareAndSet(false, true)) {
+            call.reject("An H10 scan is already running", "scan_busy");
+            return;
+        }
+        int seconds = Math.max(2, Math.min(15, call.getInt("seconds", 8)));
+        MonitorService service = MonitorService.INSTANCE;
+        if (service != null && service.nativeScanDevices(seconds,
+                list -> { deviceScanActive.set(false); resolveDevices(call, list); },
+                error -> { deviceScanActive.set(false); call.reject("H10 scan failed", asException(error)); })) return;
+
+        PolarBleApi scanner;
+        try {
+            scanner = PolarBleApiDefaultImpl.defaultImplementation(getContext(),
+                    EnumSet.of(PolarBleApi.PolarBleSdkFeature.FEATURE_HR));
+            scanner.setPolarFilter(true);
+        } catch (Throwable t) {
+            deviceScanActive.set(false);
+            call.reject("H10 scanner could not start", asException(t));
+            return;
+        }
+        try {
+            scanner.searchForDevice()
+                    .filter(info -> info.isConnectable() && info.getHasHeartRateService())
+                    .distinct(info -> info.getAddress() != null ? info.getAddress() : info.getDeviceId())
+                    .take(seconds, TimeUnit.SECONDS).toList()
+                    .doFinally(() -> {
+                        deviceScanActive.set(false);
+                        try { scanner.shutDown(); } catch (Throwable ignored) {}
+                    })
+                    .subscribe(list -> resolveDevices(call, list),
+                            error -> call.reject("H10 scan failed", asException(error)));
+        } catch (Throwable t) {
+            deviceScanActive.set(false);
+            try { scanner.shutDown(); } catch (Throwable ignored) {}
+            call.reject("H10 scan failed", asException(t));
+        }
+    }
+
+    private static Exception asException(Throwable error) {
+        return error instanceof Exception ? (Exception) error : new Exception(error);
+    }
+
+    @PluginMethod
+    public void selectDevice(PluginCall call) {
+        String id = DeviceSelection.normalize(call.getString("id", null));
+        if (id == null) { call.reject("Invalid H10 identifier", "invalid_device"); return; }
+        String name = call.getString("name", "Polar H10");
+        db().kvPut("deviceMac", id);
+        db().kvPut("deviceName", name == null ? "Polar H10" : name.substring(0, Math.min(80, name.length())));
+        Intent svc = new Intent(getContext(), MonitorService.class);
+        svc.setAction(MonitorService.ACTION_SWITCH_DEVICE);
+        svc.putExtra(MonitorService.EXTRA_MAC, id);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) getContext().startForegroundService(svc);
+        else getContext().startService(svc);
+        JSObject ret = new JSObject();
+        ret.put("ok", true).put("masked", DeviceSelection.masked(id));
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void getBleDiagnostics(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        JSObject ret = new JSObject();
+        ret.put("value", s != null ? s.nativeBleDiagnostics() : "{\"events\":[]}");
+        call.resolve(ret);
+    }
+
+    private static void resolveDevices(PluginCall call, List<PolarDeviceInfo> list) {
+        JSArray devices = new JSArray();
+        for (PolarDeviceInfo info : list) {
+            String id = DeviceSelection.normalize(info.getAddress() != null ? info.getAddress() : info.getDeviceId());
+            if (id == null) continue;
+            JSObject row = new JSObject();
+            row.put("id", id);
+            row.put("name", info.getName());
+            row.put("masked", DeviceSelection.masked(id));
+            row.put("rssi", info.getRssi());
+            row.put("hasHeartRate", info.getHasHeartRateService());
+            devices.put(row);
+        }
+        JSObject ret = new JSObject();
+        ret.put("devices", devices);
         call.resolve(ret);
     }
 
