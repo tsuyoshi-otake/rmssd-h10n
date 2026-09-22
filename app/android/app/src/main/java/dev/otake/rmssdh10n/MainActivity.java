@@ -1,8 +1,11 @@
 package dev.otake.rmssdh10n;
 
 import android.content.pm.PackageManager;
+import android.content.Intent;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.util.Log;
 import android.webkit.WebView;
 
@@ -20,24 +23,25 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
         hideStatusBar(); // full-screen: drop the top status bar (immersive; swipe-down reveals it transiently)
 
-        // Android 13+ requires runtime permission to show the foreground-service
-        // notification that keeps background monitoring alive.
+        // One permission request avoids overlapping notification/Bluetooth dialogs.
+        java.util.List<String> need = new java.util.ArrayList<>();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1001);
+            need.add("android.permission.POST_NOTIFICATIONS");
         }
         // Android 12+ requires BLUETOOTH_CONNECT (and BLUETOOTH_SCAN — the Polar SDK
         // may scan to (re)establish the link, esp. on foreground re-entry) at runtime;
         // the native engine connects the H10 from inside the service, so both must be
         // granted before switching to the native engine.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            java.util.List<String> need = new java.util.ArrayList<>();
             if (checkSelfPermission("android.permission.BLUETOOTH_CONNECT") != PackageManager.PERMISSION_GRANTED)
                 need.add("android.permission.BLUETOOTH_CONNECT");
             if (checkSelfPermission("android.permission.BLUETOOTH_SCAN") != PackageManager.PERMISSION_GRANTED)
                 need.add("android.permission.BLUETOOTH_SCAN");
-            if (!need.isEmpty()) requestPermissions(need.toArray(new String[0]), 1002);
+        } else if (checkSelfPermission("android.permission.ACCESS_FINE_LOCATION") != PackageManager.PERMISSION_GRANTED) {
+            need.add("android.permission.ACCESS_FINE_LOCATION");
         }
+        if (!need.isEmpty()) requestPermissions(need.toArray(new String[0]), 1002);
     }
 
     // On some devices the WebView returns to the foreground after screen-off
@@ -66,11 +70,37 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        resumeMonitoring();
         kickRepaint();
         // Nudge the BLE driver to restart its scan (BLE scan can't start with the
         // screen off), so a connection lost in the background re-establishes on wake.
         MonitorService s = MonitorService.INSTANCE;
         if (s != null) s.nativeForegroundEntered();
+    }
+
+    private void resumeMonitoring() {
+        // Start independently of WebView loading/rendering or its JavaScript boot sequence.
+        MonitorRecoveryJob.restore(this, true, "activity");
+        if (!MonitorRecoveryJob.unlocked(this) || !MonitorRecoveryJob.permitted(this)
+                || MonitorRecoveryJob.batteryExempt(this)) return;
+        android.content.SharedPreferences setup = getSharedPreferences("background_setup", MODE_PRIVATE);
+        if (setup.getBoolean("asked", false)) return;
+        try (HrvDb db = new HrvDb(this)) {
+            if (!"native".equals(db.kvGet("engine"))
+                    || DeviceSelection.normalize(db.kvGet("deviceMac")) == null) return;
+            // Continuous BLE monitoring requires this exemption for unattended recovery.
+            // Ask the user once via Android's own consent UI; a refusal is respected.
+            setup.edit().putBoolean("asked", true).apply();
+            startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (RuntimeException failure) {
+            Log.w("MonitorRecovery", "battery settings unavailable", failure);
+        }
+    }
+
+    @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(code, permissions, results);
+        if (code == 1002) resumeMonitoring();
     }
 
     /** Hide the top status bar for a full-screen dashboard. Immersive: the bar

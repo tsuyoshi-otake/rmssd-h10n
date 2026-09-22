@@ -33,6 +33,8 @@ Polar H10 ──BLE──┤
 
 ## セットアップ
 
+Androidアプリの自動起動・バックグラウンド復旧と制限は [Android常駐動作](docs/android-background.md) を参照してください。
+
 ```bash
 npm install
 ```

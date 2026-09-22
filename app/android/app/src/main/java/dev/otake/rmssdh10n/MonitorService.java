@@ -31,8 +31,8 @@ import java.util.function.Consumer;
  * HrvNativePlugin} pushes live frames to the WebView when one is attached and
  * serves catch-up reads on resume.
  *
- * The service also still backs the legacy "keepAlive" use (foreground + wake
- * lock) for the JS engine, so switching engines is non-destructive.
+ * Restart intent lives in HrvDb; MonitorRecoveryJob is the durable fallback if
+ * Android does not restart this START_STICKY service. Only this service owns BLE.
  */
 public class MonitorService extends Service {
     private static final String TAG = "MonitorService";
@@ -105,25 +105,40 @@ public class MonitorService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        Notification n = buildNotification(false);
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
-        } else {
-            startForeground(NOTIF_ID, n);
+        if (intent != null && ACTION_STOP_ENGINE.equals(intent.getAction())) {
+            try { stopEngine(); } finally { stopSelf(); }
+            return START_NOT_STICKY;
         }
+        if (!MonitorRecoveryJob.unlocked(this) || !MonitorRecoveryJob.permitted(this)) {
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        try {
+            Notification n = buildNotification(false);
 
-        if (wakeLock == null) {
-            PowerManager pm = getSystemService(PowerManager.class);
-            if (pm != null) {
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rmssd:monitor");
-                wakeLock.setReferenceCounted(false);
-                wakeLock.acquire();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+            } else {
+                startForeground(NOTIF_ID, n);
             }
-        }
 
-        handleIntent(intent);
-        return START_STICKY; // restart if the OS kills us
+            if (wakeLock == null) {
+                PowerManager pm = getSystemService(PowerManager.class);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rmssd:monitor");
+                    wakeLock.setReferenceCounted(false);
+                    wakeLock.acquire();
+                }
+            }
+
+            handleIntent(intent);
+            if (engine != null) return START_STICKY;
+        } catch (RuntimeException failure) {
+            Log.e(TAG, "startup failed; durable recovery will retry", failure);
+            // onDestroy owns final cleanup, including a partially initialized engine.
+        }
+        stopSelf(); // no idle foreground notification or wake lock without an engine.
+        return START_NOT_STICKY;
     }
 
     /** Build the ongoing foreground notification. When {@code stale}, the text flags a
@@ -156,10 +171,6 @@ public class MonitorService extends Service {
 
     private void handleIntent(Intent intent) {
         String action = intent != null ? intent.getAction() : null;
-        if (ACTION_STOP_ENGINE.equals(action)) {
-            stopEngine();
-            return;
-        }
         if (ACTION_SWITCH_DEVICE.equals(action)) {
             String mac = DeviceSelection.normalize(intent.getStringExtra(EXTRA_MAC));
             if (mac == null) { Log.w(TAG, "device switch rejected — invalid ID"); return; }
@@ -191,8 +202,11 @@ public class MonitorService extends Service {
         // Null/empty intent = START_STICKY restart (or keepAlive's service start).
         // Restore the native engine if it was the active one and none is running yet.
         if (engine == null && "native".equals(db().kvGet("engine"))) {
+            if (MonitorRecoveryPolicy.decide("native", db().kvGet("deviceMac"), true, true,
+                    false, System.currentTimeMillis(), MonitorRecoveryJob.nextAttempt(this))
+                    == MonitorRecoveryPolicy.Decision.COOLDOWN) return;
             String mac = db().kvGet("deviceMac");
-            boolean acc = "1".equals(db().kvGet("acc"));
+            boolean acc = !"0".equals(db().kvGet("acc"));
             int user = parseInt(db().kvGet("user"), 1);
             startEngine(DeviceSelection.resolve(null, mac), acc, user, null); // refs/baseline restored from kv
         }
@@ -202,6 +216,7 @@ public class MonitorService extends Service {
         if (mac == null) {
             Log.w(TAG, "native engine not started — H10 selection required");
             db().kvPut("engine", "selection_required");
+            MonitorRecoveryJob.cancel(this);
             return;
         }
         // Idempotent: a normal launch fires BOTH an explicit START_ENGINE and a
@@ -213,6 +228,9 @@ public class MonitorService extends Service {
             Log.i(TAG, "startEngine ignored — engine already running");
             return;
         }
+        db().saveMonitorConfiguration(mac, acc, user);
+        MonitorRecoveryJob.schedule(this);
+        MonitorRecoveryJob.starting(this);
         engine = new HrvEngine(this, db(), acc);
         engine.setUser(user);
         if (seed != null) engine.seed(seed);
@@ -227,11 +245,8 @@ public class MonitorService extends Service {
         engine.setPostureEnabled(!"0".equals(db().kvGet("postureEnabled"))); // 姿勢推定（kv未設定=既定ON）。OFFでACC停止＝H10電池節約
         engine.setBreathingAlertVoice(!"0".equals(db().kvGet("breathingAlertVoice"))); // 既定ON。設定でOFF可
         engine.start(mac);
-        db().kvPut("engine", "native");
-        db().kvPut("deviceMac", mac);
-        db().kvPut("acc", acc ? "1" : "0");
-        db().kvPut("user", String.valueOf(user));
-        Log.i(TAG, "native engine started mac=" + mac + " acc=" + acc + " user=" + user);
+        MonitorRecoveryJob.started(this);
+        Log.i(TAG, "native engine started acc=" + acc + " user=" + user);
     }
 
     // Posture-reference controls routed from the plugin (no-op if engine off).
@@ -265,6 +280,11 @@ public class MonitorService extends Service {
     private void stopEngine() { stopEngine(true); }
 
     private void stopEngine(boolean markStopped) {
+        // Cancel persisted restart intent FIRST, so a process death during cleanup stays stopped.
+        if (markStopped) {
+            db().kvPut("engine", "js");
+            MonitorRecoveryJob.cancel(this);
+        }
         // Explicit (user) stop. Halt the engine/BLE worker FIRST, THEN mark the recording
         // discarded — otherwise an in-flight startRecording on the worker could write 'active'
         // back AFTER the discard, making the next launch treat it as an OS-kill gap to recover.
@@ -276,8 +296,13 @@ public class MonitorService extends Service {
             engine = null;
         }
         if (tts != null) { tts.shutdown(); tts = null; }
-        if (markStopped) db().kvPut("engine", "js");
         Log.i(TAG, markStopped ? "native engine stopped (engine=js)" : "native engine switching device");
+    }
+
+    @Override public void onTaskRemoved(Intent rootIntent) {
+        // Dismissing the dashboard is not a user request to stop measuring.
+        if (engine != null) MonitorRecoveryJob.schedule(this);
+        super.onTaskRemoved(rootIntent);
     }
 
     private static int parseInt(String s, int def) {
@@ -287,8 +312,12 @@ public class MonitorService extends Service {
     @Override
     public void onDestroy() {
         try { unregisterReceiver(btStateReceiver); } catch (Exception ignored) {}
-        if (engine != null) { engine.stop(); engine = null; }
-        if (tts != null) { tts.shutdown(); tts = null; }
+        try { if (engine != null) engine.stop(); }
+        catch (RuntimeException failure) { Log.w(TAG, "engine cleanup failed", failure); }
+        finally { engine = null; }
+        try { if (tts != null) tts.shutdown(); }
+        catch (RuntimeException failure) { Log.w(TAG, "speech cleanup failed", failure); }
+        finally { tts = null; }
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
         wakeLock = null;
         if (INSTANCE == this) INSTANCE = null;
