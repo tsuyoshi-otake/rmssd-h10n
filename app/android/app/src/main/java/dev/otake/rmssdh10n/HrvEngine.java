@@ -56,9 +56,8 @@ public final class HrvEngine {
     /** Relax-mode voice readout sink (Android TextToSpeech in the service). */
     public interface Speaker { void speak(String text); }
 
-    /** Surfaces a stalled link to the foreground notification (connected but no RR —
-     *  e.g. a post-force-stop orphan the watchdog can't clear from the phone side). */
-    public interface LinkStateSink { void onLinkStale(boolean stale); }
+    /** Reports whether measurement is actually receiving fresh accepted RR. */
+    public interface LinkStateSink { void onCollectionState(CollectionState state); }
 
     private final Context ctx;
     private final HrvDb db;
@@ -91,7 +90,7 @@ public final class HrvEngine {
     private long lastSpokenAt = 0;               // tick-thread throttle for the readout
     private final BreathingAlert breathingAlert = new BreathingAlert();
     private volatile LinkStateSink linkStateSink; // foreground-notification link hint (null = none)
-    private boolean linkStaleShown = false;       // last reported link-stale state (tick thread only)
+    private CollectionState shownCollectionState; // tick thread only
     private double lastPeakMs = 0;
     private long beats = 0;
     private int lastStepCount = 0;
@@ -441,13 +440,15 @@ public final class HrvEngine {
             }
         }
 
-        // Foreground-notification link hint: CONNECTED but silent (never delivered, or went
-        // quiet mid-session) → surface "re-attach H10". A plain disconnect (out of range /
-        // away from the phone) is the normal backfill case, not a re-attach condition, so the
-        // hint requires an up link and clears as soon as RR resumes or the link drops.
+        // A running service is not proof of collection. Only accepted, fresh RR earns
+        // "measuring"; connection wait and a silent connected link remain distinct.
         boolean quiet = connected && cs > 0 && !delivering && now - silentSince > NOTIF_STALE_MS;
-        if (!quiet && linkStaleShown) { linkStaleShown = false; notifyLinkStale(false); }
-        else if (quiet && !linkStaleShown) { linkStaleShown = true; notifyLinkStale(true); }
+        boolean fresh = connected && lastRrAt > 0 && (now - lastRrAt) < POINT_FRESH_MS;
+        CollectionState collectionState = CollectionState.from(connected, fresh, quiet);
+        if (collectionState != shownCollectionState) {
+            shownCollectionState = collectionState;
+            notifyCollectionState(collectionState);
+        }
 
         Rmssd.Result r, r5;
         Posture.Result p;
@@ -457,7 +458,6 @@ public final class HrvEngine {
         Analysis.State state;
         BodyState.Result body;
         Analysis.Base base;
-        boolean fresh = connected && lastRrAt > 0 && (now - lastRrAt) < POINT_FRESH_MS;
         synchronized (gate) {
             r = win.compute(lastPeakMs);
             r5 = win5.compute(lastPeakMs);
@@ -644,9 +644,9 @@ public final class HrvEngine {
         } catch (Exception ignored) {}
     }
 
-    private void notifyLinkStale(boolean stale) {
+    private void notifyCollectionState(CollectionState state) {
         LinkStateSink ls = linkStateSink;
-        if (ls != null) { try { ls.onLinkStale(stale); } catch (Throwable ignored) {} }
+        if (ls != null) { try { ls.onCollectionState(state); } catch (Throwable ignored) {} }
     }
 
     private static double round1(double v) { return Math.round(v * 10.0) / 10.0; }

@@ -1,5 +1,8 @@
 # Verified project learnings
 
+- Polar SDK 6.16.1 `connectToDevice` may return after installing a search subscription and later log a search failure without throwing to the caller. Supervise accepted requests with a deadline as well as catching synchronous errors. Deterministic connection tests verify timeout, cancellation-before-retry, backoff, duplicate wakes, late connection and stop invalidation.
+- For Android collection verification, require SQLite point growth and a fresh RR timestamp while the screen is off. A foreground service and advancing status alone are insufficient. On the test phone a Bluetooth dump timeout followed by a stuck `BLE_ON` transition required an authorized reboot; after `ON` returned, fresh RR and 65 points over a 65-second screen-off interval were observed. This is evidence of system-radio recovery, not a guarantee that app retries can repair the OS.
+
 - Android lint treats an unescaped Windows drive colon in `local.properties` as `PropertyEscape`, even when Gradle compilation succeeds. Use `sdk.dir=C\:/...`; `testDebugUnitTest`, `lintDebug` and `assembleDebug` passed with this form.
 - A periodic JobScheduler callback alone does not exempt Android 12+ foreground-service launches. Recovery needs an eligible launch route or battery-optimization exemption. On the Android 15 test phone, an exempt app restored its gracefully removed service through job 2401 without opening the dashboard; repeated jobs retained one engine.
 
