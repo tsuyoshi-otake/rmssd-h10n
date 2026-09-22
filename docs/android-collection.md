@@ -60,5 +60,24 @@ without first reading PFTP recovery. SDK and OS radio limitations still matter.
 - Native tests: 94 passed, zero failures/errors. Android lint: zero errors,
   38 warnings. Debug assembly succeeded. Build/test runner process audit was
   empty after completion. No dependency version or lockfile changed.
-- Device verification is pending reconnect/unlock after the authorized reboot.
-  Do not equate a successful build or advancing service status with live RR.
+- After the authorized reboot, system Bluetooth returned to `ON`. Version
+  1.0.4/code 5 was installed with `adb install -r`. Fresh RR resumed and SQLite
+  point count grew from 31,505 to 31,521. With the display confirmed `Dozing`,
+  another 65 points were persisted over the next 65 seconds (31,586 total).
+  `connected` and `dataFresh` stayed true; sample timestamps advanced. SQLite
+  integrity passed and all original points matched by user/time/JSON.
+- Installed APK and release candidate SHA-256:
+  `509cbeab634758d2d7e3148197895a3a377ed4f7a402f9c3296e17fa3bc4ca10`.
+- The immediate radio recovery came from rebooting the wedged phone. The code
+  prevents indefinite silent requests and misleading notifications; it does not
+  claim to repair system Bluetooth automatically. Long-duration OEM behavior
+  and screen-off reconnection after loss of range remain unverified.
+- H10 reported an untracked old recording with missing local recovery metadata.
+  The existing safety guard preserved it. Live RR collection works, but new
+  onboard gap recording is blocked by that occupied slot. No sensor data was
+  deleted to make this test pass.
+- Release safety checks: already-public repository; releases v1.0.0–v1.0.3;
+  no LICENSE. Existing attribution, local/account paths, protocol UUIDs and
+  dependency-maintainer contact metadata were found; no tracked credential
+  files or token/private-key patterns. Visibility/history unchanged. Existing
+  dependency audit findings remain as recorded for v1.0.3.
