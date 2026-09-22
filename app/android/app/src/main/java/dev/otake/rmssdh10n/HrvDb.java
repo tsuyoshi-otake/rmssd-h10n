@@ -423,6 +423,19 @@ public final class HrvDb extends SQLiteOpenHelper implements RecordingBackfillSt
         getWritableDatabase().insertWithOnConflict("kv", null, cv, SQLiteDatabase.CONFLICT_REPLACE);
     }
 
+    /** Commit restart intent and its selected device/user together, before native startup. */
+    public void saveMonitorConfiguration(String device, boolean acc, int user) {
+        SQLiteDatabase database = getWritableDatabase();
+        database.beginTransaction();
+        try {
+            String[][] values = {{"engine", "native"}, {"deviceMac", device},
+                    {"acc", acc ? "1" : "0"}, {"user", String.valueOf(user)}};
+            for (String[] entry : values)
+                database.execSQL("INSERT OR REPLACE INTO kv(k,v) VALUES(?,?)", entry);
+            database.setTransactionSuccessful();
+        } finally { database.endTransaction(); }
+    }
+
     public String kvGet(String k) {
         try (Cursor c = getReadableDatabase().rawQuery("SELECT v FROM kv WHERE k=?", new String[]{ k })) {
             return c.moveToFirst() ? c.getString(0) : null;
