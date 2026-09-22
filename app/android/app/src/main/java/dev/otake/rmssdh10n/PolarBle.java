@@ -53,10 +53,10 @@ import io.reactivex.rxjava3.disposables.Disposable;
  *  - clean (user) stop marks the recording discarded_by_user so it is NOT recovered;
  *    an OS kill leaves it active so the next launch recovers the gap.
  *
- * Reconnection is left to the SDK ({@code setAutomaticReconnection(true)} +
- * {@link #foregroundEntered()} on resume). BLE scan can't restart with the screen
- * off, but that is exactly the case the backfill recovers — a delayed reconnect
- * (e.g. on wake) still gets its gap filled from device memory.
+ * The SDK handles ordinary automatic reconnect. {@link BleConnectionRetry} bounds
+ * silent connect/search waits and reissues them with backoff. Screen-off scanning
+ * remains subject to Android/SDK restrictions; backfill covers delayed reconnects
+ * when an H10 recording was successfully started before the gap.
  */
 public final class PolarBle {
     private static final String TAG = "PolarBle";
@@ -67,7 +67,6 @@ public final class PolarBle {
     private static final int RETRY_DELAY_S = 5;          // spacing for transient PFTP 106 retries
     private static final int MAX_RECORDING_ATTEMPTS = 6; // bound the recover/start retry loop
     private static final int MAX_RECOVERY_RECONNECTS = 2;// bounded forced reconnects when PFTP stays wedged on a link
-    private static final int MAX_CONNECT_ATTEMPTS = 5;   // bounded re-issues when connectToDevice throws
     private static final long RR_CAP = 95000L;           // ~H10 RR memory limit (truncation heuristic)
     private static final long FULL_DURATION_MS = 18L * 3600 * 1000; // ~18 h
     private static final long TRUNCATE_TAIL_MS = 5L * 60 * 1000;    // unrecorded tail ⇒ memory-full auto-stop
@@ -179,12 +178,25 @@ public final class PolarBle {
     // fires on the SDK callback thread while nudgeStreams runs on exec; without this the
     // check-then-set on hrDis/accDis could double-subscribe and double-count RR.
     private final Object streamLock = new Object();
+    private final BleConnectionRetry connectionRetry;
 
     public PolarBle(Context ctx, String mac, boolean withAcc, Sink sink) {
         this.ctx = ctx.getApplicationContext();
         this.id = mac;
         this.withAcc = withAcc;
         this.sink = sink;
+        connectionRetry = new BleConnectionRetry((delay, action) -> {
+            java.util.concurrent.ScheduledFuture<?> future = exec.schedule(action, delay, TimeUnit.MILLISECONDS);
+            return () -> future.cancel(false);
+        }, new BleConnectionRetry.Link() {
+            public boolean connected() { return linkConnected; }
+            public void connect() throws Exception { if (!stopping && api() != null) api().connectToDevice(id); }
+            public void cancel() throws Exception { if (!stopping && api() != null) api().disconnectFromDevice(id); }
+            public void report(String state, String reason, int attempt, long nextAt) {
+                stage(state, reason, attempt, nextAt);
+                sink.log(state + ": " + reason + " attempt=" + attempt);
+            }
+        }, System::currentTimeMillis, Math::random);
     }
 
     public void setRecordingStore(RecordingStore s) { this.recordingStore = s; }
@@ -233,7 +245,7 @@ public final class PolarBle {
                 })) return;
                 sink.log("connecting " + id);
                 stage("connecting", "initial", 1, 0);
-                issueConnect("initial", 1);
+                connectionRetry.request("initial");
             } catch (Throwable t) {
                 sink.log("start failed: " + t.getMessage());
             }
@@ -256,30 +268,8 @@ public final class PolarBle {
         execSafe(() -> {
             if (stopping || api() == null || linkConnected) return;
             sink.log("bluetooth adapter restarted — re-issuing connect");
-            issueConnect("bt-on", 1);
+            connectionRetry.request("bt_on");
         });
-    }
-
-    /** Issue connectToDevice with bounded retries. A throw here (adapter mid-cycle, transient
-     *  stack state) used to be logged once and never retried, leaving the session dead until
-     *  an app restart. Runs (and reschedules itself) on exec. */
-    private void issueConnect(String why, int attempt) {
-        if (stopping || api() == null) return;
-        try {
-            if (attempt > 1) sink.log("connect (" + why + ") attempt " + attempt + "/" + MAX_CONNECT_ATTEMPTS);
-            stage("connecting", why, attempt, 0);
-            api().connectToDevice(id);
-        } catch (Throwable t) {
-            sink.log("connect (" + why + ") failed: " + t.getMessage());
-            if (attempt < MAX_CONNECT_ATTEMPTS) {
-                long next = System.currentTimeMillis() + RETRY_DELAY_S * 1000L;
-                stage("retry_wait", "connect_" + why, attempt, next);
-                try { exec.schedule(() -> issueConnect(why, attempt + 1), RETRY_DELAY_S, TimeUnit.SECONDS); }
-                catch (RejectedExecutionException ignored) {}
-            } else {
-                stage("needs_action", "connect_retries_exhausted", attempt, 0);
-            }
-        }
     }
 
     /** Run work on the BLE worker, swallowing the rejection that happens if a teardown
@@ -375,6 +365,7 @@ public final class PolarBle {
 
     public void stop() {
         stopping = true;
+        connectionRetry.stop();
         stage("stopped", "user_or_service_stop", 0, 0);
         recordingActive = false;
         disposeStreams();
@@ -405,6 +396,7 @@ public final class PolarBle {
         @Override public void deviceConnected(PolarDeviceInfo info) {
             if (stopping) return;
             linkConnected = true;
+            execSafe(connectionRetry::connected);
             recordingHandledThisConn.set(false);
             connGen.incrementAndGet();              // supersede retries scheduled under a prior connection
             recordingSafe(() -> recordingAttempt = 0); // recording counters stay on recordingExec
@@ -418,6 +410,7 @@ public final class PolarBle {
         @Override public void deviceDisconnected(PolarDeviceInfo info) {
             if (stopping) return;
             linkConnected = false;
+            execSafe(connectionRetry::disconnected);
             sink.onConnected(false);
             stage("disconnected", "link_lost", 0, 0);
             recordingHandledThisConn.set(false);
@@ -750,7 +743,7 @@ public final class PolarBle {
                 lastBondPromptAt = System.currentTimeMillis(); // rebond prompts the OS pairing dialog
                 boolean ok = PolarBonding.rebond(ctx, id, sink::log);
                 sink.log(ok ? "bond re-established" : "bond reset failed");
-                try { exec.schedule(() -> issueConnect("rebond", 1), 3, TimeUnit.SECONDS); }
+                try { exec.schedule(() -> connectionRetry.reconnect("rebond"), 3, TimeUnit.SECONDS); }
                 catch (RejectedExecutionException ignored) {}
             } else {
                 stage("needs_action", "pftp_retries_exhausted", recordingAttempt, 0);
@@ -822,7 +815,7 @@ public final class PolarBle {
             exec.schedule(() -> {
                 if (stopping || api() == null) return;
                 sink.log("reconnecting after stall");
-                issueConnect("stall", 1);
+                connectionRetry.reconnect("stall");
             }, 3, TimeUnit.SECONDS);
         } catch (RejectedExecutionException ignored) {}
     }

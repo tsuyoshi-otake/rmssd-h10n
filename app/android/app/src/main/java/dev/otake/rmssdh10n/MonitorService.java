@@ -36,6 +36,7 @@ import java.util.function.Consumer;
  */
 public class MonitorService extends Service {
     private static final String TAG = "MonitorService";
+    private volatile CollectionState notificationState = CollectionState.WAITING;
     private static final String CHANNEL = "rmssd_monitor";
     private static final int NOTIF_ID = 1;
     // Device selection is persisted in HrvDb; source code contains no user-specific MAC.
@@ -114,7 +115,7 @@ public class MonitorService extends Service {
             return START_NOT_STICKY;
         }
         try {
-            Notification n = buildNotification(false);
+            Notification n = buildNotification(notificationState);
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
@@ -141,18 +142,15 @@ public class MonitorService extends Service {
         return START_NOT_STICKY;
     }
 
-    /** Build the ongoing foreground notification. When {@code stale}, the text flags a
-     *  connected-but-silent link (a post-force-stop orphan the watchdog can't always clear
-     *  from the phone side) and tells the user the one thing that reliably fixes it. */
-    private Notification buildNotification(boolean stale) {
+    /** The notification distinguishes process survival from real collection. */
+    private Notification buildNotification(CollectionState state) {
         Intent open = new Intent(this, MainActivity.class);
         int piFlags = PendingIntent.FLAG_UPDATE_CURRENT
                 | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
         PendingIntent pi = PendingIntent.getActivity(this, 0, open, piFlags);
         return new NotificationCompat.Builder(this, CHANNEL)
                 .setContentTitle("RMSSD モニタリング")
-                .setContentText(stale ? "H10が無反応 — センサーを付け直してください"
-                                      : "心拍変動を計測中（バックグラウンド）")
+                .setContentText(state.text)
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setOngoing(true)
                 .setContentIntent(pi)
@@ -160,12 +158,12 @@ public class MonitorService extends Service {
                 .build();
     }
 
-    /** Flip the ongoing notification between normal and "re-attach H10". Called from the
-     *  engine tick thread on a state change only; NotificationManager.notify is thread-safe. */
-    private void updateNotification(boolean stale) {
+    /** Called only on collection-state changes; NotificationManager is thread-safe. */
+    private void updateNotification(CollectionState state) {
+        notificationState = state;
         try {
             NotificationManager nm = getSystemService(NotificationManager.class);
-            if (nm != null) nm.notify(NOTIF_ID, buildNotification(stale));
+            if (nm != null) nm.notify(NOTIF_ID, buildNotification(state));
         } catch (Throwable ignored) {}
     }
 
