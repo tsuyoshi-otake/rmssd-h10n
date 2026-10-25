@@ -27,9 +27,12 @@ final class BleConnectionRetry {
     private final AtomicLong generation = new AtomicLong();
     private volatile boolean stopped;
     private volatile Runnable cancelTimer;
-    private boolean up;       // an established link, as seen on the control lane
-    private boolean waiting;  // a connect deadline, backoff or restart settle owns the next step
-    private boolean halted;   // a native request could not be cancelled; never overlap it
+    /** Who owns the next step, as seen on the control lane: nothing yet (IDLE), a connect
+     *  deadline, backoff or restart settle (WAITING), the established link (UP), or nobody until
+     *  the SDK connects or the adapter restarts, because a native request could not be
+     *  cancelled (HALTED). */
+    private enum Phase { IDLE, WAITING, UP, HALTED }
+    private Phase phase = Phase.IDLE;
     private int attempt;
     private String stage, reason;   // the last link stage reported, for a stale connected()
     private int stageAttempt;
@@ -40,11 +43,11 @@ final class BleConnectionRetry {
     }
 
     void request(String reason) {
-        if (stopped || halted || waiting || up) return;
+        if (stopped || phase != Phase.IDLE) return;
         // The SDK got there first: own the link now instead of handing off to a queued
         // connected() that may already be stale when the control lane reaches it.
         if (link.connected()) { connected(); return; }
-        waiting = true;
+        phase = Phase.WAITING;
         attempt = Math.min(20, attempt + 1);
         report("connecting", reason, attempt, clock.getAsLong() + DEADLINE_MS);
         arm(DEADLINE_MS, () -> failed("connect_timeout"));
@@ -55,10 +58,9 @@ final class BleConnectionRetry {
     /** SDK link loss. An established link hands over to the SDK's own automatic reconnect,
      *  supervised by a deadline without a duplicate request. */
     void disconnected() {
-        if (stopped || !up) return;
-        up = false;
+        if (stopped || phase != Phase.UP) return;
+        phase = Phase.WAITING;
         report("disconnected", "link_lost", attempt, 0);
-        waiting = true;
         report("connecting", "sdk_reconnect", attempt, clock.getAsLong() + DEADLINE_MS);
         arm(DEADLINE_MS, () -> failed("connect_timeout"));
     }
@@ -71,11 +73,11 @@ final class BleConnectionRetry {
     void connected() {
         if (stopped) return;
         if (!link.connected()) {
-            if (!up && stage != null) link.report(stage, reason, stageAttempt, stageNextAt);
+            if (phase != Phase.UP && stage != null) link.report(stage, reason, stageAttempt, stageNextAt);
             return;
         }
-        boolean wasUp = up;
-        up = true; waiting = false; halted = false; attempt = 0;
+        boolean wasUp = phase == Phase.UP;
+        phase = Phase.UP; attempt = 0;
         clearTimer();
         if (!wasUp) report("connected", "link_ready", 0, 0);
     }
@@ -84,20 +86,20 @@ final class BleConnectionRetry {
      *  disconnect has had {@code settleMs} to settle. It never waits for the SDK's
      *  disconnect callback, which arrives late or not at all on a wedged stack. */
     void restart(String reason, long settleMs) {
-        if (stopped || halted) return;
+        if (stopped || phase == Phase.HALTED) return;
         clearTimer();
-        up = false; waiting = true;
+        phase = Phase.WAITING;
         report("connecting", reason, attempt, clock.getAsLong() + settleMs + DEADLINE_MS);
         if (!cancelled()) return;
-        arm(settleMs, () -> { waiting = false; request(reason); });
+        arm(settleMs, () -> { phase = Phase.IDLE; request(reason); });
     }
 
     /** Connect afresh now (after a rebond). The SDK ignores connectToDevice unless its
      *  session is closed, so whatever may still be pending — the SDK's own parked reconnect
      *  or a connect of ours issued when a settle fired first — is cancelled before it. */
     void reconnect(String reason) {
-        if (stopped || halted || up || link.connected()) return;
-        clearTimer(); waiting = false;
+        if (stopped || phase == Phase.HALTED || phase == Phase.UP || link.connected()) return;
+        clearTimer(); phase = Phase.IDLE;
         if (cancelled()) request(reason);
     }
 
@@ -107,21 +109,22 @@ final class BleConnectionRetry {
      *  (this also covers a connect of ours issued after the adapter came back but before
      *  this broadcast); the supervisor stays halted if that cancel fails. */
     void adapterRestarted() {
-        if (stopped || up || link.connected()) return;
-        clearTimer(); waiting = false; halted = false;
+        if (stopped || phase == Phase.UP || link.connected()) return;
+        clearTimer(); phase = Phase.IDLE;
         if (cancelled()) request("bt_on");
     }
 
+    /** A deadline expired or a connect threw; the supervisor is WAITING and stays so through
+     *  the backoff. */
     private void failed(String reason) {
         if (stopped) return;
         if (link.connected()) { connected(); return; }
         clearTimer();
         if (!cancelled()) return;
-        long base = Math.min(240_000L, 30_000L << Math.min(3, Math.max(0, attempt - 1)));
+        long base = 30_000L << Math.min(3, Math.max(0, attempt - 1));   // 30 s .. 240 s
         long delay = (long) (base * (1 + Math.max(0, Math.min(1, jitter.getAsDouble())) * 0.25));
-        waiting = true;
         report("retry_wait", reason, attempt, clock.getAsLong() + delay);
-        arm(delay, () -> { waiting = false; request("deadline_retry"); });
+        arm(delay, () -> { phase = Phase.IDLE; request("deadline_retry"); });
     }
 
     /** Cancel the pending native request. When that fails, halt: the SDK would ignore a new
@@ -130,7 +133,7 @@ final class BleConnectionRetry {
     private boolean cancelled() {
         try { link.cancel(); return !stopped; }
         catch (Exception error) {
-            waiting = false; halted = true;
+            phase = Phase.HALTED;
             report("needs_action", "connect_cancel_failed", attempt, 0);
             return false;
         }
@@ -148,7 +151,7 @@ final class BleConnectionRetry {
             if (!stopped && token == generation.get()) action.run();
         });
         cancelTimer = cancel;
-        if (stopped || token != generation.get()) cancel.run();
+        if (stopped) cancel.run();   // stop() ran on its own thread while this timer was armed
     }
 
     private void clearTimer() {

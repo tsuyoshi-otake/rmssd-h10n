@@ -252,7 +252,7 @@ public class BleLinkModelCheckTest {
         private int armedCount() { int n = 0; for (Timer t : timers) if (!t.done) n++; return n; }
         boolean quiescent() { return main.isEmpty() && exec.isEmpty() && rec.isEmpty() && !scanActive && !rebonding; }
 
-        boolean ready() { return quiescent() && linkFlag && field(UP, retry) && LINK_UP.contains(shown); }
+        boolean ready() { return quiescent() && linkFlag && phase(retry).equals("UP") && LINK_UP.contains(shown); }
 
         Act cooperativeStep() {
             if (cancelFails) return Act.CANCEL_FAILS;
@@ -264,7 +264,7 @@ public class BleLinkModelCheckTest {
             if (!rec.isEmpty()) return Act.REC_READY;
             if (session == Session.OPENING || session == Session.PARK) return Act.SDK_CONNECTS;
             if (armed() != null) return Act.TIMER;
-            if (field(HALTED, retry)) return Act.ADAPTER;   // the user acts on needs_action
+            if (phase(retry).equals("HALTED")) return Act.ADAPTER;   // the user acts on needs_action
             return null;
         }
 
@@ -280,7 +280,7 @@ public class BleLinkModelCheckTest {
             if (stopping && timersArmed > 0) return "timer armed after stop";
             if (!quiescent()) return null;
             if (stopping) return "stopped/user_or_service_stop".equals(shown) ? null : "stop not shown: " + shown;
-            boolean up = field(UP, retry), halted = field(HALTED, retry);
+            boolean up = phase(retry).equals("UP"), halted = phase(retry).equals("HALTED");
             if (linkFlag) {
                 if (!up) return "link up but supervisor not up";
                 if (!LINK_UP.contains(shown)) return "link up but shown " + shown;
@@ -301,8 +301,7 @@ public class BleLinkModelCheckTest {
             k.append(session).append(linkFlag ? 'L' : 'l').append(handled ? 'H' : 'h').append(stopping ? 'S' : 's')
              .append(cancelFails ? 'C' : 'c').append(connectFails ? 'F' : 'f').append(scanActive ? 'N' : 'n')
              .append(rebonding ? 'R' : 'r').append(stopPublished ? 'P' : 'p');
-            k.append("|r").append(field(UP, retry) ? 1 : 0).append(field(WAITING, retry) ? 1 : 0)
-             .append(field(HALTED, retry) ? 1 : 0).append(field(STOPPED, retry) ? 1 : 0).append(',').append(intField(ATTEMPT, retry));
+            k.append("|r").append(phase(retry)).append(field(STOPPED, retry) ? 1 : 0).append(',').append(intField(ATTEMPT, retry));
             Timer t = armed();
             k.append("|t").append(t == null ? "-" : String.valueOf(t.at - now)).append('/').append(armedCount());
             k.append("|m").append(main).append("|e");
@@ -318,8 +317,7 @@ public class BleLinkModelCheckTest {
     }
 
     // --- reflection on the real classes' state ------------------------------------------
-    private static final Field UP = field(BleConnectionRetry.class, "up"), WAITING = field(BleConnectionRetry.class, "waiting"),
-            HALTED = field(BleConnectionRetry.class, "halted"), STOPPED = field(BleConnectionRetry.class, "stopped"),
+    private static final Field PHASE = field(BleConnectionRetry.class, "phase"), STOPPED = field(BleConnectionRetry.class, "stopped"),
             ATTEMPT = field(BleConnectionRetry.class, "attempt"),
             CURRENT = field(BleStageReporter.class, "current"), BENEATH = field(BleStageReporter.class, "beneath");
     private static final Class<?> STAGE_CLASS = nested(BleStageReporter.class, "Stage");
@@ -339,4 +337,5 @@ public class BleLinkModelCheckTest {
     }
     static boolean field(Field f, Object o) { return (Boolean) get(f, o); }
     static int intField(Field f, Object o) { return (Integer) get(f, o); }
+    static String phase(BleConnectionRetry retry) { return ((Enum<?>) get(PHASE, retry)).name(); }
 }
