@@ -1,0 +1,79 @@
+/* Phone (or short window) held sideways: compress the chrome — the header is sticky
+   so its buttons stay reachable — and let the graphs grow with the viewport so the
+   chart is the focus. A tall landscape window (desktop browser) is layout-wide.css. */
+@media (orientation: landscape) and (max-height: 600px) {
+    header { padding: 8px 14px; gap: 9px; }
+    header h1 { font-size: 14px; }
+    #conn, #calib { font-size: 11px; }
+    #histInfo { display: none; }
+    .users .current { padding: 4px 9px; min-width: 27px; }
+
+    /* "Glance at the graph" mode: a left column (state + the numbers) beside the 15-minute
+       chart, which fills the rest of the first screen. Placement is explicit so the DOM
+       order (state, cards, actbar, title, filter, chart, trends...) does not matter.
+         row 1 (36px): chart title | metric chips       row 2: main chart
+         left column spans rows 1-2: state on top, cards stacked below it
+         row 3+: activity bar, then trend sections full width (auto-placed, in DOM order)
+       The left column's heights are fixed from the viewport (header 50px, state 76px) so it
+       never grows row 1; the chart and the cards then end at the same edge. */
+    .wrap { --ls-state: 76px; --ls-gap: 8px;
+        display: grid; grid-template-columns: minmax(236px, 288px) minmax(0, 1fr) auto;
+        grid-template-rows: 36px auto; column-gap: 12px; row-gap: var(--ls-gap); align-content: start; padding: 8px 16px 12px; }
+    .wrap > * { grid-column: 1 / -1; }
+    .state    { grid-column: 1; grid-row: 1 / 3; align-self: start; }
+    .cards    { grid-column: 1; grid-row: 1 / 3; align-self: end; }
+    .actbar + .section { grid-column: 2; grid-row: 1; }
+    .metricFilter      { grid-column: 3; grid-row: 1; justify-self: end; }
+    .chartbox:not(.trend) { grid-column: 2 / -1; grid-row: 2; }
+    .actbar   { grid-row: 3; }
+
+    /* state: label + detail + activity chip; the 2D map and its quadrant labels need more room than this */
+    .state { height: var(--ls-state); padding: 7px 12px 7px 14px; gap: 0; margin: 0; grid-template-columns: 1fr; align-content: center; }
+    .state .label { font-size: 17px; line-height: 1.25; }
+    .state .detail { font-size: 11px; margin-top: 1px; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; } /* one fixed line: detail length never shifts anything */
+    .anmeta { margin-top: 3px; height: 20px; overflow: hidden; flex-wrap: nowrap; white-space: nowrap; }
+    .anmap { display: none; }
+
+    /* numbers: a 2-col stack of compact cards filling the space under the state */
+    .cards { height: calc(100vh - 50px - 8px - 12px - var(--ls-state) - var(--ls-gap));
+        min-height: 150px; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 0; }
+    .card { padding: 5px 10px 4px 12px; min-width: 0; min-height: 36px; }
+    .card .label { font-size: 10px; letter-spacing: .04em; white-space: nowrap; }
+    .card .value { font-size: 22px; margin-top: 2px; white-space: nowrap; }
+    .card .unit { font-size: 10px; margin-left: 3px; }
+    .card .base { font-size: 10px; margin-top: 1px; min-height: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mini { grid-column: auto; padding: 5px 10px; gap: 2px; min-width: 0; }
+    .mini .row { min-width: 0; }
+    .mini .k { font-size: 10px; letter-spacing: .03em; white-space: nowrap; }
+    .mini .v { font-size: 13px; white-space: nowrap; }
+    .mini .v .unit { font-size: 9px; margin-left: 2px; }
+
+    /* chart row: title (shrinks with an ellipsis) + chips, each a 36px tap target */
+    .actbar + .section { margin: 0; min-width: 0; align-items: center; }
+    .actbar + .section .section-title { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+    #histInfo2 { display: none; }
+    .metricFilter { margin: 0; gap: 4px; flex-wrap: nowrap; }
+    .metricFilter .flab { display: none; }
+    .mchip { min-height: 36px; padding: 0 9px 0 8px; white-space: nowrap; }
+    .chartbox:not(.trend) { height: calc(100vh - 50px - 8px - 12px - 36px - var(--ls-gap)); min-height: 150px; padding: 10px; }
+    .actbar { margin-bottom: 4px; }
+
+    .chartbox.trend { height: 46vh; min-height: 180px; }
+    .section { margin: 14px 4px 6px; }
+    .daysel button, .zoom-open { min-height: 36px; }
+    .note { display: none; }
+}
+@media (orientation: landscape) and (max-height: 600px) {
+    .modal-bg { padding: 8px; }
+    .zoom-modal { width: 100%; height: calc(100vh - 16px); max-height: none; padding: 10px 12px; overflow: hidden; }
+    .zoom-head { margin-bottom: 6px; gap: 8px; }
+    .zoom-head h2 { font-size: 14px; }
+    .zoom-info { font-size: 11px; }
+    .zoom-chartbox { flex: 1 1 auto; height: auto; min-height: 0; padding: 8px; }
+    .zoom-controls { flex: none; margin-top: 8px; gap: 6px; }
+    .zoom-controls button { width: 34px; height: 30px; font-size: 17px; }
+    .zoom-controls .all { padding: 0 10px; }
+    .zoom-controls input[type="range"] { flex-basis: 160px; }
+    .zoom-controls .range-label { min-width: 54px; font-size: 11px; }
+}
+@media (orientation: landscape) and (max-height: 600px) { .grid { grid-template-columns: repeat(5, 1fr); } }

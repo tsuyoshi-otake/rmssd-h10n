@@ -144,6 +144,15 @@ public class HrvNativePlugin extends Plugin {
         call.resolve(ret);
     }
 
+    /** User-triggered clean reconnect of the H10 link. Resolves {result: "ok"|"not_running"|"cooldown"}. */
+    @PluginMethod
+    public void reconnect(PluginCall call) {
+        MonitorService s = MonitorService.INSTANCE;
+        JSObject ret = new JSObject();
+        ret.put("result", s != null ? s.nativeReconnect() : "not_running");
+        call.resolve(ret);
+    }
+
     @PluginMethod
     public void resetBaseline(PluginCall call) {
         MonitorService s = MonitorService.INSTANCE;

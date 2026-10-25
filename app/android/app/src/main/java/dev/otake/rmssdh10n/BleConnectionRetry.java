@@ -4,14 +4,38 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
 
-/** Owns one connection deadline/retry. All events except stop run on the BLE control lane. */
+/** Owns the link lifecycle: whether the link is up, the one connection deadline/retry, and
+ *  every link-level stage it reports. All events except stop run on the BLE control lane.
+ *
+ *  A backoff leaves nothing pending, so the link stands by: it may let the CPU sleep (#32)
+ *  and look for the device, whose sighting starts the next attempt at once instead of after
+ *  the backoff (#31). An attempt a sighting started that fails anyway is followed by one
+ *  backoff that does not watch, so a device that is seen but will not connect cannot hold the
+ *  link in back-to-back connect windows.
+ *
+ *  The Polar SDK posts deviceDisconnected for any session leaving OPEN/OPENING/OPEN_PARK,
+ *  including the session our own deadline cancel closes. Only the loss of an established
+ *  link is therefore reported as link_lost; the echo of a cancel or an intentional restart
+ *  is ignored, because the deadline/settle timer armed with it already owns the outcome. */
 final class BleConnectionRetry {
-    interface Timer { Runnable after(long delayMs, Runnable action); }
+    interface Timer {
+        /** Runs {@code action} after {@code delayMs}; the returned runnable cancels it.
+         *  {@code waking}: the CPU may sleep meanwhile (a backoff in standby), so the delay
+         *  must elapse in wall time through a suspend. */
+        Runnable after(long delayMs, boolean waking, Runnable action);
+    }
     interface Link {
         boolean connected();
         void connect() throws Exception;
         void cancel() throws Exception;
         void report(String stage, String reason, int attempt, long nextAt);
+        /** A backoff began: nothing is pending until {@link #resume}, so the CPU may sleep;
+         *  {@code watch}: look for the device and report it through {@link #sighted}. Must not
+         *  throw. */
+        void standby(boolean watch);
+        /** The backoff ended: stop looking and keep the CPU awake again. Called before any
+         *  native call or stage of the next owner. Must not throw. */
+        void resume();
     }
     static final long DEADLINE_MS = 60_000;
     private final Timer timer;
@@ -21,71 +45,153 @@ final class BleConnectionRetry {
     private final AtomicLong generation = new AtomicLong();
     private volatile boolean stopped;
     private volatile Runnable cancelTimer;
-    private boolean waiting;
+    /** Who owns the next step, as seen on the control lane: nothing yet (IDLE), a connect
+     *  deadline or restart settle (WAITING), the backoff timer or a sighting while the link
+     *  stands by (BACKOFF), the established link (UP), or nobody until the SDK connects or the
+     *  adapter restarts, because a native request could not be cancelled (HALTED). */
+    private enum Phase { IDLE, WAITING, BACKOFF, UP, HALTED }
+    private Phase phase = Phase.IDLE;
     private int attempt;
+    private boolean sightedAttempt;  // the last attempt was started by a sighting
+    private String stage, reason;   // the last link stage reported, for a stale connected()
+    private int stageAttempt;
+    private long stageNextAt;
 
     BleConnectionRetry(Timer timer, Link link, LongSupplier clock, DoubleSupplier jitter) {
         this.timer = timer; this.link = link; this.clock = clock; this.jitter = jitter;
     }
 
-    void request(String reason) {
-        if (stopped || waiting || link.connected()) return;
-        waiting = true;
+    void request(String reason) { begin(reason, false); }
+
+    private void begin(String reason, boolean sighted) {
+        if (stopped || phase != Phase.IDLE) return;
+        // The SDK got there first: own the link now instead of handing off to a queued
+        // connected() that may already be stale when the control lane reaches it.
+        if (link.connected()) { connected(); return; }
+        enter(Phase.WAITING);
+        sightedAttempt = sighted;
         attempt = Math.min(20, attempt + 1);
-        link.report("connecting", reason, attempt, clock.getAsLong() + DEADLINE_MS);
-        arm(DEADLINE_MS, () -> failed("connect_timeout"));
+        report("connecting", reason, attempt, clock.getAsLong() + DEADLINE_MS);
+        arm(DEADLINE_MS, false, () -> failed("connect_timeout"));
         try { if (!stopped) link.connect(); }
         catch (Exception error) { failed("connect_error"); }
     }
 
-    /** SDK owns its normal automatic reconnect; supervise that wait without a duplicate request. */
+    /** SDK link loss. An established link hands over to the SDK's own automatic reconnect,
+     *  supervised by a deadline without a duplicate request. */
     void disconnected() {
-        if (stopped || waiting) return;
-        waiting = true;
-        link.report("connecting", "sdk_reconnect", attempt, clock.getAsLong() + DEADLINE_MS);
-        arm(DEADLINE_MS, () -> failed("connect_timeout"));
+        if (stopped || phase != Phase.UP) return;
+        enter(Phase.WAITING);
+        sightedAttempt = false;
+        report("disconnected", "link_lost", attempt, 0);
+        report("connecting", "sdk_reconnect", attempt, clock.getAsLong() + DEADLINE_MS);
+        arm(DEADLINE_MS, false, () -> failed("connect_timeout"));
     }
 
+    /** The SDK reported a link. A report the control lane sees only after the link was
+     *  marked down again (an intentional restart, or the loss already processed on the main
+     *  thread) is stale: the deadline, settle or halt that owns the next step stays. The
+     *  recording lane may have shown that short-lived link meanwhile, so the owner's stage is
+     *  put back; an up supervisor is about to see the loss itself. */
     void connected() {
-        waiting = false; attempt = 0;
+        if (stopped) return;
+        if (!link.connected()) {
+            if (phase != Phase.UP && stage != null) link.report(stage, reason, stageAttempt, stageNextAt);
+            return;
+        }
+        boolean wasUp = phase == Phase.UP;
+        enter(Phase.UP); attempt = 0;
         clearTimer();
+        if (!wasUp) report("connected", "link_ready", 0, 0);
     }
 
-    /** An intentional clean disconnect has already settled before this explicit request. */
+    /** Intentional clean reconnect: tear the current link down and connect again once the
+     *  disconnect has had {@code settleMs} to settle. It never waits for the SDK's
+     *  disconnect callback, which arrives late or not at all on a wedged stack. */
+    void restart(String reason, long settleMs) {
+        if (stopped || phase == Phase.HALTED) return;
+        clearTimer();
+        enter(Phase.WAITING);
+        report("connecting", reason, attempt, clock.getAsLong() + settleMs + DEADLINE_MS);
+        if (!cancelled()) return;
+        arm(settleMs, false, () -> { enter(Phase.IDLE); request(reason); });
+    }
+
+    /** Connect afresh now (after a rebond). The SDK ignores connectToDevice unless its
+     *  session is closed, so whatever may still be pending — the SDK's own parked reconnect
+     *  or a connect of ours issued when a settle fired first — is cancelled before it. */
     void reconnect(String reason) {
-        if (stopped || link.connected()) return;
-        clearTimer(); waiting = false;
-        request(reason);
+        if (stopped || phase == Phase.HALTED || phase == Phase.UP || link.connected()) return;
+        clearTimer(); enter(Phase.IDLE);
+        if (cancelled()) request(reason);
     }
 
+    /** The standing-by link saw the device: connect now instead of waiting the backoff out.
+     *  Only a watching backoff is cut short; a sighting reported late, after the backoff ended,
+     *  finds another owner and is ignored. */
+    void sighted() {
+        if (stopped || phase != Phase.BACKOFF || sightedAttempt) return;
+        enter(Phase.IDLE);
+        begin("sighted", true);   // its deadline, or the link it finds up, ends the backoff timer
+    }
+
+    /** The Bluetooth adapter power-cycled: connect again immediately instead of after the
+     *  backoff, even from a halt. Power-off parks an open session, and the SDK ignores
+     *  connectToDevice on any session that is not closed, so the session is cancelled first
+     *  (this also covers a connect of ours issued after the adapter came back but before
+     *  this broadcast); the supervisor stays halted if that cancel fails. */
+    void adapterRestarted() {
+        if (stopped || phase == Phase.UP || link.connected()) return;
+        clearTimer(); enter(Phase.IDLE);
+        if (cancelled()) request("bt_on");
+    }
+
+    /** A deadline expired or a connect threw: cancel it and stand by through the backoff. */
     private void failed(String reason) {
         if (stopped) return;
         if (link.connected()) { connected(); return; }
         clearTimer();
-        try { link.cancel(); }
-        catch (Exception error) {
-            // Do not overlap a new connect with a request whose cancellation failed.
-            waiting = false;
-            link.report("needs_action", "connect_cancel_failed", attempt, 0);
-            stop();
-            return;
-        }
-        if (stopped) return;
-        long base = Math.min(240_000L, 30_000L << Math.min(3, Math.max(0, attempt - 1)));
+        if (!cancelled()) return;
+        long base = 30_000L << Math.min(3, Math.max(0, attempt - 1));   // 30 s .. 240 s
         long delay = (long) (base * (1 + Math.max(0, Math.min(1, jitter.getAsDouble())) * 0.25));
-        waiting = true;
-        link.report("retry_wait", reason, attempt, clock.getAsLong() + delay);
-        arm(delay, () -> { waiting = false; request("deadline_retry"); });
+        enter(Phase.BACKOFF);
+        report("retry_wait", reason, attempt, clock.getAsLong() + delay);
+        arm(delay, true, () -> { enter(Phase.IDLE); request("deadline_retry"); });
+        link.standby(!sightedAttempt);
     }
 
-    private void arm(long delay, Runnable action) {
+    /** Every way out of a backoff ends the standby first, so the next owner runs awake. */
+    private void enter(Phase next) {
+        Phase was = phase;
+        phase = next;
+        if (was == Phase.BACKOFF && next != Phase.BACKOFF) link.resume();
+    }
+
+    /** Cancel the pending native request. When that fails, halt: the SDK would ignore a new
+     *  connect on the session still open; a later SDK connection or an adapter restart ends
+     *  the halt. */
+    private boolean cancelled() {
+        try { link.cancel(); return !stopped; }
+        catch (Exception error) {
+            enter(Phase.HALTED);
+            report("needs_action", "connect_cancel_failed", attempt, 0);
+            return false;
+        }
+    }
+
+    private void report(String stage, String reason, int attempt, long nextAt) {
+        this.stage = stage; this.reason = reason; stageAttempt = attempt; stageNextAt = nextAt;
+        link.report(stage, reason, attempt, nextAt);
+    }
+
+    private void arm(long delay, boolean waking, Runnable action) {
         clearTimer();
         long token = generation.get();
-        Runnable cancel = timer.after(delay, () -> {
+        Runnable cancel = timer.after(delay, waking, () -> {
             if (!stopped && token == generation.get()) action.run();
         });
         cancelTimer = cancel;
-        if (stopped || token != generation.get()) cancel.run();
+        if (stopped) cancel.run();   // stop() ran on its own thread while this timer was armed
     }
 
     private void clearTimer() {

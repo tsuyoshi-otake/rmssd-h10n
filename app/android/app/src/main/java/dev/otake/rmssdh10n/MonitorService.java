@@ -45,6 +45,7 @@ public class MonitorService extends Service {
     public static final String ACTION_STOP_ENGINE  = "dev.otake.rmssdh10n.STOP_ENGINE";
     public static final String ACTION_SWITCH_USER  = "dev.otake.rmssdh10n.SWITCH_USER";
     public static final String ACTION_SWITCH_DEVICE = "dev.otake.rmssdh10n.SWITCH_DEVICE";
+    public static final String ACTION_RECONNECT   = "dev.otake.rmssdh10n.RECONNECT";
     public static final String EXTRA_MAC  = "mac";
     public static final String EXTRA_ACC  = "acc";
     public static final String EXTRA_USER = "user";
@@ -54,6 +55,7 @@ public class MonitorService extends Service {
     private static HrvEngine.Emitter sEmitter; // set by the plugin (WebView lifecycle)
 
     private PowerManager.WakeLock wakeLock;
+    private HrvEngine cpuOwner;   // the engine whose standby may let the CPU sleep (guarded by this)
     private HrvDb db;
     private HrvEngine engine;
     private TtsSpeaker tts; // relax-mode voice readout (created with the engine, on the main thread)
@@ -110,6 +112,14 @@ public class MonitorService extends Service {
             try { stopEngine(); } finally { stopSelf(); }
             return START_NOT_STICKY;
         }
+        if (intent != null && ACTION_RECONNECT.equals(intent.getAction())) {
+            // Notification button: act on a running engine only. Never start one here — the
+            // restore branch in handleIntent would, and a reconnect request is not a start.
+            HrvEngine running = engine;
+            if (running == null) { stopSelf(); return START_NOT_STICKY; }
+            Log.i(TAG, "reconnect action: " + running.requestReconnect());
+            return START_STICKY;
+        }
         if (!MonitorRecoveryJob.unlocked(this) || !MonitorRecoveryJob.permitted(this)) {
             stopSelf();
             return START_NOT_STICKY;
@@ -123,14 +133,7 @@ public class MonitorService extends Service {
                 startForeground(NOTIF_ID, n);
             }
 
-            if (wakeLock == null) {
-                PowerManager pm = getSystemService(PowerManager.class);
-                if (pm != null) {
-                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rmssd:monitor");
-                    wakeLock.setReferenceCounted(false);
-                    wakeLock.acquire();
-                }
-            }
+            createWakeLock();
 
             handleIntent(intent);
             if (engine != null) return START_STICKY;
@@ -142,20 +145,51 @@ public class MonitorService extends Service {
         return START_NOT_STICKY;
     }
 
+    private synchronized void createWakeLock() {
+        if (wakeLock != null) return;
+        PowerManager pm = getSystemService(PowerManager.class);
+        if (pm == null) return;
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rmssd:monitor");
+        wakeLock.setReferenceCounted(false);
+        wakeLock.acquire();
+    }
+
+    /** Keeps the CPU awake for {@code owner}. Let go while its link stands by in a backoff
+     *  with nothing pending (#32): the backoff's alarm or a sighting of the H10 wakes the CPU,
+     *  and the link takes the lock back as it resumes. A stopped engine's late report is
+     *  ignored once another engine owns the CPU, and synchronization with onDestroy keeps a
+     *  late resume from re-acquiring a lock that was already dropped. */
+    private synchronized void keepCpuAwake(HrvEngine owner, boolean awake) {
+        if (wakeLock == null || owner != cpuOwner) return;
+        if (awake) wakeLock.acquire();
+        else if (wakeLock.isHeld()) wakeLock.release();
+    }
+
+    private synchronized void ownCpu(HrvEngine owner) {
+        cpuOwner = owner;
+        keepCpuAwake(owner, true);   // a previous engine may have let go while standing by
+    }
+
     /** The notification distinguishes process survival from real collection. */
     private Notification buildNotification(CollectionState state) {
         Intent open = new Intent(this, MainActivity.class);
         int piFlags = PendingIntent.FLAG_UPDATE_CURRENT
                 | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
         PendingIntent pi = PendingIntent.getActivity(this, 0, open, piFlags);
-        return new NotificationCompat.Builder(this, CHANNEL)
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL)
                 .setContentTitle("RMSSD モニタリング")
                 .setContentText(state.text)
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setOngoing(true)
                 .setContentIntent(pi)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build();
+                .setPriority(NotificationCompat.PRIORITY_LOW);
+        // A reconnect only helps while no fresh RR flows; PAIRING needs the pairing dialog instead.
+        if (state == CollectionState.STALLED || state == CollectionState.WARMING
+                || state == CollectionState.WAITING) {
+            Intent reconnect = new Intent(this, MonitorService.class).setAction(ACTION_RECONNECT);
+            b.addAction(0, "再接続", PendingIntent.getService(this, 1, reconnect, piFlags));
+        }
+        return b.build();
     }
 
     /** Called only on collection-state changes; NotificationManager is thread-safe. */
@@ -239,6 +273,9 @@ public class MonitorService extends Service {
         if (tts == null) tts = new TtsSpeaker(getApplicationContext());
         engine.setSpeaker(tts);
         engine.setLinkStateSink(this::updateNotification); // surface a stalled link in the notification
+        HrvEngine started = engine;
+        started.setStandbySink(standby -> keepCpuAwake(started, !standby));
+        ownCpu(started);
         engine.setPowerSave("1".equals(db().kvGet("powerSave"))); // 省電力モード（kv未設定=既定OFF=ACC連続・歩数あり）
         engine.setPostureEnabled(!"0".equals(db().kvGet("postureEnabled"))); // 姿勢推定（kv未設定=既定ON）。OFFでACC停止＝H10電池節約
         engine.setBreathingAlertVoice(!"0".equals(db().kvGet("breathingAlertVoice"))); // 既定ON。設定でOFF可
@@ -252,6 +289,8 @@ public class MonitorService extends Service {
     public boolean nativeSetSupineRef() { return engine != null && engine.setSupineRef(); }
     public Boolean nativeToggleSleepLR() { return engine != null ? engine.toggleSleepLR() : null; }
     // Baseline + RR-log controls routed from the plugin (no-op if engine off).
+    /** "ok" | "not_running" | "cooldown" (see {@link HrvEngine#requestReconnect()}). */
+    public String nativeReconnect() { return engine != null ? engine.requestReconnect() : "not_running"; }
     public boolean nativeResetBaseline() { if (engine == null) return false; engine.resetBaseline(); return true; }
     public boolean nativeSetBaseline(double r, double h) { return engine != null && engine.setBaseline(r, h); }
     public String nativeRrLog() { return engine != null ? engine.rrLogJson() : "[]"; }
@@ -316,8 +355,10 @@ public class MonitorService extends Service {
         try { if (tts != null) tts.shutdown(); }
         catch (RuntimeException failure) { Log.w(TAG, "speech cleanup failed", failure); }
         finally { tts = null; }
-        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-        wakeLock = null;
+        synchronized (this) {
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+            wakeLock = null;
+        }
         if (INSTANCE == this) INSTANCE = null;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(Service.STOP_FOREGROUND_REMOVE);

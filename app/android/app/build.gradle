@@ -26,6 +26,13 @@ android {
         // android.util.Log etc. are stubs that throw in JVM unit tests; return defaults
         // (no-op) so pure logic that happens to log is testable. org.json stays real (see deps).
         unitTests.returnDefaultValues = true
+        // BleLinkModelCheckTest depth: ./gradlew :app:testDebugUnitTest -Dble.mc.depth=13
+        // (its visited states live in memory: the default depth 11 holds ~3.9 M of them).
+        unitTests.all {
+            def depth = System.getProperty('ble.mc.depth')
+            maxHeapSize = '3g'
+            if (depth) { systemProperty 'ble.mc.depth', depth; maxHeapSize = '12g' }
+        }
     }
 }
 
@@ -60,7 +67,8 @@ dependencies {
 apply from: 'capacitor.build.gradle'
 
 tasks.withType(Test).configureEach {
-    timeout = java.time.Duration.ofMinutes(3)
+    // A deeper BLE model check (-Dble.mc.depth) runs for minutes; the default suite stays bounded.
+    timeout = java.time.Duration.ofMinutes(System.getProperty('ble.mc.depth') ? 20 : 3)
     maxParallelForks = 1
 }
 

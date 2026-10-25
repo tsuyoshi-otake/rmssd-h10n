@@ -1,0 +1,57 @@
+/* Phone held upright. Loaded after the base styles in index.html; owns only the
+   portrait overrides. Goal: state + RMSSD/HR/resp cards + the start of the main chart
+   fit the first screen (411x917) without scrolling. */
+@media (orientation: portrait) {
+    header { padding: 6px 14px; gap: 9px; }
+    header h1 { font-size: 14px; }
+    header h1 .lbl-full { display: none; } header h1 .lbl-short { display: inline; }
+    #conn { display: none; } /* connection shown by the brand mark to save width */
+    #histInfo { display: none; }
+    #menuBtn { min-height: 40px; }                                         /* tap target */
+    .users .current { padding: 0 9px; min-width: 34px; min-height: 34px; }
+    .wrap { padding: 12px 13px 18px; }
+
+    /* state card: label + detail beside a small anmap, meta line full width below.
+       .body is flattened (display: contents) so its children can take grid areas. */
+    .state { grid-template-columns: minmax(0, 1fr) clamp(112px, 32vw, 128px);
+      grid-template-rows: auto 1fr auto;
+      grid-template-areas: "label map" "detail map" "meta meta";
+      gap: 4px 12px; align-items: start; padding: 12px 14px 12px 18px; margin-bottom: 10px; }
+    .state .body { display: contents; }
+    .state .label { grid-area: label; font-size: 21px; line-height: 1.25; white-space: normal; } /* a long label (キャリブレーション中) wraps instead of clipping; 2 lines still fit beside the map */
+    .state .detail { grid-area: detail; font-size: 12px; margin-top: 0; min-height: 4.5em; } /* reserve 3 lines so detail length never shifts the cards below */
+    .anmeta { grid-area: meta; margin-top: 4px; min-height: 2.8em; align-content: flex-start; } /* reserve so wrapping meta doesn't shift the cards */
+    .anmap { grid-area: map; align-self: center; max-height: none; max-width: none; margin: 0; }
+    .anmap .lab.top { top: 18px; }                                         /* below the corner labels now that the map is small */
+    .anmap .q { padding: 2px 3px; }
+
+    /* cards: RMSSD / HR / resp in one row of three (unit under the value so the digits
+       never wrap), posture + steps two-up, SDNN/RMSSD 5分/RR as one full-width strip */
+    .cards { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+    .card { padding: 10px 12px; grid-column: span 3; }
+    .card:nth-child(-n+3) { grid-column: span 2; padding: 10px 9px 10px 12px; }
+    .card .label { font-size: 10px; letter-spacing: .04em; white-space: nowrap; }
+    .card .value { font-size: 24px; margin-top: 5px; }
+    .card .unit { display: block; margin: 3px 0 0; font-size: 11px; line-height: 14px; }
+    .card .base { font-size: 10px; line-height: 1.35; margin-top: 5px; min-height: 2.7em; } /* reserve 2 lines: "基準 42.0ms ▲ +3.2" wraps in the narrow cards */
+    .mini { grid-column: 1 / -1; flex-direction: row; justify-content: space-between; padding: 8px 14px; gap: 8px; }
+    .mini .row { flex: 1 1 0; min-width: 0; flex-direction: column; align-items: flex-start; gap: 2px; } /* equal-width cells: value digit-count changes don't re-space the row */
+    .mini .k { white-space: nowrap; letter-spacing: .03em; }
+    .mini .v { font-size: 18px; }
+
+    .actbar { padding: 8px 12px; margin-bottom: 4px; }
+    .actbar .start { min-height: 40px; }
+
+    .section { margin: 14px 4px 6px; align-items: center; }
+    .section.sub { margin: 10px 4px 4px; }
+    .daysel button { width: 40px; height: 40px; font-size: 18px; }        /* tap target */
+    .zoom-open { min-height: 40px; padding: 3px 12px; }
+    .metricFilter { flex-wrap: nowrap; gap: 5px; margin: 0 0 8px; }
+    .metricFilter .flab { margin-right: 0; white-space: nowrap; }
+    .mchip { flex: 1 1 auto; justify-content: center; min-height: 40px; padding: 0 6px; gap: 4px; }
+
+    /* Chart.js fills its box: height follows the screen, with a floor and a cap */
+    .chartbox { height: clamp(240px, 36vh, 340px); padding: 10px; }
+    .chartbox.trend { height: clamp(180px, 24vh, 240px); }
+}
+@media (orientation: portrait) and (max-width: 520px) { .grid { grid-template-columns: repeat(3, 1fr); } }

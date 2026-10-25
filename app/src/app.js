@@ -401,6 +401,7 @@ const hostBridge = {
   setPostureRef: () => useNative ? HrvNative.setPostureRef() : monitor.setPostureReference(), // -> { ok }
   setSupineRef: () => useNative ? HrvNative.setSupineRef() : monitor.setSupineReference(), // -> { ok }
   toggleSleepLR: () => useNative ? HrvNative.toggleSleepLR() : monitor.toggleSleepLR(), // -> { ok, swap }
+  reconnect: () => useNative ? HrvNative.reconnect() : ({ result: 'not_running' }), // -> { result: ok|not_running|cooldown }
   setOrientation: (mode) => applyOrientation(mode), // 'auto' | 'portrait' | 'landscape'
   setRelaxVoice: (sec) => useNative ? HrvNative.setRelaxVoice({ sec }) : ({ ok: false }), // native TTS readout interval (s; 0=off)
   setBreathingAlert: (on) => useNative ? HrvNative.setBreathingAlert({ on }) : ({ ok: false }), // native TTS warning: low RMSSD + shallow breathing
@@ -517,6 +518,7 @@ function makeRemoteBridge() {
     setPostureRef: () => ({ ok: false }),
     setSupineRef: () => ({ ok: false }),
     toggleSleepLR: () => ({ ok: false }),
+    reconnect: () => ({ result: 'not_running' }), // native-only (BLE); remote view can't drive it
     setOrientation: noop,
     setRelaxVoice: () => ({ ok: false }), // native-only (host TTS); remote view can't drive it
     setBreathingAlert: () => ({ ok: false }), // native-only (host TTS); remote view can't drive it

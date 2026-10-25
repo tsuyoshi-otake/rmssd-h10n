@@ -1,6 +1,7 @@
 package dev.otake.rmssdh10n;
 
 import android.content.Context;
+import android.os.SystemClock;
 import android.util.Log;
 
 import com.polar.sdk.api.PolarBleApi;
@@ -54,9 +55,11 @@ import io.reactivex.rxjava3.disposables.Disposable;
  *    an OS kill leaves it active so the next launch recovers the gap.
  *
  * The SDK handles ordinary automatic reconnect. {@link BleConnectionRetry} bounds
- * silent connect/search waits and reissues them with backoff. Screen-off scanning
- * remains subject to Android/SDK restrictions; backfill covers delayed reconnects
- * when an H10 recording was successfully started before the gap.
+ * silent connect/search waits and reissues them with backoff. During a backoff the link
+ * stands by: {@link PresenceWatch} looks for the H10 so its return starts the next attempt at
+ * once (#31), and the engine lets the CPU sleep, with {@link WakeupTimer} ending the backoff
+ * on time through a suspend (#32). Backfill covers delayed reconnects when an H10 recording
+ * was successfully started before the gap.
  */
 public final class PolarBle {
     private static final String TAG = "PolarBle";
@@ -90,6 +93,10 @@ public final class PolarBle {
         /** Structured, bounded connection/recovery telemetry. Device identifiers and RR
          *  payloads must never be placed in these fields. */
         default void onStage(String stage, String reason, int attempt, long nextRetryAt) {}
+        /** The link stands by in a backoff with nothing pending ({@code true}), so the CPU may
+         *  sleep, or has resumed and needs it again ({@code false}). Called on the control
+         *  lane; never after stop. */
+        default void onStandby(boolean standby) {}
     }
 
     /** Persistence + recovery hooks, implemented by {@link HrvEngine} over {@link HrvDb}.
@@ -161,8 +168,7 @@ public final class PolarBle {
     private int recordingAttempt = 0;                 // recording-worker only — PFTP retry counter
     private int recoveryReconnects = 0;               // recording-worker only — bounded forced reconnects on stuck PFTP
     private boolean rebondTried = false;              // recording-worker only — one OS bond reset per stuck episode
-    private long lastBondPromptAt = 0;                // recording-worker only — rate-limits OS pairing dialogs
-    private static final long BOND_PROMPT_MIN_MS = 10 * 60_000L; // one pairing prompt per 10 min at most
+    private final PairingPrompt pairing;              // one prompt budget for every lane that can ask to pair
     // Engine-provided "is live RR actually stale right now?" — consulted at the moment a
     // watchdog action RUNS (exec can lag behind the tick that queued it by a whole PFTP op).
     private volatile java.util.function.BooleanSupplier rrStale = () -> true;
@@ -178,14 +184,26 @@ public final class PolarBle {
     // fires on the SDK callback thread while nudgeStreams runs on exec; without this the
     // check-then-set on hrDis/accDis could double-subscribe and double-count RR.
     private final Object streamLock = new Object();
+    // Link-level stages come only from connectionRetry on exec; recording-lane stages are
+    // published only while their link generation is current (see recordingStage).
+    private final BleStageReporter stages;
     private final BleConnectionRetry connectionRetry;
+    private final WakeupTimer wakeups;        // backoff delays that elapse through a CPU suspend
+    private final PresenceWatch presence;     // looks for the H10 while a backoff stands by
+    private static final long RESTART_SETTLE_MS = 3000;  // explicit disconnect → reconnect gap
+    private static final long REBOND_HOLD_MS = 45_000;   // covers PolarBonding.rebond's bounded waits
+    private static final long PAIRING_HOLD_MS = 75_000;  // covers PolarBonding.ensureBonded's two bounded waits
 
     public PolarBle(Context ctx, String mac, boolean withAcc, Sink sink) {
         this.ctx = ctx.getApplicationContext();
         this.id = mac;
         this.withAcc = withAcc;
         this.sink = sink;
-        connectionRetry = new BleConnectionRetry((delay, action) -> {
+        pairing = new PairingPrompt(SystemClock::elapsedRealtime, () -> PolarBonding.userCanAnswerPrompt(this.ctx));
+        stages = new BleStageReporter(sink::onStage);
+        wakeups = new WakeupTimer(this.ctx, exec);
+        connectionRetry = new BleConnectionRetry((delay, waking, action) -> {
+            if (waking) return wakeups.after(delay, action);
             java.util.concurrent.ScheduledFuture<?> future = exec.schedule(action, delay, TimeUnit.MILLISECONDS);
             return () -> future.cancel(false);
         }, new BleConnectionRetry.Link() {
@@ -193,10 +211,20 @@ public final class PolarBle {
             public void connect() throws Exception { if (!stopping && api() != null) api().connectToDevice(id); }
             public void cancel() throws Exception { if (!stopping && api() != null) api().disconnectFromDevice(id); }
             public void report(String state, String reason, int attempt, long nextAt) {
-                stage(state, reason, attempt, nextAt);
+                stages.report(state, reason, attempt, nextAt);
                 sink.log(state + ": " + reason + " attempt=" + attempt);
             }
+            public void standby(boolean watch) {
+                if (stopping) return;
+                if (watch) presence.start();
+                sink.onStandby(true);
+            }
+            public void resume() {
+                presence.stop();
+                if (!stopping) sink.onStandby(false);
+            }
         }, System::currentTimeMillis, Math::random);
+        presence = new PresenceWatch(this.ctx, mac, () -> execSafe(() -> connectionRetry.sighted()), sink::log);
     }
 
     public void setRecordingStore(RecordingStore s) { this.recordingStore = s; }
@@ -208,6 +236,10 @@ public final class PolarBle {
      *  start ours — surfaced to the UI rather than silently deleting it. */
     public boolean isExternalBlocking() { return externalBlocking; }
 
+    /** Whether the phone holds an OS bond for this H10 (without one, an H10 that demands an
+     *  encrypted link delivers no RR until the user accepts a pairing). */
+    public boolean isBonded() { return PolarBonding.isBonded(ctx, id); }
+
     /** True when ACC is being duty-cycled for power saving — steps can't be counted
      *  accurately from short bursts, so the engine omits them. */
     public boolean accDutyCycled() { return withAcc && accEnabled && accDutyCycle; }
@@ -216,9 +248,9 @@ public final class PolarBle {
         exec.execute(() -> {
             try {
                 if (stopping) return;
-                // Live HR does not require a bond. Pair only inside the deferred recording
-                // worker; otherwise ensureBonded can outlive stop() and create an SDK client
-                // after shutdown was requested (#14).
+                // Pairing (pairIfDue) starts only after the SDK client is published, so stop()
+                // owns that client and interrupts the bond wait; bonding before publishing could
+                // outlive stop() and create a client after shutdown was requested (#14).
                 Set<PolarBleApi.PolarBleSdkFeature> features = EnumSet.of(
                         PolarBleApi.PolarBleSdkFeature.FEATURE_HR,
                         PolarBleApi.PolarBleSdkFeature.FEATURE_POLAR_ONLINE_STREAMING,
@@ -244,8 +276,8 @@ public final class PolarBle {
                     try { value.shutDown(); } catch (Throwable ignored) {}
                 })) return;
                 sink.log("connecting " + id);
-                stage("connecting", "initial", 1, 0);
                 connectionRetry.request("initial");
+                pairIfDue();
             } catch (Throwable t) {
                 sink.log("start failed: " + t.getMessage());
             }
@@ -253,10 +285,36 @@ public final class PolarBle {
     }
 
     /** App returned to foreground — nudge the SDK to restart its BLE scan (it can't
-     *  start a scan while the display is off), so a lost connection re-establishes. */
+     *  start a scan while the display is off), so a lost connection re-establishes. An
+     *  unbonded H10 that delivers no RR may be waiting on a pairing only the user can grant,
+     *  and now they can (#30). */
     public void foregroundEntered() {
         PolarBleApi a = api();
         if (a != null) { try { a.foregroundEntered(); } catch (Throwable ignored) {} }
+        execSafe(this::pairIfDue);
+    }
+
+    /** Pair an unbonded H10 that delivers no RR while the user can answer the prompt (#30).
+     *  An H10 that demands an encrypted link sends its own pairing request on every connect.
+     *  Android shows it as a dialog only once this app has called createBond for the device
+     *  and is in front; until then it is a notification, SMP times out, and the SDK's
+     *  automatic reconnect raises it again. createBond cannot start while that request is in
+     *  flight, so, like the bond reset, the link is held down through connectionRetry first;
+     *  the bond runs on the recording lane (where PFTP's pairing prompt runs too, so the two
+     *  never overlap) and a reconnect follows it, while the hold timer reconnects if the bond
+     *  hangs. On the moto g05 the createBond itself timed out without a prompt and the H10's
+     *  request on that reconnect came up as the dialog. A link whose RR flows needs no bond
+     *  for live data — the recording lane asks for one then. Must run on exec. */
+    private void pairIfDue() {
+        if (stopping || api() == null || PolarBonding.isBonded(ctx, id)) return;
+        if (!rrStale.getAsBoolean() || !pairing.claim()) return;
+        sink.log("not bonded — holding the link and requesting OS pairing (accept the dialog on the phone)");
+        markLinkDown();
+        connectionRetry.restart("pairing", PAIRING_HOLD_MS);
+        recordingSafe(() -> {
+            PolarBonding.ensureBonded(ctx, id, sink::log);
+            execSafe(() -> connectionRetry.reconnect("pairing"));
+        });
     }
 
     /** See {@link #rrStale}. Wire before {@link #start()}. */
@@ -268,7 +326,7 @@ public final class PolarBle {
         execSafe(() -> {
             if (stopping || api() == null || linkConnected) return;
             sink.log("bluetooth adapter restarted — re-issuing connect");
-            connectionRetry.request("bt_on");
+            connectionRetry.adapterRestarted();
         });
     }
 
@@ -289,7 +347,8 @@ public final class PolarBle {
             return;
         }
         AtomicBoolean terminal = new AtomicBoolean(false);
-        stage("scanning", "device_selection", 0, System.currentTimeMillis() + seconds * 1000L);
+        // An overlay: when the scan ends, the link stage it covered is shown again.
+        stages.beginOverlay("scanning", "device_selection", 0, System.currentTimeMillis() + seconds * 1000L);
         try {
             selectionScanDis = a.searchForDevice()
                 .filter(info -> info.isConnectable() && info.getHasHeartRateService())
@@ -298,20 +357,18 @@ public final class PolarBle {
                 .toList()
                 .doFinally(() -> {
                     selectionScanDis = null;
+                    stages.endOverlay();   // before the flag frees, so a next scan's overlay survives
                     selectionScanActive.set(false);
                     if (terminal.compareAndSet(false, true))
                         fail.accept(new IllegalStateException("H10 scan was cancelled"));
                 })
                 .subscribe(list -> {
-                    if (!terminal.compareAndSet(false, true)) return;
-                    if (linkConnected) stage("connected", "selection_scan_complete", 0, 0);
-                    ok.accept(list);
+                    if (terminal.compareAndSet(false, true)) ok.accept(list);
                 }, error -> {
-                    if (!terminal.compareAndSet(false, true)) return;
-                    if (linkConnected) stage("connected", "selection_scan_failed", 0, 0);
-                    fail.accept(error);
+                    if (terminal.compareAndSet(false, true)) fail.accept(error);
                 });
         } catch (Throwable error) {
+            stages.endOverlay();
             selectionScanActive.set(false);
             if (terminal.compareAndSet(false, true)) fail.accept(error);
         }
@@ -331,14 +388,27 @@ public final class PolarBle {
         return !stopping && api() != null && linkConnected && gen == connGen.get();
     }
 
-    private void stage(String value, String reason, int attempt, long nextRetryAt) {
-        try { sink.onStage(value, reason, attempt, nextRetryAt); } catch (Throwable ignored) {}
+    /** Recording-lane stage: published only while {@code gen} is still the live link, so a job
+     *  of a dropped link can never overwrite the reconnect state that replaced it. */
+    private void recordingStage(int gen, String value, String reason, int attempt, long nextRetryAt) {
+        stages.reportIf(() -> currentRecordingJob(gen), value, reason, attempt, nextRetryAt);
+    }
+
+    /** The link is gone, as reported by the SDK or because we tore it down. Advancing the
+     *  generation supersedes the old link's recording jobs and their stage writes. */
+    private void markLinkDown() {
+        linkConnected = false;
+        connGen.incrementAndGet();
+        recordingHandledThisConn.set(false);
+        disposeStreams();  // streamLock-guarded; safe vs a concurrent startHr on exec
+        sink.onConnected(false);
     }
 
     /** Re-subscribe the live streams when the link is 'connected' but no data is flowing
      *  (a stream subscription errored). Gentle on purpose: it does NOT disconnect — an
      *  explicit disconnect won't auto-reconnect (the SDK treats it as intentional) and a
-     *  reconnect needs a scan, which can't run with the screen off; repeated disconnect
+     *  reconnect needs a scan, and Android returns nothing to an unfiltered scan while the
+     *  screen is off (PresenceWatch's address filter is exempt); repeated disconnect
      *  churn also wedges the BLE scanner. If the H10 is truly orphaned (after a force-stop /
      *  abrupt kill), only a Bluetooth toggle clears it. Driven by HrvEngine's watchdog. */
     public void nudgeStreams() {
@@ -360,13 +430,21 @@ public final class PolarBle {
      *  fresh link does. Force one clean disconnect→reconnect; the caller (HrvEngine watchdog)
      *  bounds how many times this runs per stale episode so churn can't wedge the scanner. */
     public void forceReconnect() {
-        execSafe(() -> cleanReconnect(true));
+        execSafe(() -> cleanReconnect("stall", true));
+    }
+
+    /** User-requested clean reconnect (dashboard button / notification action). Same path as
+     *  the watchdog's forced reconnect, but without the RR-stale re-check: the user asked. */
+    public void userReconnect() {
+        execSafe(() -> cleanReconnect("user", false));
     }
 
     public void stop() {
         stopping = true;
         connectionRetry.stop();
-        stage("stopped", "user_or_service_stop", 0, 0);
+        presence.close();
+        wakeups.close();
+        stages.stop("user_or_service_stop");
         recordingActive = false;
         disposeStreams();
         Disposable scan = selectionScanDis; selectionScanDis = null;
@@ -395,13 +473,14 @@ public final class PolarBle {
     private final PolarBleApiCallback callback = new PolarBleApiCallback() {
         @Override public void deviceConnected(PolarDeviceInfo info) {
             if (stopping) return;
+            // New generation before the link reads as up, so no job of a prior link can pass
+            // currentRecordingJob in between.
+            connGen.incrementAndGet();              // supersede retries scheduled under a prior connection
+            recordingHandledThisConn.set(false);
             linkConnected = true;
             execSafe(connectionRetry::connected);
-            recordingHandledThisConn.set(false);
-            connGen.incrementAndGet();              // supersede retries scheduled under a prior connection
             recordingSafe(() -> recordingAttempt = 0); // recording counters stay on recordingExec
             sink.onConnected(true);
-            stage("connected", "link_ready", 0, 0);
             sink.log("connected " + info.getDeviceId());
         }
         @Override public void deviceConnecting(PolarDeviceInfo info) {
@@ -409,12 +488,10 @@ public final class PolarBle {
         }
         @Override public void deviceDisconnected(PolarDeviceInfo info) {
             if (stopping) return;
-            linkConnected = false;
+            // Also fires for a pending connect we cancelled; connectionRetry tells the loss of
+            // an established link (link_lost) from that echo.
+            markLinkDown();
             execSafe(connectionRetry::disconnected);
-            sink.onConnected(false);
-            stage("disconnected", "link_lost", 0, 0);
-            recordingHandledThisConn.set(false);
-            disposeStreams();  // streamLock-guarded; safe vs a concurrent startHr on exec
             sink.log("disconnected");
         }
         @Override public void bleSdkFeatureReady(String identifier, PolarBleApi.PolarBleSdkFeature feature) {
@@ -434,8 +511,9 @@ public final class PolarBle {
                         // and the H10 returns OPERATION_NOT_PERMITTED(106) until it settles.
                         final int gen = connGen.get();   // this connection's generation
                         if (!stopping) {
-                            stage("recording_wait", "streams_settling", 0,
-                                    System.currentTimeMillis() + RECORDING_DEFER_S * 1000L);
+                            final long next = System.currentTimeMillis() + RECORDING_DEFER_S * 1000L;
+                            // Via exec: ordered after the link_ready that deviceConnected queued there.
+                            execSafe(() -> recordingStage(gen, "recording_wait", "streams_settling", 0, next));
                             scheduleRecording(() -> runRecordingOnConnect(gen), RECORDING_DEFER_S, TimeUnit.SECONDS);
                         }
                     }
@@ -643,7 +721,7 @@ public final class PolarBle {
             } else if (active.kind == RecordingOwnership.Kind.FOREIGN) {
                 externalBlocking = true;
                 sink.log("foreign recording active (" + active.identifier + ") — leaving the slot untouched");
-                stage("needs_action", "foreign_recording", 0, 0);
+                recordingStage(gen, "needs_action", "foreign_recording", 0, 0);
                 return;
             }
             RecordingStore store = recordingStore;
@@ -660,7 +738,7 @@ public final class PolarBle {
                     && (open == null || !active.identifier.equals(open.exId))) {
                 externalBlocking = true;
                 sink.log("untracked active rmssd recording — preserving it");
-                stage("needs_action", "recording_anchor_missing", 0, 0);
+                recordingStage(gen, "needs_action", "recording_anchor_missing", 0, 0);
                 return;
             }
             if (retry == RetryKind.NONE && open != null) {
@@ -682,6 +760,8 @@ public final class PolarBle {
                     sink.log(slot == SlotClass.FOREIGN
                             ? "external recording present — not starting (slot not ours)"
                             : "untracked rmssd recording present — preserving it; recovery metadata is missing");
+                    recordingStage(gen, "needs_action",
+                            slot == SlotClass.FOREIGN ? "foreign_slot" : "recording_anchor_missing", 0, 0);
                     return; // never auto-delete a foreign or unanchored device payload
                 } else {
                     externalBlocking = false;
@@ -694,88 +774,102 @@ public final class PolarBle {
             sink.log("recording-on-connect failed: " + t.getMessage());
             retry = RetryKind.PFTP;
         }
+        // A job of a dropped link owns nothing any more: the new link's job resets the
+        // counters and reports the stage. Finishing here keeps the per-episode bounds intact.
+        if (!currentRecordingJob(gen)) return;
         if (retry == RetryKind.NONE) {
             recordingAttempt = 0; recoveryReconnects = 0; rebondTried = false;
-            stage("streaming", "recording_ready", 0, 0);
+            recordingStage(gen, "streaming", "recording_ready", 0, 0);
             return;
         }
-        if (currentRecordingJob(gen)) {
-            RecordingRecoveryPolicy.Failure failure = retry == RetryKind.STORAGE
-                    ? RecordingRecoveryPolicy.Failure.STORAGE : RecordingRecoveryPolicy.Failure.PFTP;
-            RecordingRecoveryPolicy.Action action = RecordingRecoveryPolicy.decide(failure,
-                    recordingAttempt, MAX_RECORDING_ATTEMPTS, recoveryReconnects,
-                    MAX_RECOVERY_RECONNECTS, lastPftpFailure == PftpFailure.AUTHORIZATION,
-                    !rrStale.getAsBoolean(), rebondTried);
-            if (action == RecordingRecoveryPolicy.Action.RETRY) {
-                recordingAttempt++;
-                String reason = retry == RetryKind.STORAGE ? "storage_retry" : "pftp_retry";
-                sink.log("recording " + reason + " " + recordingAttempt + "/" + MAX_RECORDING_ATTEMPTS
-                        + " in " + RETRY_DELAY_S + "s");
-                long next = System.currentTimeMillis() + RETRY_DELAY_S * 1000L;
-                stage("retry_wait", reason, recordingAttempt, next);
-                scheduleRecording(() -> runRecordingOnConnect(gen), RETRY_DELAY_S, TimeUnit.SECONDS);
-            } else if (action == RecordingRecoveryPolicy.Action.PAUSE_STORAGE) {
-                // Disk/DB failures cannot be repaired by touching BLE. Preserve the H10 slot
-                // and finish in an observable state until a later reconnect/app restart retries.
-                stage("needs_action", "storage_unavailable", recordingAttempt, 0);
-                sink.log("recording recovery paused — local storage unavailable; H10 slot preserved");
-            } else if (action == RecordingRecoveryPolicy.Action.RECONNECT) {
-                // PFTP stayed 106 through every retry on THIS link. A phone-side abrupt drop
-                // (e.g. a Bluetooth toggle after a force-stop) can wedge the H10's PFTP so it
-                // never clears on the same connection — only a fresh link does (what re-strapping
-                // the H10 achieves). Force one clean reconnect and let recovery retry on the fresh
-                // connection (recordingAttempt resets in deviceConnected).
-                recoveryReconnects++;
-                sink.log("recording stuck after retries — forcing clean reconnect "
-                        + recoveryReconnects + "/" + MAX_RECOVERY_RECONNECTS);
-                execSafe(this::forceReconnectForRecording);
-            } else if (action == RecordingRecoveryPolicy.Action.REBOND) {
-                // Fresh links didn't help either. RR flowing while PFTP still fails is the
-                // signature of a one-sided bond loss (H10 battery pull / reset while the phone
-                // still reports BONDED) — only re-pairing fixes that. A wedged sensor has stale
-                // RR too, and rebonding THEN would destroy a good bond for nothing and leave an
-                // unbonded reconnect loop spamming OS pairing dialogs — so the gate stays open
-                // until RR proves the sensor alive. One reset per stuck episode.
-                rebondTried = true;
-                sink.log("recording still stuck with live RR — resetting the OS bond and reconnecting");
-                PolarBleApi a = api();
-                if (a != null) try { a.disconnectFromDevice(id); } catch (Throwable ignored) {}
-                lastBondPromptAt = System.currentTimeMillis(); // rebond prompts the OS pairing dialog
-                boolean ok = PolarBonding.rebond(ctx, id, sink::log);
-                sink.log(ok ? "bond re-established" : "bond reset failed");
-                try { exec.schedule(() -> connectionRetry.reconnect("rebond"), 3, TimeUnit.SECONDS); }
-                catch (RejectedExecutionException ignored) {}
-            } else {
-                stage("needs_action", "pftp_retries_exhausted", recordingAttempt, 0);
-                sink.log("recording recovery gave up — re-strap H10 to recover");
-            }
+        RecordingRecoveryPolicy.Failure failure = retry == RetryKind.STORAGE
+                ? RecordingRecoveryPolicy.Failure.STORAGE : RecordingRecoveryPolicy.Failure.PFTP;
+        RecordingRecoveryPolicy.Action action = RecordingRecoveryPolicy.decide(failure,
+                recordingAttempt, MAX_RECORDING_ATTEMPTS, recoveryReconnects,
+                MAX_RECOVERY_RECONNECTS, lastPftpFailure == PftpFailure.AUTHORIZATION,
+                !rrStale.getAsBoolean(), rebondTried);
+        if (action == RecordingRecoveryPolicy.Action.RETRY) {
+            recordingAttempt++;
+            String reason = retry == RetryKind.STORAGE ? "storage_retry" : "pftp_retry";
+            sink.log("recording " + reason + " " + recordingAttempt + "/" + MAX_RECORDING_ATTEMPTS
+                    + " in " + RETRY_DELAY_S + "s");
+            long next = System.currentTimeMillis() + RETRY_DELAY_S * 1000L;
+            recordingStage(gen, "retry_wait", reason, recordingAttempt, next);
+            scheduleRecording(() -> runRecordingOnConnect(gen), RETRY_DELAY_S, TimeUnit.SECONDS);
+        } else if (action == RecordingRecoveryPolicy.Action.PAUSE_STORAGE) {
+            // Disk/DB failures cannot be repaired by touching BLE. Preserve the H10 slot
+            // and finish in an observable state until a later reconnect/app restart retries.
+            recordingStage(gen, "needs_action", "storage_unavailable", recordingAttempt, 0);
+            sink.log("recording recovery paused — local storage unavailable; H10 slot preserved");
+        } else if (action == RecordingRecoveryPolicy.Action.RECONNECT) {
+            // PFTP stayed 106 through every retry on THIS link. A phone-side abrupt drop
+            // (e.g. a Bluetooth toggle after a force-stop) can wedge the H10's PFTP so it
+            // never clears on the same connection — only a fresh link does (what re-strapping
+            // the H10 achieves). Force one clean reconnect and let recovery retry on the fresh
+            // connection (recordingAttempt resets in deviceConnected).
+            recoveryReconnects++;
+            sink.log("recording stuck after retries — forcing clean reconnect "
+                    + recoveryReconnects + "/" + MAX_RECOVERY_RECONNECTS);
+            execSafe(this::forceReconnectForRecording);
+        } else if (action == RecordingRecoveryPolicy.Action.REBOND) {
+            // Fresh links didn't help either. RR flowing while PFTP still fails is the
+            // signature of a one-sided bond loss (H10 battery pull / reset while the phone
+            // still reports BONDED) — only re-pairing fixes that. A wedged sensor has stale
+            // RR too, and rebonding THEN would destroy a good bond for nothing and leave an
+            // unbonded reconnect loop spamming OS pairing dialogs — so the gate stays open
+            // until RR proves the sensor alive. One reset per stuck episode.
+            rebondTried = true;
+            sink.log("recording still stuck with live RR — resetting the OS bond and reconnecting");
+            holdLinkForRebond();
+            pairing.spent(); // rebond prompts the OS pairing dialog
+            boolean ok = PolarBonding.rebond(ctx, id, sink::log);
+            sink.log(ok ? "bond re-established" : "bond reset failed");
+            try { exec.schedule(() -> connectionRetry.reconnect("rebond"), 3, TimeUnit.SECONDS); }
+            catch (RejectedExecutionException ignored) {}
+        } else {
+            recordingStage(gen, "needs_action", "pftp_retries_exhausted", recordingAttempt, 0);
+            sink.log("recording recovery gave up — re-strap H10 to recover");
+        }
+    }
+
+    /** Tear the link down through connectionRetry before the OS bond is reset, and wait (bounded)
+     *  until that has happened on exec. Its settle timer reconnects even if rebond hangs. */
+    private void holdLinkForRebond() {
+        try {
+            exec.submit(() -> {
+                if (stopping || api() == null) return;
+                markLinkDown();
+                connectionRetry.restart("rebond", REBOND_HOLD_MS);
+            }).get(OP_TIMEOUT_S, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            sink.log("rebond disconnect not confirmed: " + e.getMessage());
         }
     }
 
     /** PFTP requires an encrypted (bonded) link — ANY PFTP op on an unbonded one makes the
      *  Android stack fire an OS pairing-request dialog, and with the retry/reconnect loops
      *  around recording that turns into an endless stream of dialogs. So all PFTP work is
-     *  gated here instead: already bonded → proceed; otherwise prompt for pairing at most
-     *  once per {@link #BOND_PROMPT_MIN_MS}, and only while RR is flowing (an unresponsive
-     *  H10 cannot complete SMP, so prompting would be pure dialog spam). While unbonded the
-     *  recording job re-checks periodically without prompting — live HR/RR needs no bond and
-     *  keeps streaming throughout. Must run on exec. */
+     *  gated here instead: already bonded → proceed; otherwise prompt for pairing when
+     *  {@link PairingPrompt} allows it (the user can answer, at most once per 10 min), and
+     *  only while RR is flowing (an unresponsive H10 cannot complete SMP, so prompting would
+     *  be pure dialog spam). While unbonded the recording job re-checks periodically without
+     *  prompting — live HR/RR from an H10 that does not demand encryption needs no bond and
+     *  keeps streaming throughout. Runs on the recording lane. */
     private boolean ensurePftpBond(int gen) {
         if (PolarBonding.isBonded(ctx, id)) return true;
-        long now = System.currentTimeMillis();
         if (rrStale.getAsBoolean()) {
             sink.log("not bonded and RR not flowing — postponing pairing (re-strap H10 if this persists)");
-        } else if (now - lastBondPromptAt >= BOND_PROMPT_MIN_MS) {
-            lastBondPromptAt = now;
+        } else if (pairing.claim()) {
             sink.log("not bonded — requesting OS pairing (accept the dialog on the phone)");
             PolarBonding.ensureBonded(ctx, id, sink::log);
             if (PolarBonding.isBonded(ctx, id)) return true;
             sink.log("pairing not completed — recording deferred (live HR/RR unaffected)");
         } else {
-            sink.log("not bonded — pairing prompt rate-limited; recording deferred");
+            sink.log("not bonded — pairing prompt waits for the app in front (rate-limited); recording deferred");
         }
         // Quiet re-check: picks up a bond made later (user accepts the dialog or pairs from
         // Settings) without another prompt, then resumes recording on this same connection.
+        recordingStage(gen, "recording_wait", "pairing_required", 0, System.currentTimeMillis() + 60_000);
         scheduleRecording(() -> runRecordingOnConnect(gen), 60, TimeUnit.SECONDS);
         return false;
     }
@@ -799,25 +893,22 @@ public final class PolarBle {
     /** Recovery's PFTP is wedged on the current link — get a fresh link so recovery retries on
      *  a new connection (recordingAttempt resets in deviceConnected). Already on exec. RR may
      *  be flowing perfectly here (it's PFTP that's stuck), so no staleness gate. */
-    private void forceReconnectForRecording() { cleanReconnect(false); }
+    private void forceReconnectForRecording() { cleanReconnect("recording_stuck", false); }
 
-    /** Disconnect then reconnect to obtain a fresh link (live streams or recording wedged on
-     *  the current one). An explicit disconnect disables the SDK's auto-reconnect, so we issue
-     *  the reconnect ourselves after a short gap. Must run on exec. */
-    private void cleanReconnect(boolean onlyIfRrStale) {
+    /** Tear the current link down and connect again (live streams or recording wedged on it).
+     *  The link is marked down here rather than on the SDK's disconnect callback, which is
+     *  posted later and is lost on a wedged stack; connectionRetry's settle timer owns the
+     *  reconnect, because an explicit disconnect disables the SDK's auto-reconnect.
+     *  Must run on exec. */
+    private void cleanReconnect(String reason, boolean onlyIfRrStale) {
         if (stopping || api() == null) return;
         // Re-validate at execution time: this can run a whole PFTP op after the watchdog
         // queued it — disconnecting a link whose RR recovered meanwhile would only re-create
         // the outage it was meant to fix.
         if (onlyIfRrStale && !rrStale.getAsBoolean()) { sink.log("forced reconnect skipped — RR already flowing"); return; }
-        try { api().disconnectFromDevice(id); } catch (Throwable ignored) {}
-        try {
-            exec.schedule(() -> {
-                if (stopping || api() == null) return;
-                sink.log("reconnecting after stall");
-                connectionRetry.reconnect("stall");
-            }, 3, TimeUnit.SECONDS);
-        } catch (RejectedExecutionException ignored) {}
+        sink.log("clean reconnect: " + reason);
+        markLinkDown();
+        connectionRetry.restart(reason, RESTART_SETTLE_MS);
     }
 
     /** Stop → fetch → replay+persist → remove a recoverable recording. */
