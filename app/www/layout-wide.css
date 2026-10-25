@@ -1,0 +1,71 @@
+/* Wide, tall window: a desktop browser viewing the phone's PC-share server
+   (remote-view), or a tablet held sideways.
+   .wrap becomes a 12-column grid with explicit placement (children are anonymous
+   items, so they are placed by nth-child, i.e. DOM order):
+     1-2  state card + actbar (cols 1-4) | metric cards (cols 5-12)
+     3    main-chart title (left) | metric filter (right)
+     4    main 15-minute chart, full width, ~half the viewport height
+     5    long-term header (range stepper)
+     6-7  stress report | 5-minute trend | 30-minute trend, side by side
+     8    note */
+@media (orientation: landscape) and (min-width: 1024px) and (min-height: 601px) {
+    /* keep the header controls aligned with the capped content column on huge monitors */
+    header { padding-inline: max(20px, calc((100vw - 1800px) / 2 + 22px)); }
+
+    .wrap { max-width: 1800px; padding: 18px 22px 28px; display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 14px 18px; align-items: stretch; }
+    .wrap > * { margin: 0; min-width: 0; }
+
+    /* top band */
+    .state { grid-column: 1 / 5; grid-row: 1; grid-template-columns: minmax(0, 1fr) minmax(128px, 168px);
+      gap: 16px; padding: 18px 18px 18px 22px; }
+    .state .label { font-size: 23px; }
+    .state .detail { font-size: 12px; max-width: none; }
+    .anmap { max-height: 168px; }
+    .anmeta { font-size: 10px; }
+    .actbar { grid-column: 1 / 5; grid-row: 2; padding: 9px 14px; align-self: start; }
+    .cards { grid-column: 5 / 13; grid-row: 1 / 3; grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-rows: repeat(2, 1fr); gap: 14px; }
+    .card { display: flex; flex-direction: column; justify-content: center; padding: 14px 20px; }
+    .card .value { font-size: 42px; }
+    .mini { gap: 13px; padding: 14px 20px; }
+    .mini .v { font-size: 21px; }
+
+    /* main chart: title and metric chips share one row, chart gets real height */
+    .wrap > :nth-child(4) { grid-column: 1 / 6; grid-row: 3; align-self: end; }
+    .metricFilter { grid-column: 6 / 13; grid-row: 3; justify-content: flex-end; align-self: end; }
+    .wrap > :nth-child(6) { grid-column: 1 / -1; grid-row: 4; height: clamp(300px, 50vh, 760px); }
+
+    /* long-term trends: header, then report + two charts in one row */
+    .wrap > :nth-child(7) { grid-column: 1 / -1; grid-row: 5; margin-top: 8px; }
+    .wrap > .section.sub { align-self: end; }
+    .wrap > :nth-child(8) { grid-column: 1 / 5; grid-row: 6; }
+    .wrap > :nth-child(9) { grid-column: 1 / 5; grid-row: 7; margin: 0; }
+    .wrap > :nth-child(10) { grid-column: 5 / 9; grid-row: 6; }
+    .wrap > :nth-child(11) { grid-column: 5 / 9; grid-row: 7; }
+    .wrap > :nth-child(12) { grid-column: 9 / 13; grid-row: 6; }
+    .wrap > :nth-child(13) { grid-column: 9 / 13; grid-row: 7; }
+    .chartbox.trend { height: auto; min-height: 280px; }
+    .wrap > .note { grid-column: 1 / -1; grid-row: 8; margin-top: 4px; max-width: 120ch; }
+
+    /* short desktop windows (e.g. 1280x720): tighten the top band so the chart stays on screen */
+    @media (max-height: 820px) {
+        header { padding-block: 8px; }
+        .wrap { padding-top: 12px; gap: 10px 18px; }
+        .state { padding: 12px 16px 12px 20px; }
+        .state .label { font-size: 20px; }
+        .anmap { max-height: 132px; }
+        .actbar { padding: 6px 12px; }
+        .card { padding: 9px 16px; }
+        .card .value { font-size: 34px; margin-top: 4px; }
+        .card .base { margin-top: 5px; }
+        .mini { gap: 8px; padding: 9px 16px; }
+        .wrap > :nth-child(6) { height: clamp(280px, 48vh, 760px); }
+    }
+
+    /* modals at desktop size */
+    .modal { width: min(640px, 100%); }
+    .zoom-modal { position: relative; width: min(1280px, 100%); max-height: 92vh; }
+    .zoom-modal .close { align-self: flex-end; position: absolute; top: 16px; right: 20px; } /* flex item: float is ignored, so pin it top-right */
+    .zoom-chartbox { height: min(68vh, 720px); }
+}

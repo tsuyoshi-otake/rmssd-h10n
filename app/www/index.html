@@ -43,6 +43,16 @@
     #batt.low { color: var(--high); font-weight: 600; }
     #calib { font-size: 12px; color: var(--tense); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 34vw; }
     .spacer { flex: 1; }
+    header button, .menu-wrap { flex: none; white-space: nowrap; }
+    /* Shown only while RR has not arrived for a while: lets the user restart the H10 link
+       from the phone instead of re-seating the sensor. Outside .wrap, so the layout
+       stylesheets' grid placement is untouched. */
+    .reconnect-bar { display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+      background: rgba(251,191,36,.08); border-bottom: 1px solid var(--line); font-size: 12px; color: var(--tense); }
+    .reconnect-bar[hidden] { display: none; }
+    .reconnect-bar .msg { flex: 1; min-width: 0; line-height: 1.4; }
+    .reconnect-bar button { flex: none; min-height: 40px; border-color: var(--tense); color: var(--text); font-weight: 650; }
+    .remote-view .reconnect-bar, .remote-view #reconnectMenuBtn { display: none !important; }
     button {
       font: inherit; font-size: 13px; color: var(--text); background: var(--surface);
       border: 1px solid var(--line); border-radius: 9px; padding: 7px 13px; cursor: pointer;
@@ -208,53 +218,7 @@
     .zoom-open { margin-left: auto; padding: 3px 9px; font-size: 12px; border-radius: 8px; }
     .note { font-size: 11px; color: var(--faint); margin-top: 12px; line-height: 1.6; }
 
-    /* Landscape (phone/tablet held sideways): compress the chrome — the header is
-       sticky so its buttons stay reachable — and let the graphs grow with the
-       viewport so the chart is the focus. The WebView only renders on-device, so
-       plain orientation is enough; there is no desktop layout to mis-trigger. */
-    @media (orientation: landscape) {
-      header { padding: 8px 14px; gap: 9px; }
-      header h1 { font-size: 14px; }
-      #conn, #calib { font-size: 11px; }
-      #histInfo { display: none; }
-      .users .current { padding: 4px 9px; min-width: 27px; }
-      .wrap { padding: 12px 16px; }
-      .state { padding: 14px 16px 14px 18px; gap: 16px; margin-bottom: 12px; grid-template-columns: 1fr minmax(140px, 182px); }
-      .state .label { font-size: 19px; }
-      .state .detail { font-size: 11px; margin-top: 3px; }
-      .anmap { max-height: 156px; }
-      .cards { gap: 10px; margin-bottom: 12px; }
-      .card { padding: 11px 13px; }
-      .card .value { font-size: 26px; }
-      .mini { padding: 10px 13px; gap: 8px; }
-      .mini .v { font-size: 16px; }
-      .chartbox { height: 56vh; min-height: 220px; }
-      .chartbox.trend { height: 46vh; min-height: 180px; }
-      .section { margin: 14px 4px 6px; }
-      .note { display: none; }
-    }
 
-    /* Portrait (phone upright): trim the default (desktop-derived) sizing so the
-       header / state / cards aren't so tall — short button labels, smaller cards. */
-    @media (orientation: portrait) {
-      header { padding: 10px 14px; gap: 9px; }
-      header h1 { font-size: 14px; }
-      header h1 .lbl-full { display: none; } header h1 .lbl-short { display: inline; }
-      #conn { display: none; } /* connection shown by the brand mark to save width */
-      #histInfo { display: none; }
-      .users .current { padding: 5px 9px; min-width: 28px; }
-      .wrap { padding: 13px; }
-      .state { grid-template-columns: 1fr; gap: 14px; padding: 16px 18px; margin-bottom: 12px; }
-      .state .label { font-size: 21px; }
-      .state .detail { font-size: 12px; margin-top: 4px; min-height: 3em; } /* reserve 2 lines so detail length never shifts the cards below */
-      .anmeta { min-height: 2.8em; align-content: flex-start; }              /* reserve so wrapping meta doesn't shift the cards */
-      .anmap { max-height: 232px; max-width: 280px; }
-      .cards { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
-      .card { padding: 12px 15px; }
-      .card .value { font-size: 27px; }
-      .mini { grid-column: 1 / -1; flex-direction: row; justify-content: space-between; }
-      .mini .row { flex: 1 1 0; min-width: 0; } /* equal-width cells: value digit-count changes don't re-space the row */
-    }
 
     /* --- activity logging (record bar + chips + picker modal) --- */
     .actbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px;
@@ -293,19 +257,6 @@
     .zoom-controls input[type="range"] { flex: 1 1 180px; min-width: 0; accent-color: var(--accent); }
     .zoom-controls input[type="range"]:disabled { opacity: .35; }
     .zoom-controls .range-label { min-width: 78px; text-align: right; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
-    @media (orientation: landscape) {
-      .modal-bg { padding: 8px; }
-      .zoom-modal { width: 100%; height: calc(100vh - 16px); max-height: none; padding: 10px 12px; overflow: hidden; }
-      .zoom-head { margin-bottom: 6px; gap: 8px; }
-      .zoom-head h2 { font-size: 14px; }
-      .zoom-info { font-size: 11px; }
-      .zoom-chartbox { flex: 1 1 auto; height: auto; min-height: 0; padding: 8px; }
-      .zoom-controls { flex: none; margin-top: 8px; gap: 6px; }
-      .zoom-controls button { width: 34px; height: 30px; font-size: 17px; }
-      .zoom-controls .all { padding: 0 10px; }
-      .zoom-controls input[type="range"] { flex-basis: 160px; }
-      .zoom-controls .range-label { min-width: 54px; font-size: 11px; }
-    }
     .data-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0; }
     .data-field { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
     .data-field select { width: 100%; background: var(--surface-2); color: var(--text);
@@ -342,9 +293,10 @@
     .remote-view #recalibBtn, .remote-view #recalibFullBtn, .remote-view #editBaseBtn, .remote-view #recalPostureBtn, .remote-view #supineBtn, .remote-view #sleepLRBtn,
     .remote-view #clearBtn, .remote-view #dataManageBtn, .remote-view #orientBtn, .remote-view #serverBtn, .remote-view .srvurl,
     .remote-view #userSel, .remote-view #actStartBtn, .remote-view #settingsMenu .sep { display: none !important; }
-    @media (max-width: 520px) { .grid { grid-template-columns: repeat(3, 1fr); } }
-    @media (orientation: landscape) { .grid { grid-template-columns: repeat(5, 1fr); } }
   </style>
+  <link rel="stylesheet" href="layout-portrait.css" />
+  <link rel="stylesheet" href="layout-landscape.css" />
+  <link rel="stylesheet" href="layout-wide.css" />
 </head>
 <body>
   <header>
@@ -360,6 +312,7 @@
     <div class="menu-wrap">
       <button id="menuBtn" title="設定・操作">設定</button>
       <div class="menu" id="settingsMenu">
+        <button id="reconnectMenuBtn" title="H10との接続を切って張り直す（データが来ないとき）">H10を再接続</button>
         <button id="recalibBtn" title="今を安静として基準値を取り直す">安静で基準を取り直す</button>
         <button id="recalibFullBtn" title="これまでの全データの安静時から基準値を再計算">全期間で基準を取り直す</button>
         <button id="editBaseBtn" title="基準値(RMSSD/心拍)を手動で設定">基準を編集</button>
@@ -386,6 +339,10 @@
       </div>
     </div>
   </header>
+  <div class="reconnect-bar" id="reconnectBar" hidden>
+    <span class="msg" id="reconnectMsg">心拍データが届いていません</span>
+    <button id="reconnectBtn">H10を再接続</button>
+  </div>
 
   <dialog id="deviceDialog" class="device-dialog" aria-labelledby="deviceTitle">
     <div class="head"><h2 id="deviceTitle">接続するH10を選択</h2>
@@ -1589,6 +1546,7 @@
         link_lost: '接続が切れました。自動再接続します',
         sdk_reconnect: '接続が切れました。自動再接続しています',
         stall: '応答のない接続を張り直しています',
+        user: 'H10に再接続しています',
         recording_stuck: '記録を取得するため接続を張り直しています',
         rebond: 'Bluetoothのペア設定をやり直しています',
         pairing: 'H10とのペア設定を確認しています。許可を求められたら「ペア設定する」を選んでください',
@@ -1602,6 +1560,43 @@
         text = `${text || '再試行を待っています'}${sec ? ` · 約${sec}秒後` : ''}`;
       }
       return text;
+    }
+
+    // ---- user reconnect (#33): RR silent for RECONNECT_SHOW_MS -> offer to restart the link ----
+    const RECONNECT_SHOW_MS = 20000;
+    const NO_RECONNECT_REASONS = new Set(['pairing', 'rebond', 'device_selection_required', 'user']);
+    let noDataSince = null;
+    let reconnectBusyUntil = 0;
+    function renderReconnect(s, dataFresh) {
+      const bar = document.getElementById('reconnectBar');
+      if (!bar) return;
+      const c = s.connection || {};
+      const receiving = s.connected && dataFresh;
+      if (receiving) noDataSince = null;
+      else if (noDataSince == null) noDataSince = Date.now();
+      const busy = Date.now() < reconnectBusyUntil || (c.stage === 'connecting' && c.reason === 'user');
+      const show = !RmssdBridge.isRemote && !receiving && !s.pairingNeeded
+        && !NO_RECONNECT_REASONS.has(c.reason) && c.stage !== 'needs_action'
+        && (busy || Date.now() - noDataSince >= RECONNECT_SHOW_MS);
+      bar.hidden = !show;
+      if (!show) return;
+      const btn = document.getElementById('reconnectBtn');
+      btn.disabled = busy;
+      document.getElementById('reconnectMsg').textContent = busy
+        ? 'H10に再接続しています…（20秒ほどで心拍が届きます）'
+        : (s.connected ? '接続中ですが心拍データが届いていません' : 'H10に接続できていません');
+    }
+    async function requestReconnect() {
+      if (Date.now() < reconnectBusyUntil) return;
+      let r = null;
+      try { r = await Promise.resolve(RmssdBridge.reconnect()); } catch (_) {}
+      const result = r && r.result;
+      if (result === 'ok') reconnectBusyUntil = Date.now() + 15000;
+      baselineMsgUntil = Date.now() + 4000;
+      document.getElementById('calib').textContent = result === 'ok' ? 'H10に再接続しています…'
+        : result === 'cooldown' ? '再接続中です。少し待ってから押してください'
+        : '計測が動いていないため再接続できません';
+      if (_lastStatus) renderReconnect(_lastStatus, _lastStatus.dataFresh !== false);
     }
 
     function renderStatus(s) {
@@ -1619,6 +1614,7 @@
       conn.className = s.connected ? (dataFresh ? 'on' : 'stale') : '';
       const brand = document.getElementById('brand');
       if (brand) brand.classList.toggle('on', !!s.connected);
+      renderReconnect(s, dataFresh);
 
       // H10 battery %; last-known is kept across a drop, so show it whenever present.
       const batt = document.getElementById('batt');
@@ -2546,6 +2542,9 @@
           : 'あおむけで横になってから押してください。';
       } catch (_) {}
     });
+
+    document.getElementById('reconnectBtn').addEventListener('click', requestReconnect);
+    document.getElementById('reconnectMenuBtn').addEventListener('click', requestReconnect);
 
     document.getElementById('sleepLRBtn').addEventListener('click', async () => {
       const calib = document.getElementById('calib');

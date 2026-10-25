@@ -46,6 +46,7 @@ public final class HrvEngine {
     private static final long STALE_FORCE_MS  = 70000;        // still no RR this long ⇒ escalate to a forced reconnect
     private static final int  MAX_STALE_FORCE_RECONNECTS = 3; // bound forced reconnects per stale episode (churn guard)
     private static final long NOTIF_STALE_MS  = 20000;        // connected but no fresh RR this long ⇒ notify "re-attach H10"
+    private static final long USER_RECONNECT_COOLDOWN_MS = 15000; // min spacing between user-requested reconnects
 
     public interface Emitter {
         void status(String json);
@@ -87,6 +88,9 @@ public final class HrvEngine {
     private volatile long connectedSince = 0;    // wall-clock the current BLE connection began (0 = disconnected)
     private long lastReconnectNudge = 0;         // stream-watchdog throttle (tick thread only)
     private int  staleForceReconnects = 0;       // forced reconnects this stale episode (tick thread only)
+    private final Object reconnectLock = new Object();
+    private long lastUserReconnectAt = 0;        // wall-clock of the last user-requested reconnect (guarded by reconnectLock)
+    private volatile boolean watchdogRearm = false; // user reconnect issued: the tick restarts the watchdog episode
     private volatile int lastBackfillRestored = 0; // points restored by the most recent gap backfill
     private volatile Speaker speaker;            // relax-mode TTS sink (null = silent)
     private volatile int relaxIntervalSec = 0;   // 0 = off; else read out every N s
@@ -380,6 +384,24 @@ public final class HrvEngine {
         if (b != null) b.reconnectIfDown();
     }
 
+    /** User-triggered clean reconnect (dashboard button / notification action), for a link that
+     *  is connected but delivers no RR. Returns "ok" (issued), "not_running" (no link object) or
+     *  "cooldown" (one was issued less than 15 s ago). Callable from any thread: the watchdog's
+     *  tick-thread counters are re-armed by the next tick, not written here. */
+    public String requestReconnect() {
+        PolarBle b = ble;
+        if (b == null) return "not_running";
+        long now = System.currentTimeMillis();
+        synchronized (reconnectLock) {   // not `gate`: that one is held across DB work
+            if (now - lastUserReconnectAt < USER_RECONNECT_COOLDOWN_MS) return "cooldown";
+            lastUserReconnectAt = now;
+        }
+        Log.i(TAG, "[ble] user reconnect requested");
+        watchdogRearm = true;   // fresh episode: the watchdog must not stack its own forced reconnect on this one
+        b.userReconnect();
+        return "ok";
+    }
+
     // --- recording store: DB-backed lifecycle so the H10 recording survives an app/OS
     //     restart, replaying a fetched gap into points. The lifecycle + replay logic lives in
     //     RecordingBackfillStore; this Host exposes the live mac/user/baseline it reads and
@@ -428,6 +450,11 @@ public final class HrvEngine {
         // of connect time and last RR, so both cases share the same escalation: re-subscribe
         // first (gentle); if RR still doesn't flow, force a clean reconnect, bounded per stale
         // episode so churn can't wedge the scanner. The force budget resets once RR flows again.
+        if (watchdogRearm) {   // a user reconnect just restarted the episode: fresh force budget, nudge spacing
+            watchdogRearm = false;
+            lastReconnectNudge = now;
+            staleForceReconnects = 0;
+        }
         long cs = connectedSince;
         boolean delivering = lastRrReceivedAt > 0 && now - lastRrReceivedAt < POINT_FRESH_MS;
         if (delivering) staleForceReconnects = 0;

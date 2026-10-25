@@ -45,6 +45,7 @@ public class MonitorService extends Service {
     public static final String ACTION_STOP_ENGINE  = "dev.otake.rmssdh10n.STOP_ENGINE";
     public static final String ACTION_SWITCH_USER  = "dev.otake.rmssdh10n.SWITCH_USER";
     public static final String ACTION_SWITCH_DEVICE = "dev.otake.rmssdh10n.SWITCH_DEVICE";
+    public static final String ACTION_RECONNECT   = "dev.otake.rmssdh10n.RECONNECT";
     public static final String EXTRA_MAC  = "mac";
     public static final String EXTRA_ACC  = "acc";
     public static final String EXTRA_USER = "user";
@@ -111,6 +112,14 @@ public class MonitorService extends Service {
             try { stopEngine(); } finally { stopSelf(); }
             return START_NOT_STICKY;
         }
+        if (intent != null && ACTION_RECONNECT.equals(intent.getAction())) {
+            // Notification button: act on a running engine only. Never start one here — the
+            // restore branch in handleIntent would, and a reconnect request is not a start.
+            HrvEngine running = engine;
+            if (running == null) { stopSelf(); return START_NOT_STICKY; }
+            Log.i(TAG, "reconnect action: " + running.requestReconnect());
+            return START_STICKY;
+        }
         if (!MonitorRecoveryJob.unlocked(this) || !MonitorRecoveryJob.permitted(this)) {
             stopSelf();
             return START_NOT_STICKY;
@@ -167,14 +176,20 @@ public class MonitorService extends Service {
         int piFlags = PendingIntent.FLAG_UPDATE_CURRENT
                 | (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0);
         PendingIntent pi = PendingIntent.getActivity(this, 0, open, piFlags);
-        return new NotificationCompat.Builder(this, CHANNEL)
+        NotificationCompat.Builder b = new NotificationCompat.Builder(this, CHANNEL)
                 .setContentTitle("RMSSD モニタリング")
                 .setContentText(state.text)
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setOngoing(true)
                 .setContentIntent(pi)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build();
+                .setPriority(NotificationCompat.PRIORITY_LOW);
+        // A reconnect only helps while no fresh RR flows; PAIRING needs the pairing dialog instead.
+        if (state == CollectionState.STALLED || state == CollectionState.WARMING
+                || state == CollectionState.WAITING) {
+            Intent reconnect = new Intent(this, MonitorService.class).setAction(ACTION_RECONNECT);
+            b.addAction(0, "再接続", PendingIntent.getService(this, 1, reconnect, piFlags));
+        }
+        return b.build();
     }
 
     /** Called only on collection-state changes; NotificationManager is thread-safe. */
@@ -274,6 +289,8 @@ public class MonitorService extends Service {
     public boolean nativeSetSupineRef() { return engine != null && engine.setSupineRef(); }
     public Boolean nativeToggleSleepLR() { return engine != null ? engine.toggleSleepLR() : null; }
     // Baseline + RR-log controls routed from the plugin (no-op if engine off).
+    /** "ok" | "not_running" | "cooldown" (see {@link HrvEngine#requestReconnect()}). */
+    public String nativeReconnect() { return engine != null ? engine.requestReconnect() : "not_running"; }
     public boolean nativeResetBaseline() { if (engine == null) return false; engine.resetBaseline(); return true; }
     public boolean nativeSetBaseline(double r, double h) { return engine != null && engine.setBaseline(r, h); }
     public String nativeRrLog() { return engine != null ? engine.rrLogJson() : "[]"; }

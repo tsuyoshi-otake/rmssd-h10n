@@ -433,6 +433,12 @@ public final class PolarBle {
         execSafe(() -> cleanReconnect("stall", true));
     }
 
+    /** User-requested clean reconnect (dashboard button / notification action). Same path as
+     *  the watchdog's forced reconnect, but without the RR-stale re-check: the user asked. */
+    public void userReconnect() {
+        execSafe(() -> cleanReconnect("user", false));
+    }
+
     public void stop() {
         stopping = true;
         connectionRetry.stop();
