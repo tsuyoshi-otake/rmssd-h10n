@@ -15,7 +15,8 @@ import static org.junit.Assert.*;
  *  timers, recording-lane jobs, selection scans, native failures and stop against the real
  *  BleConnectionRetry and BleStageReporter, wired as PolarBle wires them (markLinkDown and the
  *  link generation, the recording-stage gate, rebond and pairing hold/reconnect, clean
- *  reconnect, adapter restart). A state is rebuilt by replaying its path and deduplicated by an abstract key
+ *  reconnect, adapter restart, the backoff's standby with its presence watch and waking timer).
+ *  A state is rebuilt by replaying its path and deduplicated by an abstract key
  *  (supervisor and reporter fields read by reflection, session, queues, relative times); the
  *  key must cover every field that can change a later step, or the search prunes states it
  *  has not really seen.
@@ -30,12 +31,12 @@ import static org.junit.Assert.*;
  *  here; keep {@link Sys} in step with PolarBle when that glue changes. */
 public class BleLinkModelCheckTest {
     enum Act { SDK_CONNECTS, LINK_DROPS, ADAPTER, MAIN, EXEC, TIMER, REC_READY, REC_RETRY, REC_RECONNECT,
-               REC_REBOND, BOND_DONE, WATCHDOG, PAIR, SCAN_BEGIN, SCAN_END, CANCEL_FAILS, CONNECT_FAILS, STOP }
+               REC_REBOND, BOND_DONE, WATCHDOG, PAIR, SIGHTED, SCAN_BEGIN, SCAN_END, CANCEL_FAILS, CONNECT_FAILS, STOP }
     enum Session { CLOSED, OPENING, OPEN, PARK }
     // Main-thread SDK callbacks and control-lane (exec) tasks.
     static final int CB_CONNECTED = 0, CB_FEATURE = 1, CB_DISCONNECTED = 2, CB_BT_ON = 3;
     static final int T_CONNECTED = 0, T_DISCONNECTED = 1, T_REC_WAIT = 2, T_BT_ON = 3, T_CLEAN = 4,
-                     T_HOLD = 5, T_REBOND_RECONNECT = 6, T_PAIR = 7, T_PAIR_RECONNECT = 8;
+                     T_HOLD = 5, T_REBOND_RECONNECT = 6, T_PAIR = 7, T_PAIR_RECONNECT = 8, T_SIGHTED = 9;
     static final Act[] ACTS = Act.values();
     private static final Set<String> LINK_UP = new HashSet<>(Arrays.asList(
             "connected/link_ready", "recording_wait/streams_settling", "streaming/recording_ready"));
@@ -114,11 +115,12 @@ public class BleLinkModelCheckTest {
 
     /** The H10 link as PolarBle drives it, with the real supervisor and stage reporter. */
     static final class Sys implements BleConnectionRetry.Link {
-        private static final class Timer { final long at; final Runnable action; boolean done;
-            Timer(long at, Runnable action) { this.at = at; this.action = action; } }
+        private static final class Timer { final long at; final boolean waking; final Runnable action; boolean done;
+            Timer(long at, boolean waking, Runnable action) { this.at = at; this.waking = waking; this.action = action; } }
         long now;
         Session session = Session.CLOSED;
         boolean linkFlag, handled, stopping, cancelFails, connectFails, scanActive, stopPublished, pairSpent;
+        boolean standby, watch;   // the service let the CPU sleep; PresenceWatch is scanning
         int connGen;
         Integer recordingGen;   // set while the recording lane publishes through reportIf
         String shown; long shownNextAt;
@@ -129,8 +131,8 @@ public class BleLinkModelCheckTest {
         final List<Timer> timers = new ArrayList<>();
         final List<String> violations = new ArrayList<>();
         final BleStageReporter stages = new BleStageReporter(this::published);
-        final BleConnectionRetry retry = new BleConnectionRetry((delay, action) -> {
-            Timer t = new Timer(now + delay, action); timers.add(t);
+        final BleConnectionRetry retry = new BleConnectionRetry((delay, waking, action) -> {
+            Timer t = new Timer(now + delay, waking, action); timers.add(t);
             return () -> t.done = true;
         }, this, () -> now, () -> 0.37);
 
@@ -140,17 +142,33 @@ public class BleLinkModelCheckTest {
         public boolean connected() { return linkFlag; }
         public void connect() {
             if (stopping) { violations.add("native connect after stop"); return; }
+            if (standby) violations.add("native connect while standing by");
             if (connectFails) throw new IllegalStateException("connect failed");
             if (session != Session.CLOSED) violations.add("connect ignored by the SDK: session " + session);
             else session = Session.OPENING;
         }
         public void cancel() {
             if (stopping) { violations.add("native cancel after stop"); return; }
+            if (standby) violations.add("native cancel while standing by");
             if (cancelFails) throw new IllegalStateException("cancel failed");
             if (session != Session.CLOSED) { session = Session.CLOSED; post(CB_DISCONNECTED); }
         }
         public void report(String stage, String reason, int attempt, long nextAt) {
+            if (standby && !stage.equals("retry_wait")) violations.add("the next owner's stage while standing by: " + stage);
             stages.report(stage, reason, attempt, nextAt);
+        }
+        public void standby(boolean watch) {   // PresenceWatch.start, then the service drops the wake lock
+            if (stopping) return;
+            if (standby) violations.add("standby twice");
+            if (session != Session.CLOSED) violations.add("standby with the session " + session);
+            if (watch) this.watch = true;
+            standby = true;
+        }
+        public void resume() {                  // PresenceWatch.stop, then the service holds the wake lock
+            watch = false;
+            if (stopping) return;
+            if (!standby) violations.add("resume without standby");
+            standby = false;
         }
 
         private void published(String stage, String reason, int attempt, long nextAt) {
@@ -186,6 +204,7 @@ public class BleLinkModelCheckTest {
                 case WATCHDOG: return !stopping && exec.size() < MAX_QUEUE;
                 // PairingPrompt spends one prompt per 10 min; a second pairing has the same shape.
                 case PAIR: return !stopping && !pairSpent && exec.size() < MAX_QUEUE;
+                case SIGHTED: return watch && exec.size() < MAX_QUEUE;
                 case SCAN_BEGIN: return !stopping && !scanActive;
                 case SCAN_END: return scanActive;
                 case CANCEL_FAILS: case CONNECT_FAILS: return true;
@@ -222,12 +241,14 @@ public class BleLinkModelCheckTest {
                 // foregroundEntered (or start) with an unbonded H10, stale RR and a prompt to spend:
                 // pairIfDue may come in any link state.
                 case PAIR: pairSpent = true; execSafe(T_PAIR, 0); break;
+                // PresenceWatch's first match stops its scan and posts the sighting to exec.
+                case SIGHTED: watch = false; execSafe(T_SIGHTED, 0); break;
                 case SCAN_BEGIN: scanActive = true; stages.beginOverlay("scanning", "device_selection", 0, 0); break;
                 case SCAN_END: stages.endOverlay(); scanActive = false; break;
                 case CANCEL_FAILS: cancelFails = !cancelFails; break;
                 case CONNECT_FAILS: connectFails = !connectFails; break;
                 case STOP:
-                    stopping = true; retry.stop(); stages.stop("user_or_service_stop");
+                    stopping = true; retry.stop(); watch = false; stages.stop("user_or_service_stop");
                     if (scanActive) { stages.endOverlay(); scanActive = false; }   // dispose → doFinally
                     break;
             }
@@ -255,6 +276,7 @@ public class BleLinkModelCheckTest {
                     if (!stopping) { markLinkDown(); retry.restart("pairing", 75_000); bonds.add(T_PAIR_RECONNECT); }
                     break;
                 case T_PAIR_RECONNECT: retry.reconnect("pairing"); break;
+                case T_SIGHTED: retry.sighted(); break;
             }
         }
 
@@ -277,6 +299,7 @@ public class BleLinkModelCheckTest {
             if (!bonds.isEmpty()) return Act.BOND_DONE;
             if (!rec.isEmpty()) return Act.REC_READY;
             if (session == Session.OPENING || session == Session.PARK) return Act.SDK_CONNECTS;
+            if (watch) return Act.SIGHTED;   // the H10 is back in range
             if (armed() != null) return Act.TIMER;
             if (phase(retry).equals("HALTED")) return Act.ADAPTER;   // the user acts on needs_action
             return null;
@@ -286,12 +309,22 @@ public class BleLinkModelCheckTest {
          *  timer; S3 nothing is published or sent natively after stop; S4 a recording-lane
          *  stage is published only for the live link; S5 at quiescence the shown stage tells
          *  the truth about the link, and a down link is owned by a timer or an explicit halt;
-         *  S6 a shown countdown matches the timer that ends it. */
+         *  S6 a shown countdown matches the timer that ends it; S7 the CPU may sleep exactly
+         *  through a backoff, nothing native runs meanwhile, only its timer wakes the CPU, and
+         *  the presence watch runs only inside it. */
         String violation() {
             if (!violations.isEmpty()) return violations.get(0);
             int timersArmed = armedCount();
             if (timersArmed > 1) return "more than one supervisor timer armed";
             if (stopping && timersArmed > 0) return "timer armed after stop";
+            if (stopping && watch) return "presence watch left on after stop";
+            if (!stopping) {
+                boolean backoff = phase(retry).equals("BACKOFF");
+                if (standby != backoff) return standby ? "standing by outside a backoff" : "a backoff keeps the CPU awake";
+                if (watch && !standby) return "presence watch outside a backoff";
+                Timer t = armed();
+                if (t != null && t.waking != standby) return t.waking ? "a waking timer outside the standby" : "the standby's timer cannot wake the CPU";
+            }
             if (!quiescent()) return null;
             if (stopping) return "stopped/user_or_service_stop".equals(shown) ? null : "stop not shown: " + shown;
             boolean up = phase(retry).equals("UP"), halted = phase(retry).equals("HALTED");
@@ -314,13 +347,14 @@ public class BleLinkModelCheckTest {
             StringBuilder k = new StringBuilder();
             k.append(session).append(linkFlag ? 'L' : 'l').append(handled ? 'H' : 'h').append(stopping ? 'S' : 's')
              .append(cancelFails ? 'C' : 'c').append(connectFails ? 'F' : 'f').append(scanActive ? 'N' : 'n')
-             .append(stopPublished ? 'P' : 'p').append(pairSpent ? 'Y' : 'y');
+             .append(stopPublished ? 'P' : 'p').append(pairSpent ? 'Y' : 'y')
+             .append(standby ? 'B' : 'b').append(watch ? 'W' : 'w').append(field(SIGHTED_ATTEMPT, retry) ? 'G' : 'g');
             k.append("|r").append(phase(retry)).append(field(STOPPED, retry) ? 1 : 0).append(',').append(intField(ATTEMPT, retry));
             long ownNextAt = (Long) get(OWN_NEXT_AT, retry);   // the stage a stale connected() shows again
             k.append('>').append(get(OWN_STAGE, retry)).append('/').append(get(OWN_REASON, retry)).append('#')
              .append(intField(OWN_ATTEMPT, retry)).append('@').append(ownNextAt == 0 ? 0 : ownNextAt - now);
             Timer t = armed();
-            k.append("|t").append(t == null ? "-" : String.valueOf(t.at - now)).append('/').append(armedCount());
+            k.append("|t").append(t == null ? "-" : (t.at - now) + (t.waking ? "w" : "")).append('/').append(armedCount());
             k.append("|m").append(main).append("|e");
             for (int[] task : exec) k.append(task[0]).append(task[0] == T_REC_WAIT ? ":" + (connGen - task[1]) : "").append(',');
             k.append("|q");
@@ -340,6 +374,7 @@ public class BleLinkModelCheckTest {
             ATTEMPT = field(BleConnectionRetry.class, "attempt"), OWN_STAGE = field(BleConnectionRetry.class, "stage"),
             OWN_REASON = field(BleConnectionRetry.class, "reason"), OWN_ATTEMPT = field(BleConnectionRetry.class, "stageAttempt"),
             OWN_NEXT_AT = field(BleConnectionRetry.class, "stageNextAt"),
+            SIGHTED_ATTEMPT = field(BleConnectionRetry.class, "sightedAttempt"),
             CURRENT = field(BleStageReporter.class, "current"), BENEATH = field(BleStageReporter.class, "beneath");
     private static final Class<?> STAGE_CLASS = nested(BleStageReporter.class, "Stage");
     private static final Field STAGE = field(STAGE_CLASS, "stage"), REASON = field(STAGE_CLASS, "reason"),

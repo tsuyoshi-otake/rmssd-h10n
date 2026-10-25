@@ -55,9 +55,11 @@ import io.reactivex.rxjava3.disposables.Disposable;
  *    an OS kill leaves it active so the next launch recovers the gap.
  *
  * The SDK handles ordinary automatic reconnect. {@link BleConnectionRetry} bounds
- * silent connect/search waits and reissues them with backoff. Screen-off scanning
- * remains subject to Android/SDK restrictions; backfill covers delayed reconnects
- * when an H10 recording was successfully started before the gap.
+ * silent connect/search waits and reissues them with backoff. During a backoff the link
+ * stands by: {@link PresenceWatch} looks for the H10 so its return starts the next attempt at
+ * once (#31), and the engine lets the CPU sleep, with {@link WakeupTimer} ending the backoff
+ * on time through a suspend (#32). Backfill covers delayed reconnects when an H10 recording
+ * was successfully started before the gap.
  */
 public final class PolarBle {
     private static final String TAG = "PolarBle";
@@ -91,6 +93,10 @@ public final class PolarBle {
         /** Structured, bounded connection/recovery telemetry. Device identifiers and RR
          *  payloads must never be placed in these fields. */
         default void onStage(String stage, String reason, int attempt, long nextRetryAt) {}
+        /** The link stands by in a backoff with nothing pending ({@code true}), so the CPU may
+         *  sleep, or has resumed and needs it again ({@code false}). Called on the control
+         *  lane; never after stop. */
+        default void onStandby(boolean standby) {}
     }
 
     /** Persistence + recovery hooks, implemented by {@link HrvEngine} over {@link HrvDb}.
@@ -182,6 +188,8 @@ public final class PolarBle {
     // published only while their link generation is current (see recordingStage).
     private final BleStageReporter stages;
     private final BleConnectionRetry connectionRetry;
+    private final WakeupTimer wakeups;        // backoff delays that elapse through a CPU suspend
+    private final PresenceWatch presence;     // looks for the H10 while a backoff stands by
     private static final long RESTART_SETTLE_MS = 3000;  // explicit disconnect → reconnect gap
     private static final long REBOND_HOLD_MS = 45_000;   // covers PolarBonding.rebond's bounded waits
     private static final long PAIRING_HOLD_MS = 75_000;  // covers PolarBonding.ensureBonded's two bounded waits
@@ -193,7 +201,9 @@ public final class PolarBle {
         this.sink = sink;
         pairing = new PairingPrompt(SystemClock::elapsedRealtime, () -> PolarBonding.userCanAnswerPrompt(this.ctx));
         stages = new BleStageReporter(sink::onStage);
-        connectionRetry = new BleConnectionRetry((delay, action) -> {
+        wakeups = new WakeupTimer(this.ctx, exec);
+        connectionRetry = new BleConnectionRetry((delay, waking, action) -> {
+            if (waking) return wakeups.after(delay, action);
             java.util.concurrent.ScheduledFuture<?> future = exec.schedule(action, delay, TimeUnit.MILLISECONDS);
             return () -> future.cancel(false);
         }, new BleConnectionRetry.Link() {
@@ -204,7 +214,17 @@ public final class PolarBle {
                 stages.report(state, reason, attempt, nextAt);
                 sink.log(state + ": " + reason + " attempt=" + attempt);
             }
+            public void standby(boolean watch) {
+                if (stopping) return;
+                if (watch) presence.start();
+                sink.onStandby(true);
+            }
+            public void resume() {
+                presence.stop();
+                if (!stopping) sink.onStandby(false);
+            }
         }, System::currentTimeMillis, Math::random);
+        presence = new PresenceWatch(this.ctx, mac, () -> execSafe(() -> connectionRetry.sighted()), sink::log);
     }
 
     public void setRecordingStore(RecordingStore s) { this.recordingStore = s; }
@@ -387,7 +407,8 @@ public final class PolarBle {
     /** Re-subscribe the live streams when the link is 'connected' but no data is flowing
      *  (a stream subscription errored). Gentle on purpose: it does NOT disconnect — an
      *  explicit disconnect won't auto-reconnect (the SDK treats it as intentional) and a
-     *  reconnect needs a scan, which can't run with the screen off; repeated disconnect
+     *  reconnect needs a scan, and Android returns nothing to an unfiltered scan while the
+     *  screen is off (PresenceWatch's address filter is exempt); repeated disconnect
      *  churn also wedges the BLE scanner. If the H10 is truly orphaned (after a force-stop /
      *  abrupt kill), only a Bluetooth toggle clears it. Driven by HrvEngine's watchdog. */
     public void nudgeStreams() {
@@ -415,6 +436,8 @@ public final class PolarBle {
     public void stop() {
         stopping = true;
         connectionRetry.stop();
+        presence.close();
+        wakeups.close();
         stages.stop("user_or_service_stop");
         recordingActive = false;
         disposeStreams();

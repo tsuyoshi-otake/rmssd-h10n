@@ -7,29 +7,46 @@ import static org.junit.Assert.*;
 
 public class BleConnectionRetryTest {
     private static final class Event {
-        long at; Runnable action; boolean cancelled;
-        Event(long at, Runnable action) { this.at = at; this.action = action; }
+        final long at; final boolean waking; final Runnable action; boolean cancelled;
+        Event(long at, boolean waking, Runnable action) { this.at = at; this.waking = waking; this.action = action; }
     }
+    /** Every test also checks the standby contract: standby and resume alternate, and while
+     *  the link stands by nothing reaches the SDK and only the backoff's own stage is shown. */
     private static final class Harness implements BleConnectionRetry.Link {
-        long now; int connects, cancels, attempt; boolean up, throwsConnect, throwsCancel, lossyTimer;
+        long now; int connects, cancels, attempt; boolean up, throwsConnect, throwsCancel, lossyTimer, standing;
         double jitter; Runnable duringConnect, duringSchedule;
         String state, reason; long nextAt;
         final List<Event> events = new ArrayList<>();
         final List<String> reports = new ArrayList<>();
         final List<String> calls = new ArrayList<>();
-        final BleConnectionRetry retry = new BleConnectionRetry((delay, action) -> {
-            Event e = new Event(now + delay, action); events.add(e);
+        final BleConnectionRetry retry = new BleConnectionRetry((delay, waking, action) -> {
+            Event e = new Event(now + delay, waking, action); events.add(e);
             if (duringSchedule != null) duringSchedule.run();
             return () -> { if (!lossyTimer) e.cancelled = true; };
         }, this, () -> now, () -> jitter);
         public boolean connected() { return up; }
         public void connect() {
+            assertFalse("connect while standing by", standing);
             connects++; calls.add("connect");
             if (duringConnect != null) duringConnect.run();
             if (throwsConnect) throw new IllegalStateException();
         }
-        public void cancel() { cancels++; calls.add("cancel"); if (throwsCancel) throw new IllegalStateException(); }
-        public void report(String s, String r, int n, long next) { state=s; reason=r; attempt=n; nextAt=next; reports.add(s+"/"+r); }
+        public void cancel() {
+            assertFalse("cancel while standing by", standing);
+            cancels++; calls.add("cancel"); if (throwsCancel) throw new IllegalStateException();
+        }
+        public void report(String s, String r, int n, long next) {
+            assertFalse("the next owner's stage while standing by: " + s, standing && !"retry_wait".equals(s));
+            state=s; reason=r; attempt=n; nextAt=next; reports.add(s+"/"+r);
+        }
+        public void standby(boolean watch) {
+            assertFalse("standby twice", standing);
+            standing = true; calls.add(watch ? "standby+watch" : "standby");
+        }
+        public void resume() {
+            assertTrue("resume without standby", standing);
+            standing = false; calls.add("resume");
+        }
         void establish() { up=true; retry.connected(); }
         void lose() { up=false; retry.disconnected(); }
         void advance(long duration) {
@@ -43,6 +60,9 @@ public class BleConnectionRetryTest {
             now=end;
         }
         long pending() { return events.stream().filter(e -> !e.cancelled).count(); }
+        Event armed() { return events.stream().filter(e -> !e.cancelled).reduce((a, b) -> b).orElseThrow(); }
+        String lastCall() { return calls.get(calls.size() - 1); }
+        String lastReport() { return reports.get(reports.size() - 1); }
     }
 
     @Test public void acceptedButSilentRequestTimesOutAndRetriesAfterBackoff() {
@@ -279,6 +299,87 @@ public class BleConnectionRetryTest {
         Harness h=new Harness(); h.duringSchedule=h.retry::stop;
         h.retry.request("initial");
         assertEquals(0,h.pending()); assertEquals(0,h.connects);
+    }
+
+    // #31/#32: a backoff leaves nothing pending, so the link stands by — the CPU may sleep and
+    // the device is looked for — and a sighting connects at once instead of after the backoff.
+    @Test public void aBackoffStandsByAndWatchesOnAWakingTimer() {
+        Harness h=new Harness(); h.retry.request("initial");
+        assertFalse(h.armed().waking);                       // the deadline runs while awake
+        h.advance(60_000);
+        assertEquals(List.of("connect","cancel","standby+watch"),h.calls);
+        assertTrue(h.standing); assertEquals("retry_wait",h.state);
+        assertEquals(1,h.pending()); assertTrue(h.armed().waking);
+        h.advance(30_000);
+        assertEquals(List.of("connect","cancel","standby+watch","resume","connect"),h.calls);
+        assertFalse(h.armed().waking); assertEquals("connecting/deadline_retry",h.lastReport());
+    }
+
+    @Test public void aSightingConnectsAtOnceInsteadOfWaitingTheBackoffOut() {
+        Harness h=new Harness(); h.retry.request("initial"); h.advance(60_000); h.advance(10_000);
+        h.retry.sighted();
+        assertEquals(List.of("connect","cancel","standby+watch","resume","connect"),h.calls);
+        assertEquals("connecting/sighted",h.lastReport()); assertEquals(2,h.attempt);
+        assertEquals(h.now+BleConnectionRetry.DEADLINE_MS,h.nextAt);
+        assertEquals(1,h.pending()); assertFalse(h.armed().waking);   // the backoff timer is gone
+        h.establish(); assertEquals("connected/link_ready",h.lastReport()); assertEquals(0,h.pending());
+    }
+
+    @Test public void aSightingOutsideAWatchingBackoffIsIgnored() {
+        Harness h=new Harness(); h.retry.sighted();                     // idle
+        h.retry.request("initial"); h.retry.sighted();                  // connect window
+        h.establish(); h.retry.sighted();                               // up
+        h.lose(); h.retry.sighted();                                    // SDK reconnect window
+        assertEquals(List.of("connect"),h.calls);
+        h.advance(60_000); h.retry.stop(); h.retry.sighted();           // stopped in a backoff
+        assertEquals(List.of("connect","cancel","standby+watch"),h.calls);
+    }
+
+    @Test public void aSightedAttemptThatFailsBacksOffOnceWithoutWatching() {
+        Harness h=new Harness(); h.retry.request("initial"); h.advance(60_000);
+        h.retry.sighted(); h.advance(60_000);
+        assertEquals("standby",h.lastCall()); assertEquals(h.now+60_000,h.nextAt);
+        h.retry.sighted();                                              // a late result: still waits
+        assertEquals(2,h.connects); assertEquals(1,h.pending());
+        h.advance(60_000); assertEquals(List.of("resume","connect"),h.calls.subList(h.calls.size()-2,h.calls.size()));
+        h.advance(60_000); assertEquals("standby+watch",h.lastCall());   // the timer's attempt watches again
+    }
+
+    @Test public void theSdkReconnectWindowWatchesAgainAfterASightedLink() {
+        Harness h=new Harness(); h.retry.request("initial"); h.advance(60_000);
+        h.retry.sighted(); h.establish(); h.lose(); h.advance(60_000);
+        assertEquals("standby+watch",h.lastCall());
+    }
+
+    @Test public void onlyTheBackoffTimerWakesTheCpu() {
+        Harness h=new Harness(); h.establish(); h.up=false; h.retry.restart("stall",3_000);
+        assertFalse(h.armed().waking);                                  // settle
+        h.advance(3_000); assertFalse(h.armed().waking);                // deadline
+        h.advance(60_000); assertTrue(h.armed().waking);                // backoff
+        h.retry.stop(); assertEquals(0,h.pending());
+    }
+
+    @Test public void everyWayOutOfABackoffResumesFirst() {
+        List<java.util.function.Consumer<Harness>> exits = List.of(
+                x -> x.advance(30_000), x -> x.retry.sighted(), x -> x.retry.adapterRestarted(),
+                x -> x.retry.reconnect("rebond"), x -> x.retry.restart("stall",3_000),
+                x -> { x.up=true; x.retry.connected(); });
+        for (java.util.function.Consumer<Harness> exit : exits) {
+            Harness h=new Harness(); h.retry.request("initial"); h.advance(60_000);
+            int before=h.calls.size(); exit.accept(h);
+            assertFalse(h.standing); assertEquals("resume",h.calls.get(before));
+        }
+    }
+
+    @Test public void aStaleConnectedInABackoffKeepsStandingBy() {
+        Harness h=new Harness(); h.retry.request("initial"); h.advance(60_000);
+        h.retry.connected();                                            // a link already gone again
+        assertTrue(h.standing); assertEquals("retry_wait/connect_timeout",h.lastReport());
+    }
+
+    @Test public void aBackoffThatCannotCancelHaltsWithoutStandingBy() {
+        Harness h=new Harness(); h.throwsCancel=true; h.retry.request("initial"); h.advance(60_000);
+        assertFalse(h.calls.contains("standby+watch")); assertFalse(h.standing);
     }
 
     @Test public void aSupersededTimerThatFiresAnywayDoesNothing() {

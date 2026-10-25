@@ -54,6 +54,7 @@ public class MonitorService extends Service {
     private static HrvEngine.Emitter sEmitter; // set by the plugin (WebView lifecycle)
 
     private PowerManager.WakeLock wakeLock;
+    private HrvEngine cpuOwner;   // the engine whose standby may let the CPU sleep (guarded by this)
     private HrvDb db;
     private HrvEngine engine;
     private TtsSpeaker tts; // relax-mode voice readout (created with the engine, on the main thread)
@@ -123,14 +124,7 @@ public class MonitorService extends Service {
                 startForeground(NOTIF_ID, n);
             }
 
-            if (wakeLock == null) {
-                PowerManager pm = getSystemService(PowerManager.class);
-                if (pm != null) {
-                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rmssd:monitor");
-                    wakeLock.setReferenceCounted(false);
-                    wakeLock.acquire();
-                }
-            }
+            createWakeLock();
 
             handleIntent(intent);
             if (engine != null) return START_STICKY;
@@ -140,6 +134,31 @@ public class MonitorService extends Service {
         }
         stopSelf(); // no idle foreground notification or wake lock without an engine.
         return START_NOT_STICKY;
+    }
+
+    private synchronized void createWakeLock() {
+        if (wakeLock != null) return;
+        PowerManager pm = getSystemService(PowerManager.class);
+        if (pm == null) return;
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rmssd:monitor");
+        wakeLock.setReferenceCounted(false);
+        wakeLock.acquire();
+    }
+
+    /** Keeps the CPU awake for {@code owner}. Let go while its link stands by in a backoff
+     *  with nothing pending (#32): the backoff's alarm or a sighting of the H10 wakes the CPU,
+     *  and the link takes the lock back as it resumes. A stopped engine's late report is
+     *  ignored once another engine owns the CPU, and synchronization with onDestroy keeps a
+     *  late resume from re-acquiring a lock that was already dropped. */
+    private synchronized void keepCpuAwake(HrvEngine owner, boolean awake) {
+        if (wakeLock == null || owner != cpuOwner) return;
+        if (awake) wakeLock.acquire();
+        else if (wakeLock.isHeld()) wakeLock.release();
+    }
+
+    private synchronized void ownCpu(HrvEngine owner) {
+        cpuOwner = owner;
+        keepCpuAwake(owner, true);   // a previous engine may have let go while standing by
     }
 
     /** The notification distinguishes process survival from real collection. */
@@ -239,6 +258,9 @@ public class MonitorService extends Service {
         if (tts == null) tts = new TtsSpeaker(getApplicationContext());
         engine.setSpeaker(tts);
         engine.setLinkStateSink(this::updateNotification); // surface a stalled link in the notification
+        HrvEngine started = engine;
+        started.setStandbySink(standby -> keepCpuAwake(started, !standby));
+        ownCpu(started);
         engine.setPowerSave("1".equals(db().kvGet("powerSave"))); // 省電力モード（kv未設定=既定OFF=ACC連続・歩数あり）
         engine.setPostureEnabled(!"0".equals(db().kvGet("postureEnabled"))); // 姿勢推定（kv未設定=既定ON）。OFFでACC停止＝H10電池節約
         engine.setBreathingAlertVoice(!"0".equals(db().kvGet("breathingAlertVoice"))); // 既定ON。設定でOFF可
@@ -316,8 +338,10 @@ public class MonitorService extends Service {
         try { if (tts != null) tts.shutdown(); }
         catch (RuntimeException failure) { Log.w(TAG, "speech cleanup failed", failure); }
         finally { tts = null; }
-        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
-        wakeLock = null;
+        synchronized (this) {
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+            wakeLock = null;
+        }
         if (INSTANCE == this) INSTANCE = null;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(Service.STOP_FOREGROUND_REMOVE);

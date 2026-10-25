@@ -58,6 +58,9 @@ public final class HrvEngine {
 
     /** Reports whether measurement is actually receiving fresh accepted RR. */
     public interface LinkStateSink { void onCollectionState(CollectionState state); }
+    /** Told when the sensor link stands by in a backoff with nothing pending (the CPU may
+     *  sleep) and when it resumes. */
+    public interface StandbySink { void onStandby(boolean standby); }
 
     private final Context ctx;
     private final HrvDb db;
@@ -90,6 +93,7 @@ public final class HrvEngine {
     private long lastSpokenAt = 0;               // tick-thread throttle for the readout
     private final BreathingAlert breathingAlert = new BreathingAlert();
     private volatile LinkStateSink linkStateSink; // foreground-notification link hint (null = none)
+    private volatile StandbySink standbySink;     // the service's wake lock (null = none)
     private CollectionState shownCollectionState; // tick thread only
     private double lastPeakMs = 0;
     private long beats = 0;
@@ -143,6 +147,7 @@ public final class HrvEngine {
     public void setEmitter(Emitter e) { this.emitter = e; }
     public void setSpeaker(Speaker s) { this.speaker = s; }
     public void setLinkStateSink(LinkStateSink s) { this.linkStateSink = s; }
+    public void setStandbySink(StandbySink s) { this.standbySink = s; }
 
     /** Relax-mode readout interval in seconds (0 = off). Speaks the first reading promptly. */
     public void setRelaxIntervalSec(int sec) {
@@ -269,6 +274,10 @@ public final class HrvEngine {
     private PolarBle.Sink createBleSink() {
         return new PolarBle.Sink() {
             @Override public void onHr(int hr) { deviceHr = hr; }
+            @Override public void onStandby(boolean standby) {
+                StandbySink s = standbySink;
+                if (s != null) s.onStandby(standby);
+            }
             @Override public void onRr(double rrMs) {
                 long receivedAt = System.currentTimeMillis();
                 if (!Double.isFinite(rrMs) || rrMs < 300 || rrMs > 2000) {

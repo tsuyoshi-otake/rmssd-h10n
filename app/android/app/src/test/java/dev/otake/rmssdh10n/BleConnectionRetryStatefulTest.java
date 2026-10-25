@@ -13,7 +13,8 @@ import static org.junit.Assert.*;
  *  callbacks (posted to the main thread, then forwarded to exec), timers and native failures
  *  run against the real supervisor and an independent reference model of its contract; every
  *  step also checks environment invariants (every native connect is one the SDK acts on, one
- *  timer, a truthful stage at quiescence, someone owning the next step while disconnected).
+ *  timer, a truthful stage at quiescence, someone owning the next step while disconnected, and
+ *  the link standing by exactly through a backoff on a timer that wakes the CPU, #31/#32).
  *
  *  The session model follows Polar BLE SDK 6.16.1 (BDBleApiImpl bytecode): connectToDevice
  *  acts only on a closed session and is silently ignored otherwise; disconnectFromDevice
@@ -21,7 +22,7 @@ import static org.junit.Assert.*;
  *  Bluetooth power-off parks the session (automatic reconnection on). */
 public class BleConnectionRetryStatefulTest {
     enum Op { REQUEST, RECONNECT, RESTART, ADAPTER, SDK_CONNECTS, LINK_DROPS, MAIN, EXEC, ADVANCE,
-              CANCEL_FAILS, CONNECT_FAILS, STOP }
+              SIGHTED, CANCEL_FAILS, CONNECT_FAILS, STOP }
     enum Session { CLOSED, OPENING, OPEN, PARK }
     enum Cb { CONNECTED, DISCONNECTED, BT_ON }
 
@@ -37,15 +38,16 @@ public class BleConnectionRetryStatefulTest {
 
     static Cmd gen(Random r) {
         int x = r.nextInt(100);
-        if (x < 24) return new Cmd(Op.ADVANCE, ADVANCES[r.nextInt(ADVANCES.length)]);
-        if (x < 38) return new Cmd(Op.MAIN, -1);
-        if (x < 52) return new Cmd(Op.EXEC, -1);
-        if (x < 60) return new Cmd(Op.SDK_CONNECTS, -1);
-        if (x < 66) return new Cmd(Op.LINK_DROPS, -1);
-        if (x < 72) return new Cmd(Op.RESTART, SETTLES[r.nextInt(SETTLES.length)]);
-        if (x < 77) return new Cmd(Op.RECONNECT, -1);
-        if (x < 81) return new Cmd(Op.ADAPTER, -1);
-        if (x < 87) return new Cmd(Op.REQUEST, -1);
+        if (x < 22) return new Cmd(Op.ADVANCE, ADVANCES[r.nextInt(ADVANCES.length)]);
+        if (x < 35) return new Cmd(Op.MAIN, -1);
+        if (x < 48) return new Cmd(Op.EXEC, -1);
+        if (x < 56) return new Cmd(Op.SDK_CONNECTS, -1);
+        if (x < 62) return new Cmd(Op.LINK_DROPS, -1);
+        if (x < 68) return new Cmd(Op.RESTART, SETTLES[r.nextInt(SETTLES.length)]);
+        if (x < 73) return new Cmd(Op.RECONNECT, -1);
+        if (x < 77) return new Cmd(Op.ADAPTER, -1);
+        if (x < 82) return new Cmd(Op.REQUEST, -1);
+        if (x < 88) return new Cmd(Op.SIGHTED, -1);   // late or stray reports included
         if (x < 92) return new Cmd(Op.CANCEL_FAILS, r.nextInt(2));
         if (x < 97) return new Cmd(Op.CONNECT_FAILS, r.nextInt(2));
         return new Cmd(Op.STOP, -1);
@@ -72,36 +74,50 @@ public class BleConnectionRetryStatefulTest {
     /** The environment PolarBle gives the supervisor: an SDK session, the main-thread
      *  callback queue, the exec lane, and PolarBle's linkConnected flag. */
     static final class World implements BleConnectionRetry.Link {
-        private static final class Timer { final long at; final Runnable action; boolean done;
-            Timer(long at, Runnable action) { this.at = at; this.action = action; } }
+        private static final class Timer { final long at; final boolean waking; final Runnable action; boolean done;
+            Timer(long at, boolean waking, Runnable action) { this.at = at; this.waking = waking; this.action = action; } }
         long now;
         Session session = Session.CLOSED;
-        boolean linkFlag, cancelFails, connectFails;
+        boolean linkFlag, cancelFails, connectFails, standing;
         final Deque<Cb> main = new ArrayDeque<>(), exec = new ArrayDeque<>();
         final List<Timer> timers = new ArrayList<>();
         final List<String> effects = new ArrayList<>(), violations = new ArrayList<>();
         String lastStage, lastReason; long lastNextAt; boolean stopped;
-        final BleConnectionRetry retry = new BleConnectionRetry((delay, action) -> {
-            Timer t = new Timer(now + delay, action); timers.add(t);
+        final BleConnectionRetry retry = new BleConnectionRetry((delay, waking, action) -> {
+            Timer t = new Timer(now + delay, waking, action); timers.add(t);
             return () -> t.done = true;
         }, this, () -> now, () -> JITTER);
 
         public boolean connected() { return linkFlag; }
         public void connect() {
             effects.add("connect");
+            if (standing) violations.add("connect while standing by");
             if (connectFails) throw new IllegalStateException("connect failed");
             if (session != Session.CLOSED) violations.add("connect ignored by the SDK: session " + session);
             else session = Session.OPENING;
         }
         public void cancel() {
             effects.add("cancel");
+            if (standing) violations.add("cancel while standing by");
             if (cancelFails) throw new IllegalStateException("cancel failed");
             if (session != Session.CLOSED) main.add(Cb.DISCONNECTED);   // the SDK echoes every closed session
             session = Session.CLOSED;
         }
         public void report(String stage, String reason, int attempt, long nextAt) {
             effects.add(stage + "/" + reason + "#" + attempt + "@" + nextAt);
+            if (standing && !stage.equals("retry_wait")) violations.add("the next owner's stage while standing by: " + stage);
             lastStage = stage; lastReason = reason; lastNextAt = nextAt;
+        }
+        public void standby(boolean watch) {
+            effects.add(watch ? "standby+watch" : "standby");
+            if (standing) violations.add("standby twice");
+            if (session != Session.CLOSED) violations.add("standby with the session " + session);
+            standing = true;
+        }
+        public void resume() {
+            effects.add("resume");
+            if (!standing) violations.add("resume without standby");
+            standing = false;
         }
 
         void apply(Cmd c, Spec spec) {
@@ -134,6 +150,7 @@ public class BleConnectionRetryStatefulTest {
                     break;
                 }
                 case ADVANCE: advance(c.arg); spec.advance(c.arg); break;
+                case SIGHTED: retry.sighted(); spec.sighted(); break;
                 case CANCEL_FAILS: cancelFails = c.arg == 1; break;
                 case CONNECT_FAILS: connectFails = c.arg == 1; break;
                 case STOP: stopped = true; retry.stop(); spec.stop(); break;
@@ -156,6 +173,8 @@ public class BleConnectionRetryStatefulTest {
             for (Timer t : timers) if (!t.done) { armed = t; count++; }
             assertTrue(at + ": more than one supervisor timer armed", count <= 1);
             if (stopped) { assertEquals(at + ": timer armed after stop", 0, count); return; }
+            assertEquals(at + ": stands by exactly through a backoff", "retry_wait".equals(lastStage), standing);
+            if (armed != null) assertEquals(at + ": only the standby's timer wakes the CPU", standing, armed.waking);
             if (lastStage == null || !main.isEmpty() || !exec.isEmpty()) return;
             String shown = lastStage + "/" + lastReason;
             if (linkFlag) {
@@ -182,15 +201,18 @@ public class BleConnectionRetryStatefulTest {
         final List<String> effects = new ArrayList<>();
         private Phase phase = Phase.IDLE;
         private int attempt;
+        private boolean sightedAttempt;   // the current or last attempt was started by a sighting
         private long now, due = -1;
         private String settleReason, last;
 
         Spec(World env) { this.env = env; }
 
+        void request(String reason) { request(reason, false); }
         /** A link already up is owned at once rather than left to a queued callback. */
-        void request(String reason) {
+        private void request(String reason, boolean bySighting) {
             if (phase != Phase.IDLE) return;
             if (env.linkFlag) { connected(); return; }
+            sightedAttempt = bySighting;
             attempt = Math.min(20, attempt + 1);
             phase = Phase.CONNECTING; due = now + DEADLINE;
             report("connecting", reason, attempt, due);
@@ -209,6 +231,7 @@ public class BleConnectionRetryStatefulTest {
         }
         private void cancelThenRequest(String reason) {
             due = -1;
+            leave(); phase = Phase.IDLE;
             effects.add("cancel");
             if (env.cancelFails) { halt(); return; }
             phase = Phase.IDLE;
@@ -223,11 +246,13 @@ public class BleConnectionRetryStatefulTest {
                 return;
             }
             boolean wasUp = phase == Phase.UP;
+            leave();
             phase = Phase.UP; attempt = 0; due = -1;
             if (!wasUp) report("connected", "link_ready", 0, 0);
         }
         void disconnected() {
             if (phase != Phase.UP) return;
+            sightedAttempt = false;
             report("disconnected", "link_lost", attempt, 0);
             phase = Phase.SDK_WAIT; due = now + DEADLINE;
             report("connecting", "sdk_reconnect", attempt, due);
@@ -235,10 +260,18 @@ public class BleConnectionRetryStatefulTest {
         void restart(String reason, long settle) {
             if (phase == Phase.STOPPED || phase == Phase.HALTED) return;
             due = -1;
+            leave(); phase = Phase.SETTLE;
             report("connecting", reason, attempt, now + settle + DEADLINE);
             effects.add("cancel");
             if (env.cancelFails) { halt(); return; }
             phase = Phase.SETTLE; settleReason = reason; due = now + settle;
+        }
+        /** Seeing the device cuts a watching backoff short; any other sighting is ignored. */
+        void sighted() {
+            if (phase != Phase.BACKOFF || sightedAttempt) return;
+            due = -1;
+            leave(); phase = Phase.IDLE;
+            request("sighted", true);
         }
         void stop() { phase = Phase.STOPPED; due = -1; }
         void advance(long duration) {
@@ -247,7 +280,7 @@ public class BleConnectionRetryStatefulTest {
                 now = due; due = -1;
                 Phase fired = phase;
                 if (fired == Phase.CONNECTING || fired == Phase.SDK_WAIT) fail("connect_timeout");
-                else if (fired == Phase.BACKOFF) { phase = Phase.IDLE; request("deadline_retry"); }
+                else if (fired == Phase.BACKOFF) { leave(); phase = Phase.IDLE; request("deadline_retry"); }
                 else if (fired == Phase.SETTLE) { phase = Phase.IDLE; request(settleReason); }
             }
             now = end;
@@ -260,7 +293,10 @@ public class BleConnectionRetryStatefulTest {
             long base = BACKOFF_BASE[Math.min(3, Math.max(0, attempt - 1))];
             phase = Phase.BACKOFF; due = now + (long) (base * (1 + JITTER * 0.25));
             report("retry_wait", reason, attempt, due);
+            effects.add(sightedAttempt ? "standby" : "standby+watch");   // one blind backoff after a failed sighting
         }
+        /** The backoff's standby ends before whatever comes next. */
+        private void leave() { if (phase == Phase.BACKOFF) effects.add("resume"); }
         private void halt() {
             phase = Phase.HALTED; due = -1;
             report("needs_action", "connect_cancel_failed", attempt, 0);
