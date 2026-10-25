@@ -27,8 +27,10 @@ android {
         // (no-op) so pure logic that happens to log is testable. org.json stays real (see deps).
         unitTests.returnDefaultValues = true
         // BleLinkModelCheckTest depth: ./gradlew :app:testDebugUnitTest -Dble.mc.depth=13
+        // (its visited states live in memory: the default depth 11 holds ~2.3 M of them).
         unitTests.all {
             def depth = System.getProperty('ble.mc.depth')
+            maxHeapSize = '3g'
             if (depth) { systemProperty 'ble.mc.depth', depth; maxHeapSize = '8g' }
         }
     }

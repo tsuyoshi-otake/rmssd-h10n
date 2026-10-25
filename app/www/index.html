@@ -1591,8 +1591,12 @@
         stall: '応答のない接続を張り直しています',
         recording_stuck: '記録を取得するため接続を張り直しています',
         rebond: 'Bluetoothのペア設定をやり直しています',
+        pairing: 'H10とのペア設定を確認しています。許可を求められたら「ペア設定する」を選んでください',
       };
       let text = labels[c.reason] || '';
+      if (!text && s.connected && s.pairingNeeded) {
+        text = 'H10のペア設定が必要です。アプリを開き直すと許可を求めます（10分に1回まで）';
+      }
       if (c.stage === 'retry_wait' && c.nextRetryAt) {
         const sec = Math.max(0, Math.ceil((Date.parse(c.nextRetryAt) - Date.now()) / 1000));
         text = `${text || '再試行を待っています'}${sec ? ` · 約${sec}秒後` : ''}`;

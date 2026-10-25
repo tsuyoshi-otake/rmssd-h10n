@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mutation testing for the Android BLE connection-state classes.
 
-Mutates BleConnectionRetry and BleStageReporter one change at a time and runs their unit,
+Mutates BleConnectionRetry, BleStageReporter and PairingPrompt one change at a time and runs their unit,
 stateful PBT and model-check tests against each mutant. A mutant is killed when a test
 fails or times out; one that does not compile is stillborn and not counted. Survivors are
 printed with their line so each can be killed by a new test or argued equivalent.
@@ -27,9 +27,9 @@ ANDROID = os.path.dirname(HERE)
 PKG = "dev/otake/rmssdh10n"
 MAIN = os.path.join(ANDROID, "app/src/main/java", PKG)
 TEST = os.path.join(ANDROID, "app/src/test/java", PKG)
-TARGETS = ["BleConnectionRetry", "BleStageReporter"]
+TARGETS = ["BleConnectionRetry", "BleStageReporter", "PairingPrompt"]
 # Cheapest first: a mutant stops at the first failing class.
-TESTS = ["BleConnectionRetryTest", "BleStageReporterTest", "BleConnectionRetryStatefulTest",
+TESTS = ["PairingPromptTest", "BleConnectionRetryTest", "BleStageReporterTest", "BleConnectionRetryStatefulTest",
          "BleStageReporterStatefulTest", "BleLinkModelCheckTest"]
 SUPPORT = ["StatefulPbt"]
 HEAP = "-Xmx3g"   # per mutant JVM; the model check holds its visited states in memory

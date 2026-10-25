@@ -14,8 +14,8 @@ import static org.junit.Assert.*;
  *  every interleaving, up to a depth bound, of SDK callbacks (main thread), control-lane tasks,
  *  timers, recording-lane jobs, selection scans, native failures and stop against the real
  *  BleConnectionRetry and BleStageReporter, wired as PolarBle wires them (markLinkDown and the
- *  link generation, the recording-stage gate, rebond hold/reconnect, clean reconnect, adapter
- *  restart). A state is rebuilt by replaying its path and deduplicated by an abstract key
+ *  link generation, the recording-stage gate, rebond and pairing hold/reconnect, clean
+ *  reconnect, adapter restart). A state is rebuilt by replaying its path and deduplicated by an abstract key
  *  (supervisor and reporter fields read by reflection, session, queues, relative times); the
  *  key must cover every field that can change a later step, or the search prunes states it
  *  has not really seen.
@@ -30,12 +30,12 @@ import static org.junit.Assert.*;
  *  here; keep {@link Sys} in step with PolarBle when that glue changes. */
 public class BleLinkModelCheckTest {
     enum Act { SDK_CONNECTS, LINK_DROPS, ADAPTER, MAIN, EXEC, TIMER, REC_READY, REC_RETRY, REC_RECONNECT,
-               REC_REBOND, BOND_DONE, WATCHDOG, SCAN_BEGIN, SCAN_END, CANCEL_FAILS, CONNECT_FAILS, STOP }
+               REC_REBOND, BOND_DONE, WATCHDOG, PAIR, SCAN_BEGIN, SCAN_END, CANCEL_FAILS, CONNECT_FAILS, STOP }
     enum Session { CLOSED, OPENING, OPEN, PARK }
     // Main-thread SDK callbacks and control-lane (exec) tasks.
     static final int CB_CONNECTED = 0, CB_FEATURE = 1, CB_DISCONNECTED = 2, CB_BT_ON = 3;
     static final int T_CONNECTED = 0, T_DISCONNECTED = 1, T_REC_WAIT = 2, T_BT_ON = 3, T_CLEAN = 4,
-                     T_HOLD = 5, T_REBOND_RECONNECT = 6;
+                     T_HOLD = 5, T_REBOND_RECONNECT = 6, T_PAIR = 7, T_PAIR_RECONNECT = 8;
     static final Act[] ACTS = Act.values();
     private static final Set<String> LINK_UP = new HashSet<>(Arrays.asList(
             "connected/link_ready", "recording_wait/streams_settling", "streaming/recording_ready"));
@@ -118,11 +118,13 @@ public class BleLinkModelCheckTest {
             Timer(long at, Runnable action) { this.at = at; this.action = action; } }
         long now;
         Session session = Session.CLOSED;
-        boolean linkFlag, handled, stopping, cancelFails, connectFails, scanActive, rebonding, stopPublished;
+        boolean linkFlag, handled, stopping, cancelFails, connectFails, scanActive, stopPublished, pairSpent;
         int connGen;
         Integer recordingGen;   // set while the recording lane publishes through reportIf
         String shown; long shownNextAt;
-        final ArrayDeque<Integer> main = new ArrayDeque<>(), rec = new ArrayDeque<>();
+        // The recording lane's blocking OS bonds (rebond, pairing), in order; each entry is the
+        // control-lane task its completion posts. Recording jobs wait behind them on that lane.
+        final ArrayDeque<Integer> main = new ArrayDeque<>(), rec = new ArrayDeque<>(), bonds = new ArrayDeque<>();
         final ArrayDeque<int[]> exec = new ArrayDeque<>();
         final List<Timer> timers = new ArrayList<>();
         final List<String> violations = new ArrayList<>();
@@ -178,10 +180,12 @@ public class BleLinkModelCheckTest {
                 case MAIN: return !main.isEmpty();
                 case EXEC: return !exec.isEmpty();
                 case TIMER: return armed() != null;
-                case REC_READY: case REC_RETRY: case REC_RECONNECT: return !rec.isEmpty() && !rebonding;
-                case REC_REBOND: return !rec.isEmpty() && !rebonding;
-                case BOND_DONE: return rebonding;
+                case REC_READY: case REC_RETRY: case REC_RECONNECT: return !rec.isEmpty() && bonds.isEmpty();
+                case REC_REBOND: return !rec.isEmpty() && bonds.isEmpty();
+                case BOND_DONE: return !bonds.isEmpty();
                 case WATCHDOG: return !stopping && exec.size() < MAX_QUEUE;
+                // PairingPrompt spends one prompt per 10 min; a second pairing has the same shape.
+                case PAIR: return !stopping && !pairSpent && exec.size() < MAX_QUEUE;
                 case SCAN_BEGIN: return !stopping && !scanActive;
                 case SCAN_END: return scanActive;
                 case CANCEL_FAILS: case CONNECT_FAILS: return true;
@@ -209,11 +213,15 @@ public class BleLinkModelCheckTest {
                 case REC_RECONNECT: { int gen = rec.poll(); if (currentRecordingJob(gen)) execSafe(T_CLEAN, 0); break; }
                 case REC_REBOND: { // holdLinkForRebond on exec, then PolarBonding.rebond blocks this lane
                     int gen = rec.poll();
-                    if (currentRecordingJob(gen)) { execSafe(T_HOLD, 0); rebonding = true; }
+                    if (currentRecordingJob(gen)) { execSafe(T_HOLD, 0); bonds.add(T_REBOND_RECONNECT); }
                     break;
                 }
-                case BOND_DONE: rebonding = false; execSafe(T_REBOND_RECONNECT, 0); break;
-                case WATCHDOG: execSafe(T_CLEAN, 0); break;   // forceReconnect with stale RR
+                case BOND_DONE: execSafe(bonds.poll(), 0); break;
+                // forceReconnect with stale RR
+                case WATCHDOG: execSafe(T_CLEAN, 0); break;
+                // foregroundEntered (or start) with an unbonded H10, stale RR and a prompt to spend:
+                // pairIfDue may come in any link state.
+                case PAIR: pairSpent = true; execSafe(T_PAIR, 0); break;
                 case SCAN_BEGIN: scanActive = true; stages.beginOverlay("scanning", "device_selection", 0, 0); break;
                 case SCAN_END: stages.endOverlay(); scanActive = false; break;
                 case CANCEL_FAILS: cancelFails = !cancelFails; break;
@@ -243,6 +251,10 @@ public class BleLinkModelCheckTest {
                 case T_CLEAN: if (!stopping) { markLinkDown(); retry.restart("stall", 3_000); } break;
                 case T_HOLD: if (!stopping) { markLinkDown(); retry.restart("rebond", 45_000); } break;
                 case T_REBOND_RECONNECT: retry.reconnect("rebond"); break;
+                case T_PAIR:   // pairIfDue: hold the link down, then bond on the recording lane
+                    if (!stopping) { markLinkDown(); retry.restart("pairing", 75_000); bonds.add(T_PAIR_RECONNECT); }
+                    break;
+                case T_PAIR_RECONNECT: retry.reconnect("pairing"); break;
             }
         }
 
@@ -252,7 +264,7 @@ public class BleLinkModelCheckTest {
             return first;
         }
         private int armedCount() { int n = 0; for (Timer t : timers) if (!t.done) n++; return n; }
-        boolean quiescent() { return main.isEmpty() && exec.isEmpty() && rec.isEmpty() && !scanActive && !rebonding; }
+        boolean quiescent() { return main.isEmpty() && exec.isEmpty() && rec.isEmpty() && !scanActive && bonds.isEmpty(); }
 
         boolean ready() { return quiescent() && linkFlag && phase(retry).equals("UP") && LINK_UP.contains(shown); }
 
@@ -262,7 +274,7 @@ public class BleLinkModelCheckTest {
             if (scanActive) return Act.SCAN_END;
             if (!main.isEmpty()) return Act.MAIN;
             if (!exec.isEmpty()) return Act.EXEC;
-            if (rebonding) return Act.BOND_DONE;
+            if (!bonds.isEmpty()) return Act.BOND_DONE;
             if (!rec.isEmpty()) return Act.REC_READY;
             if (session == Session.OPENING || session == Session.PARK) return Act.SDK_CONNECTS;
             if (armed() != null) return Act.TIMER;
@@ -302,7 +314,7 @@ public class BleLinkModelCheckTest {
             StringBuilder k = new StringBuilder();
             k.append(session).append(linkFlag ? 'L' : 'l').append(handled ? 'H' : 'h').append(stopping ? 'S' : 's')
              .append(cancelFails ? 'C' : 'c').append(connectFails ? 'F' : 'f').append(scanActive ? 'N' : 'n')
-             .append(rebonding ? 'R' : 'r').append(stopPublished ? 'P' : 'p');
+             .append(stopPublished ? 'P' : 'p').append(pairSpent ? 'Y' : 'y');
             k.append("|r").append(phase(retry)).append(field(STOPPED, retry) ? 1 : 0).append(',').append(intField(ATTEMPT, retry));
             long ownNextAt = (Long) get(OWN_NEXT_AT, retry);   // the stage a stale connected() shows again
             k.append('>').append(get(OWN_STAGE, retry)).append('/').append(get(OWN_REASON, retry)).append('#')
@@ -312,6 +324,8 @@ public class BleLinkModelCheckTest {
             k.append("|m").append(main).append("|e");
             for (int[] task : exec) k.append(task[0]).append(task[0] == T_REC_WAIT ? ":" + (connGen - task[1]) : "").append(',');
             k.append("|q");
+            for (int task : bonds) k.append(task == T_PAIR_RECONNECT ? 'p' : 'r');
+            k.append('/');
             for (int gen : rec) k.append(connGen - gen).append(',');
             k.append("|s").append(shown).append('@').append(shownNextAt == 0 ? 0 : shownNextAt - now);
             Object beneath = get(BENEATH, stages), current = get(CURRENT, stages);

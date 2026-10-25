@@ -444,7 +444,9 @@ public final class HrvEngine {
         // "measuring"; connection wait and a silent connected link remain distinct.
         boolean quiet = connected && cs > 0 && !delivering && now - silentSince > NOTIF_STALE_MS;
         boolean fresh = connected && lastRrAt > 0 && (now - lastRrAt) < POINT_FRESH_MS;
-        CollectionState collectionState = CollectionState.from(connected, fresh, quiet);
+        PolarBle link = ble;
+        boolean pairingNeeded = quiet && link != null && !link.isBonded();   // #30
+        CollectionState collectionState = CollectionState.from(connected, fresh, quiet, pairingNeeded);
         if (collectionState != shownCollectionState) {
             shownCollectionState = collectionState;
             notifyCollectionState(collectionState);
@@ -517,6 +519,7 @@ public final class HrvEngine {
             JSONObject status = new JSONObject();
             status.put("connected", connected);
             status.put("connection", bleStatus.snapshotJson());
+            status.put("pairingNeeded", pairingNeeded);
             status.put("user", user);
             status.put("mode", "hr-rr");
             status.put("hr", HrvJson.jn(fresh ? hrVal : null));

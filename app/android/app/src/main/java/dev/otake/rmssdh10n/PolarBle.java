@@ -1,6 +1,7 @@
 package dev.otake.rmssdh10n;
 
 import android.content.Context;
+import android.os.SystemClock;
 import android.util.Log;
 
 import com.polar.sdk.api.PolarBleApi;
@@ -161,8 +162,7 @@ public final class PolarBle {
     private int recordingAttempt = 0;                 // recording-worker only — PFTP retry counter
     private int recoveryReconnects = 0;               // recording-worker only — bounded forced reconnects on stuck PFTP
     private boolean rebondTried = false;              // recording-worker only — one OS bond reset per stuck episode
-    private long lastBondPromptAt = 0;                // recording-worker only — rate-limits OS pairing dialogs
-    private static final long BOND_PROMPT_MIN_MS = 10 * 60_000L; // one pairing prompt per 10 min at most
+    private final PairingPrompt pairing;              // one prompt budget for every lane that can ask to pair
     // Engine-provided "is live RR actually stale right now?" — consulted at the moment a
     // watchdog action RUNS (exec can lag behind the tick that queued it by a whole PFTP op).
     private volatile java.util.function.BooleanSupplier rrStale = () -> true;
@@ -184,12 +184,14 @@ public final class PolarBle {
     private final BleConnectionRetry connectionRetry;
     private static final long RESTART_SETTLE_MS = 3000;  // explicit disconnect → reconnect gap
     private static final long REBOND_HOLD_MS = 45_000;   // covers PolarBonding.rebond's bounded waits
+    private static final long PAIRING_HOLD_MS = 75_000;  // covers PolarBonding.ensureBonded's two bounded waits
 
     public PolarBle(Context ctx, String mac, boolean withAcc, Sink sink) {
         this.ctx = ctx.getApplicationContext();
         this.id = mac;
         this.withAcc = withAcc;
         this.sink = sink;
+        pairing = new PairingPrompt(SystemClock::elapsedRealtime, () -> PolarBonding.userCanAnswerPrompt(this.ctx));
         stages = new BleStageReporter(sink::onStage);
         connectionRetry = new BleConnectionRetry((delay, action) -> {
             java.util.concurrent.ScheduledFuture<?> future = exec.schedule(action, delay, TimeUnit.MILLISECONDS);
@@ -214,6 +216,10 @@ public final class PolarBle {
      *  start ours — surfaced to the UI rather than silently deleting it. */
     public boolean isExternalBlocking() { return externalBlocking; }
 
+    /** Whether the phone holds an OS bond for this H10 (without one, an H10 that demands an
+     *  encrypted link delivers no RR until the user accepts a pairing). */
+    public boolean isBonded() { return PolarBonding.isBonded(ctx, id); }
+
     /** True when ACC is being duty-cycled for power saving — steps can't be counted
      *  accurately from short bursts, so the engine omits them. */
     public boolean accDutyCycled() { return withAcc && accEnabled && accDutyCycle; }
@@ -222,9 +228,9 @@ public final class PolarBle {
         exec.execute(() -> {
             try {
                 if (stopping) return;
-                // Live HR does not require a bond. Pair only inside the deferred recording
-                // worker; otherwise ensureBonded can outlive stop() and create an SDK client
-                // after shutdown was requested (#14).
+                // Pairing (pairIfDue) starts only after the SDK client is published, so stop()
+                // owns that client and interrupts the bond wait; bonding before publishing could
+                // outlive stop() and create a client after shutdown was requested (#14).
                 Set<PolarBleApi.PolarBleSdkFeature> features = EnumSet.of(
                         PolarBleApi.PolarBleSdkFeature.FEATURE_HR,
                         PolarBleApi.PolarBleSdkFeature.FEATURE_POLAR_ONLINE_STREAMING,
@@ -251,6 +257,7 @@ public final class PolarBle {
                 })) return;
                 sink.log("connecting " + id);
                 connectionRetry.request("initial");
+                pairIfDue();
             } catch (Throwable t) {
                 sink.log("start failed: " + t.getMessage());
             }
@@ -258,10 +265,36 @@ public final class PolarBle {
     }
 
     /** App returned to foreground — nudge the SDK to restart its BLE scan (it can't
-     *  start a scan while the display is off), so a lost connection re-establishes. */
+     *  start a scan while the display is off), so a lost connection re-establishes. An
+     *  unbonded H10 that delivers no RR may be waiting on a pairing only the user can grant,
+     *  and now they can (#30). */
     public void foregroundEntered() {
         PolarBleApi a = api();
         if (a != null) { try { a.foregroundEntered(); } catch (Throwable ignored) {} }
+        execSafe(this::pairIfDue);
+    }
+
+    /** Pair an unbonded H10 that delivers no RR while the user can answer the prompt (#30).
+     *  An H10 that demands an encrypted link sends its own pairing request on every connect.
+     *  Android shows it as a dialog only once this app has called createBond for the device
+     *  and is in front; until then it is a notification, SMP times out, and the SDK's
+     *  automatic reconnect raises it again. createBond cannot start while that request is in
+     *  flight, so, like the bond reset, the link is held down through connectionRetry first;
+     *  the bond runs on the recording lane (where PFTP's pairing prompt runs too, so the two
+     *  never overlap) and a reconnect follows it, while the hold timer reconnects if the bond
+     *  hangs. On the moto g05 the createBond itself timed out without a prompt and the H10's
+     *  request on that reconnect came up as the dialog. A link whose RR flows needs no bond
+     *  for live data — the recording lane asks for one then. Must run on exec. */
+    private void pairIfDue() {
+        if (stopping || api() == null || PolarBonding.isBonded(ctx, id)) return;
+        if (!rrStale.getAsBoolean() || !pairing.claim()) return;
+        sink.log("not bonded — holding the link and requesting OS pairing (accept the dialog on the phone)");
+        markLinkDown();
+        connectionRetry.restart("pairing", PAIRING_HOLD_MS);
+        recordingSafe(() -> {
+            PolarBonding.ensureBonded(ctx, id, sink::log);
+            execSafe(() -> connectionRetry.reconnect("pairing"));
+        });
     }
 
     /** See {@link #rrStale}. Wire before {@link #start()}. */
@@ -759,7 +792,7 @@ public final class PolarBle {
             rebondTried = true;
             sink.log("recording still stuck with live RR — resetting the OS bond and reconnecting");
             holdLinkForRebond();
-            lastBondPromptAt = System.currentTimeMillis(); // rebond prompts the OS pairing dialog
+            pairing.spent(); // rebond prompts the OS pairing dialog
             boolean ok = PolarBonding.rebond(ctx, id, sink::log);
             sink.log(ok ? "bond re-established" : "bond reset failed");
             try { exec.schedule(() -> connectionRetry.reconnect("rebond"), 3, TimeUnit.SECONDS); }
@@ -787,24 +820,23 @@ public final class PolarBle {
     /** PFTP requires an encrypted (bonded) link — ANY PFTP op on an unbonded one makes the
      *  Android stack fire an OS pairing-request dialog, and with the retry/reconnect loops
      *  around recording that turns into an endless stream of dialogs. So all PFTP work is
-     *  gated here instead: already bonded → proceed; otherwise prompt for pairing at most
-     *  once per {@link #BOND_PROMPT_MIN_MS}, and only while RR is flowing (an unresponsive
-     *  H10 cannot complete SMP, so prompting would be pure dialog spam). While unbonded the
-     *  recording job re-checks periodically without prompting — live HR/RR needs no bond and
-     *  keeps streaming throughout. Must run on exec. */
+     *  gated here instead: already bonded → proceed; otherwise prompt for pairing when
+     *  {@link PairingPrompt} allows it (the user can answer, at most once per 10 min), and
+     *  only while RR is flowing (an unresponsive H10 cannot complete SMP, so prompting would
+     *  be pure dialog spam). While unbonded the recording job re-checks periodically without
+     *  prompting — live HR/RR from an H10 that does not demand encryption needs no bond and
+     *  keeps streaming throughout. Runs on the recording lane. */
     private boolean ensurePftpBond(int gen) {
         if (PolarBonding.isBonded(ctx, id)) return true;
-        long now = System.currentTimeMillis();
         if (rrStale.getAsBoolean()) {
             sink.log("not bonded and RR not flowing — postponing pairing (re-strap H10 if this persists)");
-        } else if (now - lastBondPromptAt >= BOND_PROMPT_MIN_MS) {
-            lastBondPromptAt = now;
+        } else if (pairing.claim()) {
             sink.log("not bonded — requesting OS pairing (accept the dialog on the phone)");
             PolarBonding.ensureBonded(ctx, id, sink::log);
             if (PolarBonding.isBonded(ctx, id)) return true;
             sink.log("pairing not completed — recording deferred (live HR/RR unaffected)");
         } else {
-            sink.log("not bonded — pairing prompt rate-limited; recording deferred");
+            sink.log("not bonded — pairing prompt waits for the app in front (rate-limited); recording deferred");
         }
         // Quiet re-check: picks up a bond made later (user accepts the dialog or pairs from
         // Settings) without another prompt, then resumes recording on this same connection.
