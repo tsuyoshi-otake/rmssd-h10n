@@ -71,4 +71,18 @@ public class BleStageReporterTest {
         r.report("connected", "link_ready", 0, 0);
         assertEquals(List.of("connecting", "connected"), seen);
     }
+
+    @Test public void anOverlayLeftOnScreenIsNeverRestoredByALaterScan() {
+        stages.beginOverlay("scanning", "device_selection", 0, 0); stages.endOverlay();
+        stages.beginOverlay("scanning", "device_selection", 0, 0); stages.endOverlay();
+        assertEquals(List.of("scanning/device_selection", "scanning/device_selection"), out);
+    }
+
+    @Test public void stopStageCarriesNoAttemptOrRetryTime() {
+        List<String> full = new ArrayList<>();
+        BleStageReporter reporter = new BleStageReporter((s, r, n, next) -> full.add(s + "/" + r + "#" + n + "@" + next));
+        reporter.report("retry_wait", "connect_timeout", 3, 90_000);
+        reporter.stop("user_or_service_stop");
+        assertEquals(List.of("retry_wait/connect_timeout#3@90000", "stopped/user_or_service_stop#0@0"), full);
+    }
 }

@@ -16,45 +16,50 @@ final class BleStageReporter {
         final String stage, reason;
         final int attempt;
         final long nextRetryAt;
-        Stage(String stage, String reason, int attempt, long nextRetryAt) {
+        final boolean overlay;
+        Stage(String stage, String reason, int attempt, long nextRetryAt, boolean overlay) {
             this.stage = stage; this.reason = reason; this.attempt = attempt; this.nextRetryAt = nextRetryAt;
+            this.overlay = overlay;
         }
     }
 
     private final Out out;
-    private Stage current, overlay, beneath;
+    private Stage current, beneath;
     private boolean stopped;
 
     BleStageReporter(Out out) { this.out = out; }
 
     synchronized void report(String stage, String reason, int attempt, long nextRetryAt) {
-        if (!stopped) publish(new Stage(stage, reason, attempt, nextRetryAt));
+        if (!stopped) publish(new Stage(stage, reason, attempt, nextRetryAt, false));
     }
 
     synchronized void reportIf(BooleanSupplier stillCurrent, String stage, String reason, int attempt, long nextRetryAt) {
-        if (!stopped && stillCurrent.getAsBoolean()) publish(new Stage(stage, reason, attempt, nextRetryAt));
+        if (!stopped && stillCurrent.getAsBoolean()) publish(new Stage(stage, reason, attempt, nextRetryAt, false));
     }
 
+    /** An overlay still on display (even one whose scan already ended with nothing to
+     *  restore) is never what a later overlay covers. */
     synchronized void beginOverlay(String stage, String reason, int attempt, long nextRetryAt) {
         if (stopped) return;
-        Stage covered = current == overlay ? beneath : current;
-        overlay = new Stage(stage, reason, attempt, nextRetryAt);
-        publish(overlay);
+        Stage covered = shownOverlay() ? beneath : current;
+        publish(new Stage(stage, reason, attempt, nextRetryAt, true));
         beneath = covered;
     }
 
     synchronized void endOverlay() {
-        Stage restore = current == overlay ? beneath : null;
-        overlay = null; beneath = null;
+        Stage restore = shownOverlay() ? beneath : null;
+        beneath = null;
         if (!stopped && restore != null) publish(restore);
     }
 
     /** Terminal: publishes the stop stage once and rejects every later report. */
     synchronized void stop(String reason) {
         if (stopped) return;
-        publish(new Stage("stopped", reason, 0, 0));
+        publish(new Stage("stopped", reason, 0, 0, false));
         stopped = true;
     }
+
+    private boolean shownOverlay() { return current != null && current.overlay; }
 
     private void publish(Stage stage) {
         current = stage;

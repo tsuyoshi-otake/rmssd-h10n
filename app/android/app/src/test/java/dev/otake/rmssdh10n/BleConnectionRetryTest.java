@@ -11,18 +11,25 @@ public class BleConnectionRetryTest {
         Event(long at, Runnable action) { this.at = at; this.action = action; }
     }
     private static final class Harness implements BleConnectionRetry.Link {
-        long now; int connects, cancels; boolean up, throwsConnect, throwsCancel;
+        long now; int connects, cancels, attempt; boolean up, throwsConnect, throwsCancel, lossyTimer;
+        double jitter; Runnable duringConnect, duringSchedule;
         String state, reason; long nextAt;
         final List<Event> events = new ArrayList<>();
         final List<String> reports = new ArrayList<>();
+        final List<String> calls = new ArrayList<>();
         final BleConnectionRetry retry = new BleConnectionRetry((delay, action) -> {
             Event e = new Event(now + delay, action); events.add(e);
-            return () -> e.cancelled = true;
-        }, this, () -> now, () -> 0);
+            if (duringSchedule != null) duringSchedule.run();
+            return () -> { if (!lossyTimer) e.cancelled = true; };
+        }, this, () -> now, () -> jitter);
         public boolean connected() { return up; }
-        public void connect() { connects++; if (throwsConnect) throw new IllegalStateException(); }
-        public void cancel() { cancels++; if (throwsCancel) throw new IllegalStateException(); }
-        public void report(String s, String r, int n, long next) { state=s; reason=r; nextAt=next; reports.add(s+"/"+r); }
+        public void connect() {
+            connects++; calls.add("connect");
+            if (duringConnect != null) duringConnect.run();
+            if (throwsConnect) throw new IllegalStateException();
+        }
+        public void cancel() { cancels++; calls.add("cancel"); if (throwsCancel) throw new IllegalStateException(); }
+        public void report(String s, String r, int n, long next) { state=s; reason=r; attempt=n; nextAt=next; reports.add(s+"/"+r); }
         void establish() { up=true; retry.connected(); }
         void lose() { up=false; retry.disconnected(); }
         void advance(long duration) {
@@ -163,5 +170,121 @@ public class BleConnectionRetryTest {
     @Test public void intentionalReconnectReplacesPassiveSdkWait() {
         Harness h=new Harness(); h.establish(); h.lose(); h.retry.reconnect("stall");
         assertEquals(1,h.connects); assertEquals(1,h.pending());
+    }
+
+    // The SDK ignores connectToDevice unless its session is closed (BDBleApiImpl 6.16.1), so
+    // every intentional connect over a possibly parked or pending session cancels it first.
+    @Test public void reconnectCancelsTheParkedSdkSessionBeforeConnecting() {
+        Harness h=new Harness(); h.establish(); h.lose(); h.retry.reconnect("rebond");
+        assertEquals(List.of("cancel","connect"),h.calls);
+    }
+
+    @Test public void reconnectAfterTheSettleFiredReplacesThatConnectInsteadOfStackingOnIt() {
+        Harness h=new Harness(); h.establish(); h.up=false; h.retry.restart("rebond",45_000);
+        h.advance(45_000); assertEquals(List.of("cancel","connect"),h.calls);
+        h.retry.reconnect("rebond");
+        assertEquals(List.of("cancel","connect","cancel","connect"),h.calls);
+        assertEquals("connecting/rebond",h.reports.get(h.reports.size()-1)); assertEquals(1,h.pending());
+    }
+
+    @Test public void adapterRestartCancelsTheParkedSessionFirst() {
+        Harness h=new Harness(); h.establish(); h.lose(); h.retry.adapterRestarted();
+        assertEquals(List.of("cancel","connect"),h.calls); assertEquals("connecting/bt_on",h.reports.get(h.reports.size()-1));
+    }
+
+    @Test public void adapterRestartStaysHaltedWhileTheCancelStillFails() {
+        Harness h=new Harness(); h.throwsCancel=true; h.retry.request("initial"); h.advance(60_000);
+        h.retry.adapterRestarted();
+        assertEquals(1,h.connects); assertEquals("needs_action",h.state); assertEquals(0,h.pending());
+    }
+
+    @Test public void reconnectLeavesAHaltAlone() {
+        Harness h=new Harness(); h.throwsCancel=true; h.retry.request("initial"); h.advance(60_000);
+        int cancels=h.cancels; h.retry.reconnect("rebond");
+        assertEquals(cancels,h.cancels); assertEquals(1,h.connects);
+    }
+
+    @Test public void connectedSeenAfterTheLinkWasMarkedDownAgainIsStale() {
+        Harness h=new Harness(); h.establish(); h.up=false; h.retry.restart("stall",3_000);
+        h.retry.connected();   // queued before the restart's markLinkDown
+        assertFalse(h.reports.subList(1,h.reports.size()).contains("connected/link_ready"));
+        assertEquals("connecting/stall",h.reports.get(h.reports.size()-1)); assertEquals(63_000,h.nextAt);
+        h.advance(3_000); assertEquals(1,h.connects); assertEquals("connecting",h.state);
+    }
+
+    @Test public void aStaleConnectedShowsTheOwnersStageAgain() {
+        Harness h=new Harness(); h.retry.request("initial"); int shown=h.reports.size();
+        h.up=true; h.up=false;   // the recording lane may have shown this short-lived link
+        h.retry.connected();
+        assertEquals(shown+1,h.reports.size()); assertEquals("connecting/initial",h.reports.get(shown));
+        assertEquals(60_000,h.nextAt); assertEquals(1,h.pending()); assertEquals(1,h.connects);
+    }
+
+    @Test public void aStaleConnectedLeavesAnUpLinkToItsOwnLossReport() {
+        Harness h=new Harness(); h.establish(); int shown=h.reports.size();
+        h.up=false; h.retry.connected();
+        assertEquals(shown,h.reports.size());
+        h.retry.disconnected(); assertEquals("connecting/sdk_reconnect",h.reports.get(h.reports.size()-1));
+    }
+
+    @Test public void requestOwnsALinkTheSdkOpenedBeforeItsCallbackWasDrained() {
+        Harness h=new Harness(); h.retry.request("initial"); h.advance(60_000);
+        h.up=true; h.advance(40_000);   // backoff fires while deviceConnected is still queued
+        assertEquals(1,h.connects); assertEquals("connected/link_ready",h.reports.get(h.reports.size()-1));
+        h.lose(); assertEquals("connecting/sdk_reconnect",h.reports.get(h.reports.size()-1)); assertEquals(1,h.pending());
+    }
+
+    @Test public void backoffDoublesFromThirtySecondsUpToFourMinutes() {
+        Harness h=new Harness(); h.retry.request("initial");
+        for (long backoff : new long[]{30_000,60_000,120_000,240_000,240_000}) {
+            h.advance(60_000); assertEquals("retry_wait",h.state); assertEquals(h.now+backoff,h.nextAt);
+            h.advance(backoff); assertEquals("connecting",h.state);
+        }
+    }
+
+    @Test public void jitterAddsAtMostAQuarterOfTheBackoff() {
+        Harness h=new Harness(); h.jitter=7; h.retry.request("initial");
+        h.advance(60_000); assertEquals(60_000+37_500,h.nextAt);
+        h.jitter=-3; h.advance(37_500); h.advance(60_000); assertEquals(h.now+60_000,h.nextAt);
+    }
+
+    @Test public void attemptCountSaturatesAtTwenty() {
+        Harness h=new Harness(); h.retry.request("initial");
+        for (int i=0;i<30;i++) h.advance(300_000);   // a deadline plus the longest backoff per round
+        assertEquals(20,h.attempt);
+    }
+
+    @Test public void adapterRestartLeavesALinkTheSdkAlreadyOpenedToItsQueuedCallback() {
+        Harness h=new Harness(); h.retry.request("initial"); int shown=h.reports.size();
+        h.up=true;   // deviceConnected is still queued behind the adapter broadcast
+        h.retry.adapterRestarted();
+        assertEquals(List.of("connect"),h.calls); assertEquals(shown,h.reports.size());
+        h.retry.connected(); assertEquals("connected/link_ready",h.reports.get(h.reports.size()-1));
+    }
+
+    @Test public void nothingReachesTheSdkOrTheDisplayAfterStop() {
+        Harness h=new Harness(); h.retry.request("initial"); h.retry.stop(); int shown=h.reports.size();
+        h.retry.request("again"); h.retry.reconnect("rebond"); h.retry.adapterRestarted(); h.retry.restart("stall",3_000);
+        h.up=true; h.retry.connected(); h.up=false; h.retry.disconnected(); h.advance(1_000_000);
+        assertEquals(List.of("connect"),h.calls); assertEquals(shown,h.reports.size()); assertEquals(0,h.pending());
+    }
+
+    @Test public void stopDuringAFailingConnectLeavesTheSdkAlone() {
+        Harness h=new Harness(); h.throwsConnect=true; h.duringConnect=h.retry::stop;   // stop runs off the control lane
+        h.retry.request("initial");
+        assertEquals(List.of("connect"),h.calls); assertEquals(0,h.pending());
+    }
+
+    @Test public void aTimerArmedWhileStopRunsIsCancelled() {
+        Harness h=new Harness(); h.duringSchedule=h.retry::stop;
+        h.retry.request("initial");
+        assertEquals(0,h.pending()); assertEquals(0,h.connects);
+    }
+
+    @Test public void aSupersededTimerThatFiresAnywayDoesNothing() {
+        Harness h=new Harness(); h.lossyTimer=true; h.retry.request("initial");   // deadline at 60 s
+        h.advance(10_000); h.retry.restart("stall",3_000);                         // its cancel is lost
+        h.advance(53_000);                                                         // past the old deadline
+        assertEquals("connecting",h.state); assertEquals(1,h.cancels); assertEquals(2,h.connects);
     }
 }
