@@ -16,7 +16,9 @@ import static org.junit.Assert.*;
  *  BleConnectionRetry and BleStageReporter, wired as PolarBle wires them (markLinkDown and the
  *  link generation, the recording-stage gate, rebond hold/reconnect, clean reconnect, adapter
  *  restart). A state is rebuilt by replaying its path and deduplicated by an abstract key
- *  (supervisor and reporter fields read by reflection, session, queues, relative times).
+ *  (supervisor and reporter fields read by reflection, session, queues, relative times); the
+ *  key must cover every field that can change a later step, or the search prunes states it
+ *  has not really seen.
  *
  *  Every state must satisfy the safety properties (see {@link Sys#check}); from every reachable
  *  state a cooperative environment must lead back to a ready link (EF ready) — automatically,
@@ -302,6 +304,9 @@ public class BleLinkModelCheckTest {
              .append(cancelFails ? 'C' : 'c').append(connectFails ? 'F' : 'f').append(scanActive ? 'N' : 'n')
              .append(rebonding ? 'R' : 'r').append(stopPublished ? 'P' : 'p');
             k.append("|r").append(phase(retry)).append(field(STOPPED, retry) ? 1 : 0).append(',').append(intField(ATTEMPT, retry));
+            long ownNextAt = (Long) get(OWN_NEXT_AT, retry);   // the stage a stale connected() shows again
+            k.append('>').append(get(OWN_STAGE, retry)).append('/').append(get(OWN_REASON, retry)).append('#')
+             .append(intField(OWN_ATTEMPT, retry)).append('@').append(ownNextAt == 0 ? 0 : ownNextAt - now);
             Timer t = armed();
             k.append("|t").append(t == null ? "-" : String.valueOf(t.at - now)).append('/').append(armedCount());
             k.append("|m").append(main).append("|e");
@@ -318,7 +323,9 @@ public class BleLinkModelCheckTest {
 
     // --- reflection on the real classes' state ------------------------------------------
     private static final Field PHASE = field(BleConnectionRetry.class, "phase"), STOPPED = field(BleConnectionRetry.class, "stopped"),
-            ATTEMPT = field(BleConnectionRetry.class, "attempt"),
+            ATTEMPT = field(BleConnectionRetry.class, "attempt"), OWN_STAGE = field(BleConnectionRetry.class, "stage"),
+            OWN_REASON = field(BleConnectionRetry.class, "reason"), OWN_ATTEMPT = field(BleConnectionRetry.class, "stageAttempt"),
+            OWN_NEXT_AT = field(BleConnectionRetry.class, "stageNextAt"),
             CURRENT = field(BleStageReporter.class, "current"), BENEATH = field(BleStageReporter.class, "beneath");
     private static final Class<?> STAGE_CLASS = nested(BleStageReporter.class, "Stage");
     private static final Field STAGE = field(STAGE_CLASS, "stage"), REASON = field(STAGE_CLASS, "reason"),

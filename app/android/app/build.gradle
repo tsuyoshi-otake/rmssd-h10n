@@ -26,6 +26,11 @@ android {
         // android.util.Log etc. are stubs that throw in JVM unit tests; return defaults
         // (no-op) so pure logic that happens to log is testable. org.json stays real (see deps).
         unitTests.returnDefaultValues = true
+        // BleLinkModelCheckTest depth: ./gradlew :app:testDebugUnitTest -Dble.mc.depth=13
+        unitTests.all {
+            def depth = System.getProperty('ble.mc.depth')
+            if (depth) { systemProperty 'ble.mc.depth', depth; maxHeapSize = '8g' }
+        }
     }
 }
 
