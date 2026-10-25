@@ -1579,12 +1579,18 @@
         device_selection_required: '設定から接続するH10を選択してください',
         storage_unavailable: '履歴の保存先を確認してください。接続は維持し、H10内の記録を保護しています',
         foreign_recording: '別アプリのH10記録が動作中です。終了後に再接続してください',
+        foreign_slot: 'H10に別アプリの記録が残っています。そのアプリで取り出すと記録を再開できます',
         recording_anchor_missing: '時刻を確認できないH10記録を保護しています',
-        connect_retries_exhausted: 'Bluetoothとセンサーの装着を確認してください',
+        connect_cancel_failed: 'Bluetoothの接続処理を中断できませんでした。BluetoothをOFF→ONしてください',
         pftp_retries_exhausted: 'H10の記録取得に失敗しました。センサーを付け直してください',
         device_selection: '接続候補を検索しています',
         streams_settling: '接続済み。記録機能の準備を待っています',
+        pairing_required: '記録の取得にはBluetoothのペア設定が必要です。ライブ計測は継続しています',
         link_lost: '接続が切れました。自動再接続します',
+        sdk_reconnect: '接続が切れました。自動再接続しています',
+        stall: '応答のない接続を張り直しています',
+        recording_stuck: '記録を取得するため接続を張り直しています',
+        rebond: 'Bluetoothのペア設定をやり直しています',
       };
       let text = labels[c.reason] || '';
       if (c.stage === 'retry_wait' && c.nextRetryAt) {

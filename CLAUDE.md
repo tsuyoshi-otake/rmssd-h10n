@@ -119,6 +119,7 @@ app/src/app.js + app/www/index.html    ダッシュボード（esbuild: src→ww
 4. **ACCは `requestStreamSettings` で実機が出す組合せから選ぶ**（25Hz/16bit/2G優先）。ハードコードは拒否され姿勢が取れない。
 5. **再接続/teardownは自前監督**＋force-kill厳禁。`am force-stop` を**スキャン中に繰り返す**とAndroid BLEスキャナがwedge→端末再起動で解消。接続中の単発force-stopは比較的安全。
 6. **無反応リンクの段階的回復**: stream watchdog が「connected だが RR が来ない」を検知し、まず re-subscribe(nudge)→改善しなければ **有界の強制クリーン再接続**（disconnect→connect、最大3回、RR復帰でカウンタリセット）へエスカレーション。録音復元が PFTP 106 で詰まった時も **最大2回の強制再接続**で新しい bonded リンクを取り直す（`forceReconnectForRecording`）。**ただし `adb install`/force-stop 後の H10本体側 wedge は phone 側からは確実には解けない**（物理的な再装着が確実、Bluetooth OFF→ONは間欠的）→前面通知を「**H10が無反応 — センサーを付け直してください**」に切替えて再装着を促す（`MonitorService.updateNotification`）。
+7. **接続ステージの所有者**（#28）: SDKの `deviceConnected/deviceDisconnected` は**メインスレッドへ非同期post**され、**自分で取り消した接続待ち（OPENING/OPEN_PARK）でも `deviceDisconnected` が来る**（6.16.1 バイトコードで確認）。そのため (a) リンク状態と接続系ステージは `BleConnectionRetry`（制御レーン `exec` 上）だけが持ち、`link_lost` は確立済みリンクの喪失時のみ。取り消しの反響は無視。(b) 明示的な張り直し（watchdog `stall`／録音 `recording_stuck`／`rebond`）は `markLinkDown()`＋`connectionRetry.restart()` で、**コールバック到着を待たず**自前の settle タイマーで再接続する。(c) ステージ公開は `BleStageReporter` に直列化：録音レーンは `recordingStage(gen, …)`（現行の接続世代だけ公開）、選択スキャンは覆い（終了時に下の状態へ戻す）、`stop` 後は全て破棄。`sink.onStage` を直接呼ばないこと。キャンセル失敗は `needs_action/connect_cancel_failed` で停止し、SDK接続成功かBluetooth OFF→ON（`adapterRestarted`）で再開。
 
 ### オフライン穴埋め（再起動を跨ぐ復元）
 - H10本体= **単一スロット**。RR記録で **約95,000拍 ≒ 約20時間**、満杯で自動停止（上書きせず）。BLE切断中も記録継続。`PolarExerciseEntry.date`は信用不可(issue#168)→**自前クロックの start-anchor**で逆算せず前進再生。

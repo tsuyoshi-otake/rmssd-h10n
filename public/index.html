@@ -430,7 +430,6 @@
       // A transient "full-session baseline" message owns the calib slot briefly.
       if (Date.now() >= baselineMsgUntil) {
         const reasons = {
-          connect_retries_exhausted: 'Bluetoothとセンサーの装着を確認してください',
           scan_timeout: '対象のH10が見つかりません。接続先IDと距離を確認してください',
           adapter_off: 'BluetoothをONにしてください',
           pftp_retries_exhausted: 'H10の記録取得に失敗しました。センサーを付け直してください',

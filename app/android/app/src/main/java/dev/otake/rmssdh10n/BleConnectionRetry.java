@@ -4,7 +4,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
 
-/** Owns one connection deadline/retry. All events except stop run on the BLE control lane. */
+/** Owns the link lifecycle: whether the link is up, the one connection deadline/retry, and
+ *  every link-level stage it reports. All events except stop run on the BLE control lane.
+ *
+ *  The Polar SDK posts deviceDisconnected for any session leaving OPEN/OPENING/OPEN_PARK,
+ *  including the session our own deadline cancel closes. Only the loss of an established
+ *  link is therefore reported as link_lost; the echo of a cancel or an intentional restart
+ *  is ignored, because the deadline/settle timer armed with it already owns the outcome. */
 final class BleConnectionRetry {
     interface Timer { Runnable after(long delayMs, Runnable action); }
     interface Link {
@@ -21,7 +27,9 @@ final class BleConnectionRetry {
     private final AtomicLong generation = new AtomicLong();
     private volatile boolean stopped;
     private volatile Runnable cancelTimer;
-    private boolean waiting;
+    private boolean up;       // an established link, as seen on the control lane
+    private boolean waiting;  // a connect deadline, backoff or restart settle owns the next step
+    private boolean halted;   // a native request could not be cancelled; never overlap it
     private int attempt;
 
     BleConnectionRetry(Timer timer, Link link, LongSupplier clock, DoubleSupplier jitter) {
@@ -29,7 +37,7 @@ final class BleConnectionRetry {
     }
 
     void request(String reason) {
-        if (stopped || waiting || link.connected()) return;
+        if (stopped || halted || waiting || up || link.connected()) return;
         waiting = true;
         attempt = Math.min(20, attempt + 1);
         link.report("connecting", reason, attempt, clock.getAsLong() + DEADLINE_MS);
@@ -38,44 +46,73 @@ final class BleConnectionRetry {
         catch (Exception error) { failed("connect_error"); }
     }
 
-    /** SDK owns its normal automatic reconnect; supervise that wait without a duplicate request. */
+    /** SDK link loss. An established link hands over to the SDK's own automatic reconnect,
+     *  supervised by a deadline without a duplicate request. */
     void disconnected() {
-        if (stopped || waiting) return;
+        if (stopped || !up) return;
+        up = false;
+        link.report("disconnected", "link_lost", attempt, 0);
         waiting = true;
         link.report("connecting", "sdk_reconnect", attempt, clock.getAsLong() + DEADLINE_MS);
         arm(DEADLINE_MS, () -> failed("connect_timeout"));
     }
 
     void connected() {
-        waiting = false; attempt = 0;
+        if (stopped) return;
+        boolean wasUp = up;
+        up = true; waiting = false; halted = false; attempt = 0;
         clearTimer();
+        if (!wasUp) link.report("connected", "link_ready", 0, 0);
     }
 
-    /** An intentional clean disconnect has already settled before this explicit request. */
+    /** Intentional clean reconnect: tear the current link down and connect again once the
+     *  disconnect has had {@code settleMs} to settle. It never waits for the SDK's
+     *  disconnect callback, which arrives late or not at all on a wedged stack. */
+    void restart(String reason, long settleMs) {
+        if (stopped || halted) return;
+        clearTimer();
+        up = false; waiting = true;
+        link.report("connecting", reason, attempt, clock.getAsLong() + settleMs + DEADLINE_MS);
+        if (!cancelled()) return;
+        arm(settleMs, () -> { waiting = false; request(reason); });
+    }
+
+    /** Connect now; the intentional disconnect before it has already settled. */
     void reconnect(String reason) {
-        if (stopped || link.connected()) return;
+        if (stopped || up || link.connected()) return;
         clearTimer(); waiting = false;
         request(reason);
+    }
+
+    /** The Bluetooth adapter power-cycled: every native request died with it, so even a
+     *  halted supervisor may connect again, immediately instead of after the backoff. */
+    void adapterRestarted() {
+        if (stopped || up || link.connected()) return;
+        clearTimer(); waiting = false; halted = false;
+        request("bt_on");
     }
 
     private void failed(String reason) {
         if (stopped) return;
         if (link.connected()) { connected(); return; }
         clearTimer();
-        try { link.cancel(); }
-        catch (Exception error) {
-            // Do not overlap a new connect with a request whose cancellation failed.
-            waiting = false;
-            link.report("needs_action", "connect_cancel_failed", attempt, 0);
-            stop();
-            return;
-        }
-        if (stopped) return;
+        if (!cancelled()) return;
         long base = Math.min(240_000L, 30_000L << Math.min(3, Math.max(0, attempt - 1)));
         long delay = (long) (base * (1 + Math.max(0, Math.min(1, jitter.getAsDouble())) * 0.25));
         waiting = true;
         link.report("retry_wait", reason, attempt, clock.getAsLong() + delay);
         arm(delay, () -> { waiting = false; request("deadline_retry"); });
+    }
+
+    /** Cancel the pending native request. When that fails, halt instead of overlapping a new
+     *  connect with it; a later SDK connection or an adapter restart ends the halt. */
+    private boolean cancelled() {
+        try { link.cancel(); return !stopped; }
+        catch (Exception error) {
+            waiting = false; halted = true;
+            link.report("needs_action", "connect_cancel_failed", attempt, 0);
+            return false;
+        }
     }
 
     private void arm(long delay, Runnable action) {
